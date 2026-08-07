@@ -167,7 +167,7 @@
         // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
-        const bossRef = db.ref('boss_schedule'); // แก้ไข Path ให้ตรงกับ Python Back-end
+        const bossRef = db.ref('boss_schedule'); // Path เดียวกันกับ Python Back-end
 
         // --- 2. ฐานข้อมูลภาษา (i18n) ---
         const TRANSLATIONS = {
@@ -311,7 +311,6 @@
             const rawData = snapshot.val() || {};
             activeBosses = {};
             
-            // แปลงโครงสร้างข้อมูลให้สามารถใช้งานในระบบ Front-end ได้สมบูรณ์
             Object.keys(rawData).forEach(bossName => {
                 const item = rawData[bossName];
                 let spawnMs = item.spawnTimeMs;
@@ -364,7 +363,7 @@
             renderTable();
         }
 
-        // --- Audio System ---
+        // --- Audio System (ปลดล็อกผ่าน User Interaction) ---
         let audioCtx = null;
         function playAlertSound(type) {
             try {
@@ -406,8 +405,16 @@
             }
         }
 
+        // ✅ แก้ไขข้อ 5: เริ่มต้นใช้งานระบบแจ้งเตือนและ AudioContext เมื่อมีการตอบสนองจากผู้ใช้
         function initNotifications() {
             const langData = TRANSLATIONS[currentLang];
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+
             if ("Notification" in window) {
                 Notification.requestPermission().then(permission => {
                     if (permission === "granted") {
@@ -474,7 +481,7 @@
             e.target.value = val;
         });
 
-        // บันทึกเวลาลง Firebase
+        // ✅ แก้ไขข้อ 5: คำนวณเวลา killDate ให้สอดคล้องกับ Timezone ที่เลือกบน Dashboard
         document.getElementById('bossForm').addEventListener('submit', (e) => {
             e.preventDefault();
             const bossName = bossSelect.value.trim();
@@ -483,7 +490,9 @@
             const killTimeVal = killTimeInput.value.trim();
             const customNotice = parseInt(noticeInput.value) || 5;
 
+            let now = new Date();
             let killDate = new Date();
+
             if (killTimeVal) {
                 let hh = 0, mm = 0;
                 if (killTimeVal.includes(':')) {
@@ -496,8 +505,25 @@
                 }
 
                 if (!isNaN(hh) && !isNaN(mm) && hh >= 0 && hh < 24 && mm >= 0 && mm < 60) {
-                    killDate.setHours(hh, mm, 0, 0);
-                    if (killDate > new Date()) killDate.setDate(killDate.getDate() - 1);
+                    const targetTz = (currentTz && currentTz !== 'auto') ? currentTz : Intl.DateTimeFormat().resolvedOptions().timeZone;
+                    
+                    // แปลงเวลาปัจจุบันให้ตรงกับ Timezone ที่ตั้งค่าไว้
+                    const tzDateStr = new Intl.DateTimeFormat('en-US', {
+                        timeZone: targetTz,
+                        year: 'numeric', month: '2-digit', day: '2-digit'
+                    }).format(now);
+
+                    const [month, day, year] = tzDateStr.split('/');
+                    const formattedHH = String(hh).padStart(2, '0');
+                    const formattedMM = String(mm).padStart(2, '0');
+
+                    // คำนวณ ISO String สำหรับ Timezone นั้นๆ
+                    const tempDate = new Date(`${year}-${month}-${day}T${formattedHH}:${formattedMM}:00`);
+                    
+                    if (tempDate > now) {
+                        tempDate.setDate(tempDate.getDate() - 1);
+                    }
+                    killDate = tempDate;
                 } else {
                     alert(TRANSLATIONS[currentLang].invalidTimeAlert);
                     return;
@@ -508,7 +534,6 @@
             const spawnTimeMs = killDate.getTime() + (bossCd * 1000);
             const spawnDate = new Date(spawnTimeMs);
 
-            // บันทึกข้อมูลที่ตรงกับโครงสร้าง Data ของ Python Back-end
             bossRef.child(bossName).set({
                 spawn_time: spawnDate.toISOString(),
                 spawnTimeMs: spawnTimeMs,
@@ -597,20 +622,24 @@
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td class="fw-bold text-info">${bossName}</td>
-                    <td>${killTimeStr}</td>
-                    <td>${spawnTimeStr}</td>
+                    <td>${killTimeStr} น.</td>
+                    <td>${spawnTimeStr} น.</td>
                     <td><span class="badge ${badgeClass}">${countdownStr}</span></td>
-                    <td><small class="text-white-50">${data.noticeMinutes} ${langData.minUnit}</small></td>
-                    <td><button onclick="deleteBoss('${bossName}')" class="btn btn-sm btn-outline-danger">${langData.btnDelete}</button></td>
+                    <td>${data.noticeMinutes} ${langData.minUnit}</td>
+                    <td>
+                        <button class="btn btn-outline-danger btn-sm" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
+                    </td>
                 `;
                 tbody.appendChild(tr);
             });
         }
 
+        // เริ่มต้นการแสดงผล
         document.getElementById('langSelect').value = currentLang;
         document.getElementById('tzSelect').value = currentTz;
         applyLanguage();
 
+        // อัปเดตนับถอยหลังทุกๆ 1 วินาที
         setInterval(renderTable, 1000);
     </script>
 </body>
