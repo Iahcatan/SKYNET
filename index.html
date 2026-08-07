@@ -29,10 +29,8 @@
             border: 1px solid #334155;
             color: #ffffff !important;
         }
-        /* รายการตัวเลือกชื่อบอสข้างใน Dropdown สีขาว */
-        .form-select option {
-            background-color: #0f172a !important;
-            color: #ffffff !important;
+        .form-control::placeholder {
+            color: #94a3b8;
         }
         .form-control:focus, .form-select:focus {
             background-color: #0f172a !important;
@@ -67,10 +65,11 @@
             <h4 class="card-title text-warning mb-3">⏱️ บันทึกเวลาบอสตาย</h4>
             <form id="bossForm" class="row g-3">
                 <div class="col-md-4">
-                    <label class="form-label">เลือกชื่อบอส</label>
-                    <select id="bossSelect" class="form-select" required>
+                    <label class="form-label">เลือก หรือ พิมพ์ชื่อบอส</label>
+                    <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." required autocomplete="off">
+                    <datalist id="bossOptions">
                         <!-- สคริปต์จะดึงบอสทั้งหมดมาใส่ที่นี่ -->
-                    </select>
+                    </datalist>
                 </div>
                 <div class="col-md-3">
                     <label class="form-label">เวลาที่ตาย (ชั่วโมง:นาที)</label>
@@ -186,20 +185,20 @@
 
         let activeBosses = JSON.parse(localStorage.getItem('guild_boss_data') || '{}');
 
-        // เริ่มต้นโหลด Dropdown ชื่อบอส
+        // เริ่มต้นโหลด Datalist ตัวเลือกชื่อบอส
         const bossSelect = document.getElementById('bossSelect');
+        const bossOptions = document.getElementById('bossOptions');
         const noticeInput = document.getElementById('noticeMinutes');
 
         Object.keys(BOSS_DATABASE).forEach(bossName => {
             const option = document.createElement('option');
             option.value = bossName;
-            option.textContent = bossName;
-            bossSelect.appendChild(option);
+            bossOptions.appendChild(option);
         });
 
-        // เมื่อเลือกบอส ให้เปลี่ยนค่าเตือนล่วงหน้าตาม Default ของบอสนั้น
-        bossSelect.addEventListener('change', (e) => {
-            const selected = e.target.value;
+        // เมื่อพิมพ์หรือเลือกชื่อบอส ให้ดึงค่าเวลาเตือนล่วงหน้าอัตโนมัติ (ถ้ามีในฐานข้อมูล)
+        bossSelect.addEventListener('input', (e) => {
+            const selected = e.target.value.trim();
             if (BOSS_DATABASE[selected]) {
                 noticeInput.value = BOSS_DATABASE[selected].notice;
             }
@@ -208,7 +207,9 @@
         // บันทึกเวลาบอสตาย
         document.getElementById('bossForm').addEventListener('submit', (e) => {
             e.preventDefault();
-            const bossName = bossSelect.value;
+            const bossName = bossSelect.value.trim();
+            if (!bossName) return;
+
             const killTimeVal = document.getElementById('killTime').value;
             const customNotice = parseInt(noticeInput.value) || 5;
 
@@ -221,7 +222,8 @@
                 }
             }
 
-            const spawnTimeMs = killDate.getTime() + (BOSS_DATABASE[bossName].cd * 1000);
+            const bossCd = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;
+            const spawnTimeMs = killDate.getTime() + (bossCd * 1000);
 
             activeBosses[bossName] = {
                 killTime: format24hBangkok(killDate),
@@ -230,6 +232,7 @@
             };
 
             saveAndRender();
+            bossSelect.value = '';
             document.getElementById('killTime').value = '';
         });
 
@@ -305,10 +308,6 @@
         // อัปเดตนับถอยหลังทุกๆ 1 วินาที
         setInterval(renderTable, 1000);
         
-        // กำหนดค่าตั้งต้น
-        if (BOSS_DATABASE["Wadangka"]) {
-            noticeInput.value = BOSS_DATABASE["Wadangka"].notice;
-        }
         renderTable();
     </script>
 </body>
