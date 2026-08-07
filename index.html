@@ -172,15 +172,13 @@
             "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
-        // ฟังก์ชันแปลงเวลาเป็นเวลาประเทศไทย (Asia/Bangkok) ในรูปแบบ 24 ชั่วโมง (HH:mm:ss)
+        // ฟังก์ชันแปลงเวลาแบบบังคับ 24 ชั่วโมง (HH:mm:ss) ชัวร์ 100% ตัดปัญหา AM/PM จากเบราว์เซอร์มือถือ
         function format24hBangkok(dateObj) {
-            return new Intl.DateTimeFormat('en-GB', {
-                timeZone: 'Asia/Bangkok',
-                hour12: false,
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit'
-            }).format(dateObj);
+            const bangkokDate = new Date(dateObj.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+            const h = String(bangkokDate.getHours()).padStart(2, '0');
+            const m = String(bangkokDate.getMinutes()).padStart(2, '0');
+            const s = String(bangkokDate.getSeconds()).padStart(2, '0');
+            return `${h}:${m}:${s}`;
         }
 
         let activeBosses = JSON.parse(localStorage.getItem('guild_boss_data') || '{}');
