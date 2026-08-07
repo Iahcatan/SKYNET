@@ -54,6 +54,9 @@
             border-radius: 12px;
             padding: 12px 20px;
         }
+        footer, footer small {
+            color: #ffffff !important;
+        }
     </style>
 </head>
 <body>
@@ -74,7 +77,7 @@
                     <label class="form-label mb-0 text-nowrap" data-i18n="labelLanguage">🌐 ภาษา:</label>
                     <select id="langSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">
                         <option value="th">🇹🇭 ไทย (TH)</option>
-                        <option value="en">🇬🇧 English (EN)</option>
+                        <option value="en">English (EN)</option>
                     </select>
                 </div>
                 <!-- Timezone Selector -->
@@ -82,12 +85,45 @@
                     <label class="form-label mb-0 text-nowrap" data-i18n="labelTimezone">🌍 เขตเวลา:</label>
                     <select id="tzSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeTimezone(this.value)">
                         <option value="auto" data-i18n="tzAuto">💻 อัตโนมัติ (ตามเครื่อง)</option>
-                        <option value="Asia/Bangkok">🇹🇭 Bangkok (UTC+7)</option>
-                        <option value="Asia/Tokyo">🇯🇵 Tokyo (UTC+9)</option>
-                        <option value="Asia/Singapore">🇸🇬 Singapore (UTC+8)</option>
-                        <option value="UTC">🌐 UTC</option>
-                        <option value="Europe/London">🇬🇧 London (UTC+0/+1)</option>
-                        <option value="America/New_York">🇺🇸 New York (UTC-5/-4)</option>
+                        <option value="UTC">🌐 UTC (Universal Time)</option>
+                        
+                        <!-- Asia & Middle East -->
+                        <option value="Asia/Bangkok">🇹🇭 Bangkok, Jakarta, Hanoi (UTC+7)</option>
+                        <option value="Asia/Singapore">🇸🇬 Singapore, KL, Manila (UTC+8)</option>
+                        <option value="Asia/Hong_Kong">🇭🇰 Hong Kong, Beijing, Taipei (UTC+8)</option>
+                        <option value="Asia/Tokyo">🇯🇵 Tokyo, Seoul (UTC+9)</option>
+                        <option value="Asia/Yangon">🇲🇲 Yangon (UTC+6:30)</option>
+                        <option value="Asia/Dhaka">🇧🇩 Dhaka (UTC+6)</option>
+                        <option value="Asia/Kolkata">🇮🇳 India / Kolkata (UTC+5:30)</option>
+                        <option value="Asia/Kathmandu">🇳🇵 Nepal (UTC+5:45)</option>
+                        <option value="Asia/Tashkent">🇺🇿 Tashkent, Karachi (UTC+5)</option>
+                        <option value="Asia/Dubai">🇦🇪 Dubai, Abu Dhabi (UTC+4)</option>
+                        <option value="Asia/Tehran">🇮🇷 Tehran (UTC+3:30)</option>
+                        <option value="Asia/Riyadh">🇸🇦 Riyadh, Kuwait (UTC+3)</option>
+
+                        <!-- Europe & Africa -->
+                        <option value="Europe/London">🇬🇧 London, Dublin (UTC+0/+1)</option>
+                        <option value="Europe/Paris">🇫🇷 Paris, Berlin, Rome, Madrid (UTC+1/+2)</option>
+                        <option value="Europe/Athens">🇬🇷 Athens, Cairo, Istanbul (UTC+2/+3)</option>
+                        <option value="Europe/Moscow">🇷🇺 Moscow (UTC+3)</option>
+                        <option value="Africa/Johannesburg">🇿🇦 Johannesburg (UTC+2)</option>
+                        <option value="Africa/Lagos">🇳🇬 Lagos (UTC+1)</option>
+
+                        <!-- Americas -->
+                        <option value="America/Sao_Paulo">🇧🇷 São Paulo, Buenos Aires (UTC-3)</option>
+                        <option value="America/New_York">🇺🇸 New York, Toronto (EST - UTC-5/-4)</option>
+                        <option value="America/Chicago">🇺🇸 Chicago, Mexico City (CST - UTC-6/-5)</option>
+                        <option value="America/Denver">🇺🇸 Denver (MST - UTC-7/-6)</option>
+                        <option value="America/Los_Angeles">🇺🇸 Los Angeles, Vancouver (PST - UTC-8/-7)</option>
+                        <option value="America/Anchorage">🇺🇸 Anchorage / Alaska (UTC-9/-8)</option>
+                        <option value="Pacific/Honolulu">🇺🇸 Honolulu / Hawaii (UTC-10)</option>
+
+                        <!-- Australia & Oceania -->
+                        <option value="Australia/Perth">🇦🇺 Perth (UTC+8)</option>
+                        <option value="Australia/Adelaide">🇦🇺 Adelaide (UTC+9:30/+10:30)</option>
+                        <option value="Australia/Sydney">🇦🇺 Sydney, Melbourne (UTC+10/+11)</option>
+                        <option value="Pacific/Auckland">🇳🇿 Auckland (UTC+12/+13)</option>
+                        <option value="Pacific/Fiji">🇫🇯 Fiji (UTC+12)</option>
                     </select>
                 </div>
             </div>
@@ -110,7 +146,7 @@
                 <div class="col-md-3">
                     <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>
                     <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">
-                    <small class="text-muted" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
+                    <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
                 </div>
                 <div class="col-md-3">
                     <label class="form-label" data-i18n="labelNotice">แจ้งเตือนล่วงหน้า (นาที)</label>
@@ -148,7 +184,7 @@
             </div>
         </div>
 
-        <footer class="text-center text-muted mt-4">
+        <footer class="text-center text-white mt-4">
             <small data-i18n="footer">ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกในเบราว์เซอร์อัตโนมัติ</small>
         </footer>
     </div>
@@ -604,7 +640,7 @@
                     <td>${killTimeStr}</td>
                     <td>${spawnTimeStr}</td>
                     <td><span class="badge ${badgeClass}">${countdownStr}</span></td>
-                    <td><small class="text-muted">${data.noticeMinutes} ${langData.minUnit}</small></td>
+                    <td><small class="text-white-50">${data.noticeMinutes} ${langData.minUnit}</small></td>
                     <td><button onclick="deleteBoss('${bossName}')" class="btn btn-sm btn-outline-danger">${langData.btnDelete}</button></td>
                 `;
                 tbody.appendChild(tr);
