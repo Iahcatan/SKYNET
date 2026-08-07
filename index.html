@@ -18,12 +18,10 @@
             border: 1px solid #334155;
             border-radius: 12px;
         }
-        /* ข้อความหัวข้อสีขาว */
         .form-label {
             color: #ffffff !important;
             font-weight: 500;
         }
-        /* ช่องกรอกข้อมูลและ Dropdown สีขาว */
         .form-control, .form-select {
             background-color: #0f172a !important;
             border: 1px solid #334155;
@@ -63,7 +61,7 @@
         <!-- Form ภายในหน้าเดียว -->
         <div class="card p-4 mb-4 shadow-sm">
             <h4 class="card-title text-warning mb-3">⏱️ บันทึกเวลาบอสตาย</h4>
-            <form id="bossForm" class="row g-3">
+            <form id="bossForm" class="row g-3" autocomplete="off">
                 <div class="col-md-4">
                     <label class="form-label">เลือก หรือ พิมพ์ชื่อบอส</label>
                     <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." required autocomplete="off">
@@ -73,8 +71,8 @@
                 </div>
                 <div class="col-md-3">
                     <label class="form-label">เวลาที่ตาย (ระบบ 24 ชม.)</label>
-                    <!-- ปรับเป็น Input Text แบบบังคับ 24 ชม. ตัดปัญหา AM/PM จากเบราว์เซอร์ -->
-                    <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" maxlength="5" autocomplete="off">
+                    <!-- ปรับเพิ่ม inputmode="numeric" ป้องกันแป้นพิมพ์เสนอเวลา AM/PM -->
+                    <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" maxlength="5" autocomplete="off" inputmode="numeric" enterkeyhint="done">
                     <small class="text-muted">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
                 </div>
                 <div class="col-md-3">
@@ -119,7 +117,6 @@
     </div>
 
     <script>
-        // ข้อมูลบอสทั้งหมดตามคูลดาวน์และเวลาเตือนเดิม
         const BOSS_DATABASE = {
             "Wadangka": { cd: 9000, notice: 30 },
             "Elemental Queen": { cd: 9000, notice: 5 },
@@ -173,7 +170,6 @@
             "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
-        // ฟังก์ชันแปลงเวลาประเทศไทย (Asia/Bangkok) ระบบ 24 ชั่วโมง บังคับรูปแบบ HH:mm:ss
         function format24hBangkok(dateObj) {
             if (!dateObj || isNaN(dateObj.getTime())) return "00:00:00";
             
@@ -201,7 +197,6 @@
 
         let activeBosses = JSON.parse(localStorage.getItem('guild_boss_data') || '{}');
 
-        // เริ่มต้นโหลด Datalist ตัวเลือกชื่อบอส
         const bossSelect = document.getElementById('bossSelect');
         const bossOptions = document.getElementById('bossOptions');
         const noticeInput = document.getElementById('noticeMinutes');
@@ -213,7 +208,6 @@
             bossOptions.appendChild(option);
         });
 
-        // เมื่อพิมพ์หรือเลือกชื่อบอส ให้ดึงค่าเวลาเตือนล่วงหน้าอัตโนมัติ
         bossSelect.addEventListener('input', (e) => {
             const selected = e.target.value.trim();
             if (BOSS_DATABASE[selected]) {
@@ -221,7 +215,7 @@
             }
         });
 
-        // ระบบจัดฟอร์แมตอัตโนมัติขณะผู้ใช้พิมพ์ เช่น พิมพ์ 1730 จะกลายเป็น 17:30
+        // ฟอร์แมตเวลาอัตโนมัติขณะพิมพ์ (เช่น พิมพ์ 1730 จะเปลี่ยนเป็น 17:30 ให้ทันที)
         killTimeInput.addEventListener('input', (e) => {
             let val = e.target.value.replace(/[^0-9]/g, '');
             if (val.length >= 3) {
@@ -231,7 +225,6 @@
             }
         });
 
-        // บันทึกเวลาบอสตาย
         document.getElementById('bossForm').addEventListener('submit', (e) => {
             e.preventDefault();
             const bossName = bossSelect.value.trim();
@@ -304,7 +297,6 @@
                 return;
             }
 
-            // เรียงตามเวลาเกิดก่อน-หลัง
             keys.sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
 
             const now = new Date().getTime();
@@ -346,9 +338,7 @@
             });
         }
 
-        // อัปเดตนับถอยหลังทุกๆ 1 วินาที
         setInterval(renderTable, 1000);
-        
         renderTable();
     </script>
 </body>
