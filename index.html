@@ -18,14 +18,25 @@
             border: 1px solid #334155;
             border-radius: 12px;
         }
+        /* ข้อความหัวข้อสีขาว */
+        .form-label {
+            color: #ffffff !important;
+            font-weight: 500;
+        }
+        /* ช่องกรอกข้อมูลและ Dropdown สีขาว */
         .form-control, .form-select {
-            background-color: #0f172a;
+            background-color: #0f172a !important;
             border: 1px solid #334155;
-            color: #f8fafc;
+            color: #ffffff !important;
+        }
+        /* รายการตัวเลือกชื่อบอสข้างใน Dropdown สีขาว */
+        .form-select option {
+            background-color: #0f172a !important;
+            color: #ffffff !important;
         }
         .form-control:focus, .form-select:focus {
-            background-color: #0f172a;
-            color: #f8fafc;
+            background-color: #0f172a !important;
+            color: #ffffff !important;
             border-color: #3b82f6;
             box-shadow: none;
         }
@@ -88,7 +99,7 @@
                     <thead>
                         <tr>
                             <th>ชื่อบอส</th>
-                            <th>เวลาตาย</th>
+                            <th>เวลาตาย (เวลาไทย)</th>
                             <th>เวลาเกิด (เวลาไทย)</th>
                             <th>นับถอยหลัง</th>
                             <th>เตือนล่วงหน้า</th>
@@ -162,6 +173,15 @@
             "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
+        // ตัวเลือกสำหรับการแปลงเวลาเป็นเวลาประเทศไทย (Asia/Bangkok) แบบ 24 ชั่วโมง
+        const timeFormatOptions = { 
+            timeZone: 'Asia/Bangkok', 
+            hour12: false, 
+            hour: '2-digit', 
+            minute: '2-digit', 
+            second: '2-digit' 
+        };
+
         let activeBosses = JSON.parse(localStorage.getItem('guild_boss_data') || '{}');
 
         // เริ่มต้นโหลด Dropdown ชื่อบอส
@@ -202,7 +222,7 @@
             const spawnTimeMs = killDate.getTime() + (BOSS_DATABASE[bossName].cd * 1000);
 
             activeBosses[bossName] = {
-                killTime: killDate.toLocaleTimeString('th-TH'),
+                killTime: killDate.toLocaleTimeString('th-TH', timeFormatOptions),
                 spawnTimeMs: spawnTimeMs,
                 noticeMinutes: customNotice
             };
@@ -246,7 +266,7 @@
             keys.forEach(bossName => {
                 const data = activeBosses[bossName];
                 const spawnDate = new Date(data.spawnTimeMs);
-                const spawnTimeStr = spawnDate.toLocaleTimeString('th-TH');
+                const spawnTimeStr = spawnDate.toLocaleTimeString('th-TH', timeFormatOptions);
                 
                 const diffSec = Math.floor((data.spawnTimeMs - now) / 1000);
                 
