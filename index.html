@@ -159,21 +159,15 @@
     </div>
 
     <script>
-        // --- 1. ตั้งค่า FIREBASE CONFIG (อัปเดตด้วยคีย์จริงเรียบร้อยแล้ว) ---
+        // --- 1. ตั้งค่า FIREBASE CONFIG (เชื่อมต่อกับ Database เดียวกับ Discord Bot) ---
         const firebaseConfig = {
-            apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqVAFuWby094",
-            authDomain: "skynet-3ad44.firebaseapp.com",
-            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app",
-            projectId: "skynet-3ad44",
-            storageBucket: "skynet-3ad44.firebasestorage.app",
-            messagingSenderId: "7120270934",
-            appId: "1:7120270934:web:5e3db3f5dae6542352adf7"
+            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
         };
 
         // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
-        const bossRef = db.ref('guild_boss_data');
+        const bossRef = db.ref('boss_schedule'); // แก้ไข Path ให้ตรงกับ Python Back-end
 
         // --- 2. ฐานข้อมูลภาษา (i18n) ---
         const TRANSLATIONS = {
@@ -314,8 +308,27 @@
 
         // --- 3. ระบบ Real-time Sync จาก Firebase ---
         bossRef.on('value', (snapshot) => {
-            const data = snapshot.val();
-            activeBosses = data ? data : {};
+            const rawData = snapshot.val() || {};
+            activeBosses = {};
+            
+            // แปลงโครงสร้างข้อมูลให้สามารถใช้งานในระบบ Front-end ได้สมบูรณ์
+            Object.keys(rawData).forEach(bossName => {
+                const item = rawData[bossName];
+                let spawnMs = item.spawnTimeMs;
+                if (!spawnMs && item.spawn_time) {
+                    spawnMs = new Date(item.spawn_time).getTime();
+                }
+                const cdSec = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;
+                let killMs = item.killTimeMs || (spawnMs - (cdSec * 1000));
+                
+                activeBosses[bossName] = {
+                    spawnTimeMs: spawnMs,
+                    killTimeMs: killMs,
+                    noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
+                    notifiedNotice: item.notified_advance || item.notifiedNotice || false,
+                    notifiedSpawn: item.notifiedSpawn || false
+                };
+            });
             renderTable();
         });
 
@@ -493,12 +506,15 @@
 
             const bossCd = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;
             const spawnTimeMs = killDate.getTime() + (bossCd * 1000);
+            const spawnDate = new Date(spawnTimeMs);
 
-            // ส่งข้อมูลไปยัง Firebase Realtime DB (ทุกเครื่องจะอัปเดตทันที)
+            // บันทึกข้อมูลที่ตรงกับโครงสร้าง Data ของ Python Back-end
             bossRef.child(bossName).set({
-                killTimeMs: killDate.getTime(),
+                spawn_time: spawnDate.toISOString(),
                 spawnTimeMs: spawnTimeMs,
+                killTimeMs: killDate.getTime(),
                 noticeMinutes: customNotice,
+                notified_advance: false,
                 notifiedNotice: false,
                 notifiedSpawn: false
             });
@@ -534,7 +550,7 @@
             keys.forEach(bossName => {
                 const data = activeBosses[bossName];
                 const spawnDate = new Date(data.spawnTimeMs);
-                const killDate = new Date(data.killTimeMs || (data.spawnTimeMs - (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd * 1000 : 0)));
+                const killDate = new Date(data.killTimeMs);
                 
                 const killTimeStr = format24h(killDate);
                 const spawnTimeStr = format24h(spawnDate);
@@ -553,7 +569,6 @@
                         const notifyBody = currentLang === 'th' ? `ถึงเวลาจัดการบอสแล้ว (${spawnTimeStr})` : `Time to fight! (${spawnTimeStr})`;
                         sendBrowserNotification(notifyTitle, notifyBody);
                         
-                        // อัปเดตสถานะว่าเตือนแล้ว
                         bossRef.child(bossName).update({ notifiedSpawn: true });
                     }
 
@@ -574,8 +589,7 @@
                                 : `Spawning in approx. ${Math.ceil(diffSec / 60)} min(s) (${spawnTimeStr})`;
                             sendBrowserNotification(notifyTitle, notifyBody);
                             
-                            // อัปเดตสถานะว่าเตือนแล้ว
-                            bossRef.child(bossName).update({ notifiedNotice: true });
+                            bossRef.child(bossName).update({ notifiedNotice: true, notified_advance: true });
                         }
                     }
                 }
