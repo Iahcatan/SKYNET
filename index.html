@@ -55,7 +55,10 @@
         <!-- Header -->
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h2>⚔️ Boss Timer Dashboard (Eternal)</h2>
-            <span class="badge bg-success status-badge">🟢 Web Online</span>
+            <div>
+                <button id="notifyToggleBtn" onclick="initNotifications()" class="btn btn-warning btn-sm fw-bold me-2">🔔 เปิดระบบเสียง & แจ้งเตือน</button>
+                <span class="badge bg-success status-badge">🟢 Web Online</span>
+            </div>
         </div>
 
         <!-- Form ภายในหน้าเดียว -->
@@ -169,6 +172,85 @@
             "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
+        // --- ระบบเสียงเตือน (Web Audio API) ---
+        let audioCtx = null;
+        function playAlertSound(type) {
+            try {
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                if (type === 'notice') {
+                    // เสียงเตือนล่วงหน้า (เตือน 2 จังหวะ)
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // โน้ต D5
+                    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.15);
+
+                    setTimeout(() => {
+                        const osc2 = audioCtx.createOscillator();
+                        const gain2 = audioCtx.createGain();
+                        osc2.connect(gain2);
+                        gain2.connect(audioCtx.destination);
+                        osc2.type = 'sine';
+                        osc2.frequency.setValueAtTime(880, audioCtx.currentTime); // โน้ต A5
+                        gain2.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                        osc2.start();
+                        osc2.stop(audioCtx.currentTime + 0.2);
+                    }, 200);
+
+                } else if (type === 'spawn') {
+                    // เสียงบอสเกิด (เสียงเตือนฉุกเฉิน)
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.4);
+                    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.4);
+                }
+            } catch (e) {
+                console.log("Audio play error:", e);
+            }
+        }
+
+        // --- ระบบป๊อปอัปแจ้งเตือนเบราว์เซอร์ ---
+        function initNotifications() {
+            if ("Notification" in window) {
+                Notification.requestPermission().then(permission => {
+                    if (permission === "granted") {
+                        document.getElementById('notifyToggleBtn').className = "btn btn-outline-success btn-sm fw-bold me-2";
+                        document.getElementById('notifyToggleBtn').innerText = "🔔 เปิดการแจ้งเตือนแล้ว";
+                        playAlertSound('notice'); // เล่นเสียงทดสอบ
+                        new Notification("⚔️ ระบบแจ้งเตือนพร้อมทำงาน", {
+                            body: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว"
+                        });
+                    } else {
+                        alert("กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ");
+                    }
+                });
+            } else {
+                alert("เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือนแบบ Pop-up");
+            }
+        }
+
+        function sendBrowserNotification(title, body) {
+            if ("Notification" in window && Notification.permission === "granted") {
+                new Notification(title, {
+                    body: body,
+                    requireInteraction: true
+                });
+            }
+        }
+
         function format24hBangkok(dateObj) {
             if (!dateObj || isNaN(dateObj.getTime())) return "00:00:00";
             
@@ -216,15 +298,13 @@
 
         // ฟอร์แมตเวลาอัตโนมัติขณะพิมพ์ (รองรับทั้งพิมพ์เครื่องหมาย : เอง และพิมพ์เลขติดกัน 4 หลัก)
         killTimeInput.addEventListener('input', (e) => {
-            let val = e.target.value.replace(/[^0-9:]/g, ''); // อนุญาตให้พิมพ์ตัวเลขและเครื่องหมาย :
+            let val = e.target.value.replace(/[^0-9:]/g, '');
             
-            // ป้องกันการใส่เครื่องหมาย : ซ้ำซาก
             const parts = val.split(':');
             if (parts.length > 2) {
                 val = parts[0] + ':' + parts.slice(1).join('');
             }
             
-            // หากพิมพ์ตัวเลขติดกัน 4 หลักโดยไม่มี : จะจัดฟอร์แมตให้อัตโนมัติ (เช่น 1730 -> 17:30)
             if (!val.includes(':') && val.length === 4) {
                 val = val.slice(0, 2) + ':' + val.slice(2, 4);
             }
@@ -269,7 +349,9 @@
             activeBosses[bossName] = {
                 killTime: format24hBangkok(killDate),
                 spawnTimeMs: spawnTimeMs,
-                noticeMinutes: customNotice
+                noticeMinutes: customNotice,
+                notifiedNotice: false, // สถานะแจ้งเตือนล่วงหน้า
+                notifiedSpawn: false   // สถานะแจ้งเตือนตอนเกิด
             };
 
             saveAndRender();
@@ -321,6 +403,15 @@
                 if (diffSec <= 0) {
                     countdownStr = "⚔️ เกิดแล้ว!";
                     badgeClass = "bg-danger";
+
+                    // แจ้งเตือนเมื่อบอสเกิด (ทำงานครั้งเดียว)
+                    if (!data.notifiedSpawn) {
+                        playAlertSound('spawn');
+                        sendBrowserNotification(`⚔️ บอส ${bossName} เกิดแล้ว!`, `ถึงเวลาจัดการบอสแล้ว (${spawnTimeStr} น.)`);
+                        data.notifiedSpawn = true;
+                        localStorage.setItem('guild_boss_data', JSON.stringify(activeBosses));
+                    }
+
                 } else {
                     const h = Math.floor(diffSec / 3600);
                     const m = Math.floor((diffSec % 3600) / 60);
@@ -329,6 +420,14 @@
 
                     if (diffSec <= (data.noticeMinutes * 60)) {
                         badgeClass = "bg-warning text-dark";
+
+                        // แจ้งเตือนล่วงหน้า (ทำงานครั้งเดียว)
+                        if (!data.notifiedNotice) {
+                            playAlertSound('notice');
+                            sendBrowserNotification(`⚠️ บอส ${bossName} ใกล้เกิดแล้ว!`, `จะเกิดภายในอีกประมาณ ${Math.ceil(diffSec / 60)} นาที (${spawnTimeStr} น.)`);
+                            data.notifiedNotice = true;
+                            localStorage.setItem('guild_boss_data', JSON.stringify(activeBosses));
+                        }
                     }
                 }
 
@@ -347,6 +446,12 @@
 
         setInterval(renderTable, 1000);
         renderTable();
+
+        // ตรวจสอบสถานะการอนุญาตแจ้งเตือนเมื่อเปิดหน้าเว็บ
+        if ("Notification" in window && Notification.permission === "granted") {
+            document.getElementById('notifyToggleBtn').className = "btn btn-outline-success btn-sm fw-bold me-2";
+            document.getElementById('notifyToggleBtn').innerText = "🔔 เปิดการแจ้งเตือนแล้ว";
+        }
     </script>
 </body>
 </html>
