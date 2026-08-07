@@ -7,6 +7,11 @@
     <!-- Bootstrap 5 CSS & Google Fonts -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
+    
+    <!-- Firebase SDK (Compat Version) -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+
     <style>
         body {
             background-color: #0f172a;
@@ -65,11 +70,11 @@
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
             <h2 data-i18n="title">⚔️ Boss Timer Dashboard (Eternal)</h2>
             <div>
-                <span class="badge bg-success status-badge" data-i18n="online">🟢 Web Online</span>
+                <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
             </div>
         </div>
 
-        <!-- Settings Bar (Language, Timezone & Notification) -->
+        <!-- Settings Bar -->
         <div class="settings-bar mb-4 d-flex flex-wrap align-items-center justify-content-between gap-3">
             <div class="d-flex flex-wrap align-items-center gap-3">
                 <!-- Language Selector -->
@@ -86,44 +91,12 @@
                     <select id="tzSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeTimezone(this.value)">
                         <option value="auto" data-i18n="tzAuto">💻 อัตโนมัติ (ตามเครื่อง)</option>
                         <option value="UTC">🌐 UTC (Universal Time)</option>
-                        
-                        <!-- Asia & Middle East -->
                         <option value="Asia/Bangkok">🇹🇭 Bangkok, Jakarta, Hanoi (UTC+7)</option>
                         <option value="Asia/Singapore">🇸🇬 Singapore, KL, Manila (UTC+8)</option>
                         <option value="Asia/Hong_Kong">🇭🇰 Hong Kong, Beijing, Taipei (UTC+8)</option>
                         <option value="Asia/Tokyo">🇯🇵 Tokyo, Seoul (UTC+9)</option>
-                        <option value="Asia/Yangon">🇲🇲 Yangon (UTC+6:30)</option>
-                        <option value="Asia/Dhaka">🇧🇩 Dhaka (UTC+6)</option>
-                        <option value="Asia/Kolkata">🇮🇳 India / Kolkata (UTC+5:30)</option>
-                        <option value="Asia/Kathmandu">🇳🇵 Nepal (UTC+5:45)</option>
-                        <option value="Asia/Tashkent">🇺🇿 Tashkent, Karachi (UTC+5)</option>
-                        <option value="Asia/Dubai">🇦🇪 Dubai, Abu Dhabi (UTC+4)</option>
-                        <option value="Asia/Tehran">🇮🇷 Tehran (UTC+3:30)</option>
-                        <option value="Asia/Riyadh">🇸🇦 Riyadh, Kuwait (UTC+3)</option>
-
-                        <!-- Europe & Africa -->
                         <option value="Europe/London">🇬🇧 London, Dublin (UTC+0/+1)</option>
-                        <option value="Europe/Paris">🇫🇷 Paris, Berlin, Rome, Madrid (UTC+1/+2)</option>
-                        <option value="Europe/Athens">🇬🇷 Athens, Cairo, Istanbul (UTC+2/+3)</option>
-                        <option value="Europe/Moscow">🇷🇺 Moscow (UTC+3)</option>
-                        <option value="Africa/Johannesburg">🇿🇦 Johannesburg (UTC+2)</option>
-                        <option value="Africa/Lagos">🇳🇬 Lagos (UTC+1)</option>
-
-                        <!-- Americas -->
-                        <option value="America/Sao_Paulo">🇧🇷 São Paulo, Buenos Aires (UTC-3)</option>
-                        <option value="America/New_York">🇺🇸 New York, Toronto (EST - UTC-5/-4)</option>
-                        <option value="America/Chicago">🇺🇸 Chicago, Mexico City (CST - UTC-6/-5)</option>
-                        <option value="America/Denver">🇺🇸 Denver (MST - UTC-7/-6)</option>
-                        <option value="America/Los_Angeles">🇺🇸 Los Angeles, Vancouver (PST - UTC-8/-7)</option>
-                        <option value="America/Anchorage">🇺🇸 Anchorage / Alaska (UTC-9/-8)</option>
-                        <option value="Pacific/Honolulu">🇺🇸 Honolulu / Hawaii (UTC-10)</option>
-
-                        <!-- Australia & Oceania -->
-                        <option value="Australia/Perth">🇦🇺 Perth (UTC+8)</option>
-                        <option value="Australia/Adelaide">🇦🇺 Adelaide (UTC+9:30/+10:30)</option>
-                        <option value="Australia/Sydney">🇦🇺 Sydney, Melbourne (UTC+10/+11)</option>
-                        <option value="Pacific/Auckland">🇳🇿 Auckland (UTC+12/+13)</option>
-                        <option value="Pacific/Fiji">🇫🇯 Fiji (UTC+12)</option>
+                        <option value="America/New_York">🇺🇸 New York, Toronto (EST)</option>
                     </select>
                 </div>
             </div>
@@ -132,16 +105,14 @@
             </div>
         </div>
 
-        <!-- Form ภายในหน้าเดียว -->
+        <!-- Form -->
         <div class="card p-4 mb-4 shadow-sm">
             <h4 class="card-title text-warning mb-3" data-i18n="formTitle">⏱️ บันทึกเวลาบอสตาย</h4>
             <form id="bossForm" class="row g-3" autocomplete="off">
                 <div class="col-md-4">
                     <label class="form-label" data-i18n="labelBoss">เลือก หรือ พิมพ์ชื่อบอส</label>
                     <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." data-i18n-ph="phBoss" required autocomplete="off">
-                    <datalist id="bossOptions">
-                        <!-- สคริปต์จะดึงบอสทั้งหมดมาใส่ที่นี่ -->
-                    </datalist>
+                    <datalist id="bossOptions"></datalist>
                 </div>
                 <div class="col-md-3">
                     <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>
@@ -177,24 +148,38 @@
                             <th data-i18n="thAction">จัดการ</th>
                         </tr>
                     </thead>
-                    <tbody id="bossTableBody">
-                        <!-- แถวข้อมูลบอสจะถูกสร้างผ่าน JS -->
-                    </tbody>
+                    <tbody id="bossTableBody"></tbody>
                 </table>
             </div>
         </div>
 
         <footer class="text-center text-white mt-4">
-            <small data-i18n="footer">ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกในเบราว์เซอร์อัตโนมัติ</small>
+            <small data-i18n="footer">ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ</small>
         </footer>
     </div>
 
     <script>
-        // --- ฐานข้อมูลภาษา (i18n) ---
+        // --- 1. ตั้งค่า FIREBASE CONFIG (นำค่าจาก Firebase Console มาวางแทนที่ตรงนี้) ---
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+        const bossRef = db.ref('guild_boss_data');
+
+        // --- 2. ฐานข้อมูลภาษา (i18n) ---
         const TRANSLATIONS = {
             th: {
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
-                online: "🟢 Web Online",
+                online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 ภาษา:",
                 labelTimezone: "🌍 เขตเวลา:",
                 tzAuto: "💻 อัตโนมัติ (ตามเครื่อง)",
@@ -222,7 +207,7 @@
                 hourUnit: "ชม.",
                 minUnit: "นาที",
                 secUnit: "วินาที",
-                footer: "ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกในเบราว์เซอร์อัตโนมัติ",
+                footer: "ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ",
                 invalidTimeAlert: "กรุณากรอกเวลาให้ถูกต้องตามระบบ 24 ชั่วโมง (เช่น 08:30 หรือ 17:45)",
                 confirmClear: "คุณต้องการล้างตารางบอสทั้งหมดใช่หรือไม่?",
                 notifyReadyTitle: "⚔️ ระบบแจ้งเตือนพร้อมทำงาน",
@@ -232,7 +217,7 @@
             },
             en: {
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
-                online: "🟢 Web Online",
+                online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 Language:",
                 labelTimezone: "🌍 Timezone:",
                 tzAuto: "💻 Auto (Device Local)",
@@ -260,7 +245,7 @@
                 hourUnit: "h",
                 minUnit: "m",
                 secUnit: "s",
-                footer: "Real-time Boss Countdown System • Saved locally in browser",
+                footer: "Real-time Boss Countdown System • Synced with Cloud Database",
                 invalidTimeAlert: "Please enter time in valid 24-hour format (e.g. 08:30 or 17:45)",
                 confirmClear: "Are you sure you want to clear all boss timers?",
                 notifyReadyTitle: "⚔️ Notifications Active",
@@ -272,6 +257,7 @@
 
         let currentLang = localStorage.getItem('app_lang') || 'th';
         let currentTz = localStorage.getItem('app_tz') || 'auto';
+        let activeBosses = {};
 
         const BOSS_DATABASE = {
             "Wadangka": { cd: 9000, notice: 30 },
@@ -326,23 +312,25 @@
             "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
-        // --- ระบบแปลงภาษา UI ---
+        // --- 3. ระบบ Real-time Sync จาก Firebase ---
+        bossRef.on('value', (snapshot) => {
+            const data = snapshot.val();
+            activeBosses = data ? data : {};
+            renderTable();
+        });
+
+        // --- UI & Control Functions ---
         function applyLanguage() {
             const langData = TRANSLATIONS[currentLang];
             document.querySelectorAll('[data-i18n]').forEach(el => {
                 const key = el.getAttribute('data-i18n');
-                if (langData[key]) {
-                    el.innerText = langData[key];
-                }
+                if (langData[key]) el.innerText = langData[key];
             });
             document.querySelectorAll('[data-i18n-ph]').forEach(el => {
                 const key = el.getAttribute('data-i18n-ph');
-                if (langData[key]) {
-                    el.placeholder = langData[key];
-                }
+                if (langData[key]) el.placeholder = langData[key];
             });
             
-            // ปรับปุ่มแจ้งเตือนหากได้รับอนุญาตแล้ว
             if ("Notification" in window && Notification.permission === "granted") {
                 const notifyBtn = document.getElementById('notifyToggleBtn');
                 notifyBtn.className = "btn btn-outline-success btn-sm fw-bold";
@@ -363,16 +351,12 @@
             renderTable();
         }
 
-        // --- ระบบเสียงเตือน (Web Audio API) ---
+        // --- Audio System ---
         let audioCtx = null;
         function playAlertSound(type) {
             try {
-                if (!audioCtx) {
-                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                }
-                if (audioCtx.state === 'suspended') {
-                    audioCtx.resume();
-                }
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
 
                 const osc = audioCtx.createOscillator();
                 const gain = audioCtx.createGain();
@@ -385,7 +369,6 @@
                     gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
                     osc.start();
                     osc.stop(audioCtx.currentTime + 0.15);
-
                     setTimeout(() => {
                         const osc2 = audioCtx.createOscillator();
                         const gain2 = audioCtx.createGain();
@@ -397,7 +380,6 @@
                         osc2.start();
                         osc2.stop(audioCtx.currentTime + 0.2);
                     }, 200);
-
                 } else if (type === 'spawn') {
                     osc.type = 'sawtooth';
                     osc.frequency.setValueAtTime(880, audioCtx.currentTime);
@@ -411,7 +393,6 @@
             }
         }
 
-        // --- ระบบป๊อปอัปแจ้งเตือนเบราว์เซอร์ ---
         function initNotifications() {
             const langData = TRANSLATIONS[currentLang];
             if ("Notification" in window) {
@@ -421,9 +402,7 @@
                         notifyBtn.className = "btn btn-outline-success btn-sm fw-bold";
                         notifyBtn.innerText = langData.notifyEnabled;
                         playAlertSound('notice');
-                        new Notification(langData.notifyReadyTitle, {
-                            body: langData.notifyReadyBody
-                        });
+                        new Notification(langData.notifyReadyTitle, { body: langData.notifyReadyBody });
                     } else {
                         alert(langData.grantNotifyPrompt);
                     }
@@ -435,44 +414,26 @@
 
         function sendBrowserNotification(title, body) {
             if ("Notification" in window && Notification.permission === "granted") {
-                new Notification(title, {
-                    body: body,
-                    requireInteraction: true
-                });
+                new Notification(title, { body: body, requireInteraction: true });
             }
         }
 
-        // --- ระบบคำนวณและฟอร์แมตเวลาตาม Timezone ---
         function format24h(dateObj) {
             if (!dateObj || isNaN(dateObj.getTime())) return "00:00:00";
-            
-            const options = {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: false,
-                hourCycle: 'h23'
-            };
-
-            if (currentTz && currentTz !== 'auto') {
-                options.timeZone = currentTz;
-            }
+            const options = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, hourCycle: 'h23' };
+            if (currentTz && currentTz !== 'auto') options.timeZone = currentTz;
 
             const formatter = new Intl.DateTimeFormat('en-GB', options);
             const parts = formatter.formatToParts(dateObj);
             let h = '00', m = '00', s = '00';
-
             for (const part of parts) {
                 if (part.type === 'hour') h = part.value;
                 if (part.type === 'minute') m = part.value;
                 if (part.type === 'second') s = part.value;
             }
-
             if (h === '24') h = '00';
             return `${h}:${m}:${s}`;
         }
-
-        let activeBosses = JSON.parse(localStorage.getItem('guild_boss_data') || '{}');
 
         const bossSelect = document.getElementById('bossSelect');
         const bossOptions = document.getElementById('bossOptions');
@@ -494,19 +455,13 @@
 
         killTimeInput.addEventListener('input', (e) => {
             let val = e.target.value.replace(/[^0-9:]/g, '');
-            
             const parts = val.split(':');
-            if (parts.length > 2) {
-                val = parts[0] + ':' + parts.slice(1).join('');
-            }
-            
-            if (!val.includes(':') && val.length === 4) {
-                val = val.slice(0, 2) + ':' + val.slice(2, 4);
-            }
-            
+            if (parts.length > 2) val = parts[0] + ':' + parts.slice(1).join('');
+            if (!val.includes(':') && val.length === 4) val = val.slice(0, 2) + ':' + val.slice(2, 4);
             e.target.value = val;
         });
 
+        // บันทึกเวลาลง Firebase
         document.getElementById('bossForm').addEventListener('submit', (e) => {
             e.preventDefault();
             const bossName = bossSelect.value.trim();
@@ -529,9 +484,7 @@
 
                 if (!isNaN(hh) && !isNaN(mm) && hh >= 0 && hh < 24 && mm >= 0 && mm < 60) {
                     killDate.setHours(hh, mm, 0, 0);
-                    if (killDate > new Date()) {
-                        killDate.setDate(killDate.getDate() - 1);
-                    }
+                    if (killDate > new Date()) killDate.setDate(killDate.getDate() - 1);
                 } else {
                     alert(TRANSLATIONS[currentLang].invalidTimeAlert);
                     return;
@@ -541,35 +494,28 @@
             const bossCd = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;
             const spawnTimeMs = killDate.getTime() + (bossCd * 1000);
 
-            activeBosses[bossName] = {
+            // ส่งข้อมูลไปยัง Firebase Realtime DB (ทุกเครื่องจะอัปเดตทันที)
+            bossRef.child(bossName).set({
                 killTimeMs: killDate.getTime(),
                 spawnTimeMs: spawnTimeMs,
                 noticeMinutes: customNotice,
                 notifiedNotice: false,
                 notifiedSpawn: false
-            };
+            });
 
-            saveAndRender();
             bossSelect.value = '';
             killTimeInput.value = '';
         });
 
         function deleteBoss(bossName) {
-            delete activeBosses[bossName];
-            saveAndRender();
+            bossRef.child(bossName).remove();
         }
 
         document.getElementById('clearAllBtn').addEventListener('click', () => {
             if (confirm(TRANSLATIONS[currentLang].confirmClear)) {
-                activeBosses = {};
-                saveAndRender();
+                bossRef.remove();
             }
         });
-
-        function saveAndRender() {
-            localStorage.setItem('guild_boss_data', JSON.stringify(activeBosses));
-            renderTable();
-        }
 
         function renderTable() {
             const tbody = document.getElementById('bossTableBody');
@@ -583,7 +529,6 @@
             }
 
             keys.sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
-
             const now = new Date().getTime();
 
             keys.forEach(bossName => {
@@ -593,7 +538,6 @@
                 
                 const killTimeStr = format24h(killDate);
                 const spawnTimeStr = format24h(spawnDate);
-                
                 const diffSec = Math.floor((data.spawnTimeMs - now) / 1000);
                 
                 let countdownStr = "";
@@ -608,8 +552,9 @@
                         const notifyTitle = currentLang === 'th' ? `⚔️ บอส ${bossName} เกิดแล้ว!` : `⚔️ Boss ${bossName} Spawned!`;
                         const notifyBody = currentLang === 'th' ? `ถึงเวลาจัดการบอสแล้ว (${spawnTimeStr})` : `Time to fight! (${spawnTimeStr})`;
                         sendBrowserNotification(notifyTitle, notifyBody);
-                        data.notifiedSpawn = true;
-                        localStorage.setItem('guild_boss_data', JSON.stringify(activeBosses));
+                        
+                        // อัปเดตสถานะว่าเตือนแล้ว
+                        bossRef.child(bossName).update({ notifiedSpawn: true });
                     }
 
                 } else {
@@ -628,8 +573,9 @@
                                 ? `จะเกิดภายในอีกประมาณ ${Math.ceil(diffSec / 60)} นาที (${spawnTimeStr})`
                                 : `Spawning in approx. ${Math.ceil(diffSec / 60)} min(s) (${spawnTimeStr})`;
                             sendBrowserNotification(notifyTitle, notifyBody);
-                            data.notifiedNotice = true;
-                            localStorage.setItem('guild_boss_data', JSON.stringify(activeBosses));
+                            
+                            // อัปเดตสถานะว่าเตือนแล้ว
+                            bossRef.child(bossName).update({ notifiedNotice: true });
                         }
                     }
                 }
@@ -647,7 +593,6 @@
             });
         }
 
-        // ตั้งค่าภาษาและเขตเวลาเริ่มต้นเมื่อโหลดหน้าเว็บ
         document.getElementById('langSelect').value = currentLang;
         document.getElementById('tzSelect').value = currentTz;
         applyLanguage();
