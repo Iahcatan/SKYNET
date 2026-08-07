@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boss Timer Guild Dashboard</title>
+    <!-- Bootstrap 5 CSS & Google Fonts -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            font-family: 'Kanit', sans-serif;
+        }
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+        }
+        .form-control, .form-select {
+            background-color: #0f172a;
+            border: 1px solid #334155;
+            color: #f8fafc;
+        }
+        .form-control:focus, .form-select:focus {
+            background-color: #0f172a;
+            color: #f8fafc;
+            border-color: #3b82f6;
+            box-shadow: none;
+        }
+        .table {
+            color: #f8fafc;
+        }
+        .table-dark {
+            --bs-table-bg: #1e293b;
+            --bs-table-hover-bg: #334155;
+        }
+        .status-badge {
+            font-size: 0.85rem;
+            padding: 5px 10px;
+            border-radius: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-4">
+        <!-- Header -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2>⚔️ Boss Timer Dashboard (Guild)</h2>
+            <span class="badge bg-success status-badge">🟢 Web Online</span>
+        </div>
+
+        <!-- Form ภายในหน้าเดียว -->
+        <div class="card p-4 mb-4 shadow-sm">
+            <h4 class="card-title text-warning mb-3">⏱️ บันทึกเวลาบอสตาย</h4>
+            <form id="bossForm" class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">เลือกชื่อบอส</label>
+                    <select id="bossSelect" class="form-select" required>
+                        <!-- สคริปต์จะดึงบอสทั้งหมดมาใส่ที่นี่ -->
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">เวลาที่ตาย (ชั่วโมง:นาที)</label>
+                    <input type="time" id="killTime" class="form-control">
+                    <small class="text-muted">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">แจ้งเตือนล่วงหน้า (นาที)</label>
+                    <input type="number" id="noticeMinutes" class="form-control" min="1" value="5">
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100 fw-bold">⚔️ บันทึกเวลา</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- ตารางแสดงผลเวลาบอส -->
+        <div class="card p-4 shadow-sm">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4 class="card-title text-info mb-0">📜 ตารางเวลาบอสล่าสุด</h4>
+                <button id="clearAllBtn" class="btn btn-outline-danger btn-sm">ล้างตารางทั้งหมด</button>
+            </div>
+            
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th>ชื่อบอส</th>
+                            <th>เวลาตาย</th>
+                            <th>เวลาเกิด (เวลาไทย)</th>
+                            <th>นับถอยหลัง</th>
+                            <th>เตือนล่วงหน้า</th>
+                            <th>จัดการ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="bossTableBody">
+                        <!-- แถวข้อมูลบอสจะถูกสร้างผ่าน JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <footer class="text-center text-muted mt-4">
+            <small>ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกในเบราว์เซอร์อัตโนมัติ</small>
+        </footer>
+    </div>
+
+    <script>
+        // ข้อมูลบอสทั้งหมดตามคูลดาวน์และเวลาเตือนเดิม
+        const BOSS_DATABASE = {
+            "Wadangka": { cd: 9000, notice: 30 },
+            "Elemental Queen": { cd: 9000, notice: 5 },
+            "Tank": { cd: 3500, notice: 5 },
+            "Swirl Flame": { cd: 3500, notice: 5 },
+            "Maelstrom": { cd: 3500, notice: 5 },
+            "Twister": { cd: 3500, notice: 5 },
+            "Bigmama": { cd: 172800, notice: 30 },
+            "Chief Magief": { cd: 1800, notice: 5 },
+            "Faith": { cd: 21180, notice: 30 },
+            "Apapa": { cd: 900, notice: 5 },
+            "Corrupt Forest Keeper": { cd: 3480, notice: 5 },
+            "Recluse": { cd: 40980, notice: 30 },
+            "Blackskull": { cd: 3410, notice: 5 },
+            "Sleepy Kooii": { cd: 1200, notice: 5 },
+            "Awaken Kooii": { cd: 3780, notice: 5 },
+            "Eeheehee": { cd: 4008, notice: 5 },
+            "Ooheeheek": { cd: 4083, notice: 5 },
+            "Oohehe": { cd: 3908, notice: 5 },
+            "Guardian Imp": { cd: 3780, notice: 5 },
+            "Devilang": { cd: 19980, notice: 30 },
+            "Blackjuno": { cd: 2100, notice: 5 },
+            "Blacksky": { cd: 2100, notice: 5 },
+            "Red Fox": { cd: 1200, notice: 5 },
+            "7tailfox": { cd: 1200, notice: 5 },
+            "777Tailfox": { cd: 1800, notice: 5 },
+            "Sunrise Flower": { cd: 1200, notice: 5 },
+            "Magma Senior Thief": { cd: 1200, notice: 5 },
+            "Bbinikjoe": { cd: 1200, notice: 5 },
+            "Bigmouse": { cd: 1200, notice: 5 },
+            "Caligo": { cd: 604800, notice: 60 },
+            "Poison Root Flower": { cd: 1690, notice: 5 },
+            "Contaminated Queen Bee": { cd: 1680, notice: 5 },
+            "Rotten Pudding": { cd: 1800, notice: 5 },
+            "Swamp Flower Monster": { cd: 1800, notice: 5 },
+            "Ukpana": { cd: 172800, notice: 30 },
+            "Darlene the Witch": { cd: 259200, notice: 30 },
+            "Illust": { cd: 259200, notice: 30 },
+            "Actaemon": { cd: 21600, notice: 30 },
+            "Aiyo's Protector": { cd: 259200, notice: 30 },
+            "Glucose": { cd: 1800, notice: 5 },
+            "Overload": { cd: 1792, notice: 5 },
+            "Soul Lich": { cd: 87300, notice: 30 },
+            "Platanista": { cd: 604800, notice: 60 },
+            "Barslaf": { cd: 172800, notice: 30 },
+            "Billiard": { cd: 28503, notice: 5 },
+            "Shaaack": { cd: 1800, notice: 5 },
+            "Suuuk": { cd: 1200, notice: 5 },
+            "Sususuk": { cd: 1200, notice: 5 },
+            "sandgrave": { cd: 1200, notice: 5 },
+            "Elder Beholder": { cd: 1200, notice: 5 }
+        };
+
+        let activeBosses = JSON.parse(localStorage.getItem('guild_boss_data') || '{}');
+
+        // เริ่มต้นโหลด Dropdown ชื่อบอส
+        const bossSelect = document.getElementById('bossSelect');
+        const noticeInput = document.getElementById('noticeMinutes');
+
+        Object.keys(BOSS_DATABASE).forEach(bossName => {
+            const option = document.createElement('option');
+            option.value = bossName;
+            option.textContent = bossName;
+            bossSelect.appendChild(option);
+        });
+
+        // เมื่อเลือกบอส ให้เปลี่ยนค่าเตือนล่วงหน้าตาม Default ของบอสนั้น
+        bossSelect.addEventListener('change', (e) => {
+            const selected = e.target.value;
+            if (BOSS_DATABASE[selected]) {
+                noticeInput.value = BOSS_DATABASE[selected].notice;
+            }
+        });
+
+        // บันทึกเวลาบอสตาย
+        document.getElementById('bossForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const bossName = bossSelect.value;
+            const killTimeVal = document.getElementById('killTime').value;
+            const customNotice = parseInt(noticeInput.value) || 5;
+
+            let killDate = new Date();
+            if (killTimeVal) {
+                const [hh, mm] = killTimeVal.split(':').map(Number);
+                killDate.setHours(hh, mm, 0, 0);
+                if (killDate > new Date()) {
+                    killDate.setDate(killDate.getDate() - 1);
+                }
+            }
+
+            const spawnTimeMs = killDate.getTime() + (BOSS_DATABASE[bossName].cd * 1000);
+
+            activeBosses[bossName] = {
+                killTime: killDate.toLocaleTimeString('th-TH'),
+                spawnTimeMs: spawnTimeMs,
+                noticeMinutes: customNotice
+            };
+
+            saveAndRender();
+            document.getElementById('killTime').value = '';
+        });
+
+        function deleteBoss(bossName) {
+            delete activeBosses[bossName];
+            saveAndRender();
+        }
+
+        document.getElementById('clearAllBtn').addEventListener('click', () => {
+            if (confirm('คุณต้องการล้างตารางบอสทั้งหมดใช่หรือไม่?')) {
+                activeBosses = {};
+                saveAndRender();
+            }
+        });
+
+        function saveAndRender() {
+            localStorage.setItem('guild_boss_data', JSON.stringify(activeBosses));
+            renderTable();
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('bossTableBody');
+            tbody.innerHTML = '';
+
+            const keys = Object.keys(activeBosses);
+            if (keys.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-3">📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ</td></tr>`;
+                return;
+            }
+
+            // เรียงตามเวลาเกิดก่อน-หลัง
+            keys.sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
+
+            const now = new Date().getTime();
+
+            keys.forEach(bossName => {
+                const data = activeBosses[bossName];
+                const spawnDate = new Date(data.spawnTimeMs);
+                const spawnTimeStr = spawnDate.toLocaleTimeString('th-TH');
+                
+                const diffSec = Math.floor((data.spawnTimeMs - now) / 1000);
+                
+                let countdownStr = "";
+                let badgeClass = "bg-primary";
+
+                if (diffSec <= 0) {
+                    countdownStr = "⚔️ เกิดแล้ว!";
+                    badgeClass = "bg-danger";
+                } else {
+                    const h = Math.floor(diffSec / 3600);
+                    const m = Math.floor((diffSec % 3600) / 60);
+                    const s = diffSec % 60;
+                    countdownStr = `⏳ ${h > 0 ? h + ' ชม. ' : ''}${m} นาที ${s} วินาที`;
+
+                    if (diffSec <= (data.noticeMinutes * 60)) {
+                        badgeClass = "bg-warning text-dark";
+                    }
+                }
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="fw-bold text-info">${bossName}</td>
+                    <td>${data.killTime} น.</td>
+                    <td>${spawnTimeStr} น.</td>
+                    <td><span class="badge ${badgeClass}">${countdownStr}</span></td>
+                    <td><small class="text-muted">${data.noticeMinutes} นาที</small></td>
+                    <td><button onclick="deleteBoss('${bossName}')" class="btn btn-sm btn-outline-danger">ลบ</button></td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // อัปเดตนับถอยหลังทุกๆ 1 วินาที
+        setInterval(renderTable, 1000);
+        
+        // กำหนดค่าตั้งต้น
+        if (BOSS_DATABASE["Wadangka"]) {
+            noticeInput.value = BOSS_DATABASE["Wadangka"].notice;
+        }
+        renderTable();
+    </script>
+</body>
+</html>
