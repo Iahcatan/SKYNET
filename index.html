@@ -101,7 +101,7 @@
                 </div>
             </div>
             <div>
-                <button id="notifyToggleBtn" onclick="initNotifications()" class="btn btn-warning btn-sm fw-bold" data-i18n="enableNotify">🔔 เปิดระบบเสียง & แจ้งเตือน</button>
+                <button id="notifyToggleBtn" onclick="toggleNotifications()" class="btn btn-warning btn-sm fw-bold" data-i18n="enableNotify">🔔 เปิดระบบเสียง & แจ้งเตือน</button>
             </div>
         </div>
 
@@ -178,7 +178,7 @@
                 labelTimezone: "🌍 เขตเวลา:",
                 tzAuto: "💻 อัตโนมัติ (ตามเครื่อง)",
                 enableNotify: "🔔 เปิดระบบเสียง & แจ้งเตือน",
-                notifyEnabled: "🔔 เปิดการแจ้งเตือนแล้ว",
+                disableNotify: "🔕 ปิดระบบเสียง & แจ้งเตือน",
                 formTitle: "⏱️ บันทึกเวลาบอสตาย",
                 labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
@@ -216,7 +216,7 @@
                 labelTimezone: "🌍 Timezone:",
                 tzAuto: "💻 Auto (Device Local)",
                 enableNotify: "🔔 Enable Sound & Alerts",
-                notifyEnabled: "🔔 Notifications Active",
+                disableNotify: "🔕 Disable Sound & Alerts",
                 formTitle: "⏱️ Record Boss Kill Time",
                 labelBoss: "Select or Type Boss Name",
                 phBoss: "Type to search or select...",
@@ -251,6 +251,7 @@
 
         let currentLang = localStorage.getItem('app_lang') || 'th';
         let currentTz = localStorage.getItem('app_tz') || 'auto';
+        let isNotifyEnabled = localStorage.getItem('notify_enabled') === 'true';
         let activeBosses = {};
 
         const BOSS_DATABASE = {
@@ -343,11 +344,7 @@
                 if (langData[key]) el.placeholder = langData[key];
             });
             
-            if ("Notification" in window && Notification.permission === "granted") {
-                const notifyBtn = document.getElementById('notifyToggleBtn');
-                notifyBtn.className = "btn btn-outline-success btn-sm fw-bold";
-                notifyBtn.innerText = langData.notifyEnabled;
-            }
+            updateNotifyButtonUI();
             renderTable();
         }
 
@@ -363,9 +360,26 @@
             renderTable();
         }
 
-        // --- Audio System (ปลดล็อกผ่าน User Interaction) ---
+        function updateNotifyButtonUI() {
+            const notifyBtn = document.getElementById('notifyToggleBtn');
+            const langData = TRANSLATIONS[currentLang];
+            
+            if (isNotifyEnabled) {
+                notifyBtn.className = "btn btn-outline-success btn-sm fw-bold";
+                notifyBtn.setAttribute('data-i18n', 'disableNotify');
+                notifyBtn.innerText = langData.disableNotify;
+            } else {
+                notifyBtn.className = "btn btn-warning btn-sm fw-bold";
+                notifyBtn.setAttribute('data-i18n', 'enableNotify');
+                notifyBtn.innerText = langData.enableNotify;
+            }
+        }
+
+        // --- Audio System ---
         let audioCtx = null;
         function playAlertSound(type) {
+            if (!isNotifyEnabled) return;
+            
             try {
                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -405,9 +419,19 @@
             }
         }
 
-        // ✅ แก้ไขข้อ 5: เริ่มต้นใช้งานระบบแจ้งเตือนและ AudioContext เมื่อมีการตอบสนองจากผู้ใช้
-        function initNotifications() {
+        // ระบบสลับ เปิด-ปิด แจ้งเตือน
+        function toggleNotifications() {
             const langData = TRANSLATIONS[currentLang];
+            
+            if (isNotifyEnabled) {
+                // ปิดการแจ้งเตือน
+                isNotifyEnabled = false;
+                localStorage.setItem('notify_enabled', 'false');
+                updateNotifyButtonUI();
+                return;
+            }
+
+            // เปิดการแจ้งเตือน
             if (!audioCtx) {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             }
@@ -418,9 +442,9 @@
             if ("Notification" in window) {
                 Notification.requestPermission().then(permission => {
                     if (permission === "granted") {
-                        const notifyBtn = document.getElementById('notifyToggleBtn');
-                        notifyBtn.className = "btn btn-outline-success btn-sm fw-bold";
-                        notifyBtn.innerText = langData.notifyEnabled;
+                        isNotifyEnabled = true;
+                        localStorage.setItem('notify_enabled', 'true');
+                        updateNotifyButtonUI();
                         playAlertSound('notice');
                         new Notification(langData.notifyReadyTitle, { body: langData.notifyReadyBody });
                     } else {
@@ -433,6 +457,7 @@
         }
 
         function sendBrowserNotification(title, body) {
+            if (!isNotifyEnabled) return;
             if ("Notification" in window && Notification.permission === "granted") {
                 new Notification(title, { body: body, requireInteraction: true });
             }
@@ -481,7 +506,6 @@
             e.target.value = val;
         });
 
-        // ✅ แก้ไขข้อ 5: คำนวณเวลา killDate ให้สอดคล้องกับ Timezone ที่เลือกบน Dashboard
         document.getElementById('bossForm').addEventListener('submit', (e) => {
             e.preventDefault();
             const bossName = bossSelect.value.trim();
