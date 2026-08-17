@@ -11,6 +11,7 @@
     <!-- Firebase SDK (Compat Version) -->
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
     <style>
         body {
@@ -62,15 +63,90 @@
         footer, footer small {
             color: #ffffff !important;
         }
+        .modal-content {
+            background-color: #1e293b;
+            color: #f8fafc;
+            border: 1px solid #334155;
+        }
+        .nav-tabs .nav-link {
+            color: #94a3b8;
+            border: none;
+        }
+        .nav-tabs .nav-link.active {
+            background-color: transparent;
+            color: #38bdf8;
+            border-bottom: 3px solid #38bdf8;
+            font-weight: 600;
+        }
     </style>
 </head>
 <body>
-    <div class="container py-4">
+    <!-- Auth Container (หน้าเข้าสู่ระบบ / ลงทะเบียน) -->
+    <div id="authContainer" class="container py-5" style="max-width: 450px;">
+        <div class="card p-4 shadow-lg">
+            <h3 class="text-center text-warning mb-4" data-i18n="authTitle">⚔️ Boss Timer Access</h3>
+            
+            <ul class="nav nav-tabs nav-justified mb-3" id="authTabs" role="tablist">
+                <li class="nav-item">
+                    <button class="nav-link active" id="login-tab" data-bs-toggle="tab" data-bs-target="#loginPane" type="button" data-i18n="tabLogin">เข้าสู่ระบบ</button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" id="register-tab" data-bs-toggle="tab" data-bs-target="#registerPane" type="button" data-i18n="tabRegister">ลงทะเบียน</button>
+                </li>
+            </ul>
+
+            <div class="tab-content">
+                <!-- ฟอร์มเข้าสู่ระบบ -->
+                <div class="tab-pane fade show active" id="loginPane" role="tabpanel">
+                    <form id="loginForm" autocomplete="off">
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
+                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกชื่อผู้ใช้" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
+                            <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" required>
+                        </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="rememberMe">
+                            <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
+                    </form>
+                </div>
+
+                <!-- ฟอร์มลงทะเบียน -->
+                <div class="tab-pane fade" id="registerPane" role="tabpanel">
+                    <form id="registerForm" autocomplete="off">
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
+                            <input type="text" id="regUser" class="form-control" placeholder="ตั้งชื่อผู้ใช้" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
+                            <input type="password" id="regPass" class="form-control" placeholder="ตั้งรหัสผ่าน" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelRegCode">โค้ดสำหรับสมัคร</label>
+                            <input type="password" id="regCode" class="form-control" placeholder="กรอกโค้ดสำหรับสมัคร" required>
+                        </div>
+                        <button type="submit" class="btn btn-success w-100 fw-bold" data-i18n="btnRegister">📝 ลงทะเบียน</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Dashboard Container (ซ่อนจนกว่าจะเข้าสู่ระบบสำเร็จ) -->
+    <div id="mainDashboard" class="container py-4" style="display: none;">
         <!-- Header -->
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
             <h2 data-i18n="title">⚔️ Boss Timer Dashboard (Eternal)</h2>
-            <div>
+            <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
+                <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
+                <button onclick="openChangeCodeModal()" class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>
+                <button onclick="logout()" class="btn btn-outline-danger btn-sm" data-i18n="btnLogout">🚪 ออกจากระบบ</button>
             </div>
         </div>
 
@@ -162,8 +238,29 @@
         </footer>
     </div>
 
+    <!-- Modal เปลี่ยนโค้ดสำหรับสมัคร -->
+    <div class="modal fade" id="changeCodeModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content p-3">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title text-warning" data-i18n="modalChangeCodeTitle">🔑 เปลี่ยนโค้ดสำหรับสมัคร</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="changeCodeForm">
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelNewRegCode">โค้ดสมัครใหม่</label>
+                            <input type="text" id="newRegCodeInput" class="form-control" placeholder="กรอกโค้ดสำหรับสมัครใหม่" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnSaveCode">💾 บันทึกโค้ดใหม่</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
-        // --- 1. ตั้งค่า FIREBASE CONFIG (เชื่อมต่อกับ Database เดียวกับ Discord Bot) ---
+        // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = {
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
         };
@@ -171,11 +268,37 @@
         // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
-        const bossRef = db.ref('boss_schedule'); // Path เดียวกันกับ Python Back-end
+        const bossRef = db.ref('boss_schedule');
+        const usersRef = db.ref('users');
+        const settingsRef = db.ref('app_settings');
+
+        // โค้ดสมัครเริ่มต้น
+        let currentRegCode = "1234";
+        settingsRef.child('register_code').on('value', (snap) => {
+            if (snap.exists() && snap.val()) {
+                currentRegCode = snap.val();
+            } else {
+                settingsRef.child('register_code').set("1234");
+            }
+        });
 
         // --- 2. ฐานข้อมูลภาษา (i18n) ---
         const TRANSLATIONS = {
             th: {
+                authTitle: "⚔️ Boss Timer Access",
+                tabLogin: "เข้าสู่ระบบ",
+                tabRegister: "ลงทะเบียน",
+                labelUsername: "ชื่อผู้ใช้",
+                labelPassword: "รหัสผ่าน",
+                labelRegCode: "โค้ดสำหรับสมัคร",
+                rememberMe: "จำชื่อผู้ใช้",
+                btnLogin: "🔑 เข้าสู่ระบบ",
+                btnRegister: "📝 ลงทะเบียน",
+                btnLogout: "🚪 ออกจากระบบ",
+                btnConfigCode: "🔑 เปลี่ยนโค้ดสมัคร",
+                modalChangeCodeTitle: "🔑 เปลี่ยนโค้ดสำหรับสมัคร",
+                labelNewRegCode: "โค้ดสมัครใหม่",
+                btnSaveCode: "💾 บันทึกโค้ดใหม่",
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 ภาษา:",
@@ -211,9 +334,28 @@
                 notifyReadyTitle: "⚔️ ระบบแจ้งเตือนพร้อมทำงาน",
                 notifyReadyBody: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว",
                 noNotifySupport: "เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือนแบบ Pop-up",
-                grantNotifyPrompt: "กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ"
+                grantNotifyPrompt: "กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ",
+                errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",
+                errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
+                regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
+                errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
+                codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!"
             },
             en: {
+                authTitle: "⚔️ Boss Timer Access",
+                tabLogin: "Login",
+                tabRegister: "Register",
+                labelUsername: "Username",
+                labelPassword: "Password",
+                labelRegCode: "Registration Code",
+                rememberMe: "Remember Username",
+                btnLogin: "🔑 Login",
+                btnRegister: "📝 Register",
+                btnLogout: "🚪 Logout",
+                btnConfigCode: "🔑 Change Reg Code",
+                modalChangeCodeTitle: "🔑 Change Registration Code",
+                labelNewRegCode: "New Registration Code",
+                btnSaveCode: "💾 Save New Code",
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 Language:",
@@ -249,7 +391,12 @@
                 notifyReadyTitle: "⚔️ Notifications Active",
                 notifyReadyBody: "You will be alerted before boss spawns and when spawned.",
                 noNotifySupport: "This browser does not support Pop-up notifications.",
-                grantNotifyPrompt: "Please grant notification permissions in your browser."
+                grantNotifyPrompt: "Please grant notification permissions in your browser.",
+                errRegCodeInvalid: "Invalid Registration Code!",
+                errUserExists: "Username already exists!",
+                regSuccess: "Registration successful! Please login.",
+                errLoginFailed: "Invalid username or password!",
+                codeChangedSuccess: "Registration code updated successfully!"
             }
         };
 
@@ -311,7 +458,118 @@
             "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
-        // --- 3. ระบบ Real-time Sync จาก Firebase ---
+        // --- 3. ระบบ Authentication & Session ---
+        async function hashPassword(str) {
+            const buffer = new TextEncoder().encode(str);
+            const hash = await crypto.subtle.digest('SHA-256', buffer);
+            return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function checkAuthSession() {
+            const savedUser = localStorage.getItem('saved_username');
+            if (savedUser) {
+                document.getElementById('loginUser').value = savedUser;
+                document.getElementById('rememberMe').checked = true;
+            }
+
+            const loggedUser = sessionStorage.getItem('logged_user');
+            if (loggedUser) {
+                document.getElementById('authContainer').style.display = 'none';
+                document.getElementById('mainDashboard').style.display = 'block';
+                document.getElementById('userBadge').innerText = `👤 ${loggedUser}`;
+            } else {
+                document.getElementById('authContainer').style.display = 'block';
+                document.getElementById('mainDashboard').style.display = 'none';
+            }
+        }
+
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('regUser').value.trim();
+            const password = document.getElementById('regPass').value;
+            const regCode = document.getElementById('regCode').value.trim();
+
+            if (regCode !== currentRegCode) {
+                alert(TRANSLATIONS[currentLang].errRegCodeInvalid);
+                return;
+            }
+
+            const userKey = username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+            const snap = await usersRef.child(userKey).once('value');
+            if (snap.exists()) {
+                alert(TRANSLATIONS[currentLang].errUserExists);
+                return;
+            }
+
+            const pwdHash = await hashPassword(password);
+            await usersRef.child(userKey).set({
+                username: username,
+                password: pwdHash,
+                createdAt: new Date().toISOString()
+            });
+
+            alert(TRANSLATIONS[currentLang].regSuccess);
+            document.getElementById('registerForm').reset();
+            const loginTab = new bootstrap.Tab(document.getElementById('login-tab'));
+            loginTab.show();
+        });
+
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('loginUser').value.trim();
+            const password = document.getElementById('loginPass').value;
+            const rememberMe = document.getElementById('rememberMe').checked;
+
+            const userKey = username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+            const snap = await usersRef.child(userKey).once('value');
+
+            if (!snap.exists()) {
+                alert(TRANSLATIONS[currentLang].errLoginFailed);
+                return;
+            }
+
+            const userData = snap.val();
+            const pwdHash = await hashPassword(password);
+
+            if (userData.password !== pwdHash) {
+                alert(TRANSLATIONS[currentLang].errLoginFailed);
+                return;
+            }
+
+            if (rememberMe) {
+                localStorage.setItem('saved_username', username);
+            } else {
+                localStorage.removeItem('saved_username');
+            }
+
+            sessionStorage.setItem('logged_user', userData.username);
+            checkAuthSession();
+        });
+
+        function logout() {
+            sessionStorage.removeItem('logged_user');
+            checkAuthSession();
+        }
+
+        function openChangeCodeModal() {
+            const modal = new bootstrap.Modal(document.getElementById('changeCodeModal'));
+            document.getElementById('newRegCodeInput').value = currentRegCode;
+            modal.show();
+        }
+
+        document.getElementById('changeCodeForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const newCode = document.getElementById('newRegCodeInput').value.trim();
+            if (newCode) {
+                await settingsRef.child('register_code').set(newCode);
+                alert(TRANSLATIONS[currentLang].codeChangedSuccess);
+                const modalEl = document.getElementById('changeCodeModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                if (modal) modal.hide();
+            }
+        });
+
+        // --- 4. ระบบ Real-time Sync จาก Firebase ---
         bossRef.on('value', (snapshot) => {
             const rawData = snapshot.val() || {};
             activeBosses = {};
@@ -428,14 +686,12 @@
             const langData = TRANSLATIONS[currentLang];
             
             if (isNotifyEnabled) {
-                // ปิดการแจ้งเตือน
                 isNotifyEnabled = false;
                 localStorage.setItem('notify_enabled', 'false');
                 updateNotifyButtonUI();
                 return;
             }
 
-            // เปิดการแจ้งเตือน
             if (!audioCtx) {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             }
@@ -535,7 +791,6 @@
                 if (!isNaN(hh) && !isNaN(mm) && hh >= 0 && hh < 24 && mm >= 0 && mm < 60) {
                     const targetTz = (currentTz && currentTz !== 'auto') ? currentTz : Intl.DateTimeFormat().resolvedOptions().timeZone;
                     
-                    // แปลงเวลาปัจจุบันให้ตรงกับ Timezone ที่ตั้งค่าไว้
                     const tzDateStr = new Intl.DateTimeFormat('en-US', {
                         timeZone: targetTz,
                         year: 'numeric', month: '2-digit', day: '2-digit'
@@ -545,7 +800,6 @@
                     const formattedHH = String(hh).padStart(2, '0');
                     const formattedMM = String(mm).padStart(2, '0');
 
-                    // คำนวณ ISO String สำหรับ Timezone นั้นๆ
                     const tempDate = new Date(`${year}-${month}-${day}T${formattedHH}:${formattedMM}:00`);
                     
                     if (tempDate > now) {
@@ -587,7 +841,6 @@
         });
 
         function renderTable() {
-            // อัปเดตนาฬิกาดิจิทัลหน้าเว็บแบบ Realtime 24h ตาม Timezone
             const nowTimeObj = new Date();
             document.getElementById('liveClockDisplay').innerText = format24h(nowTimeObj);
 
@@ -669,6 +922,7 @@
         // เริ่มต้นการแสดงผล
         document.getElementById('langSelect').value = currentLang;
         document.getElementById('tzSelect').value = currentTz;
+        checkAuthSession();
         applyLanguage();
 
         // อัปเดตนับถอยหลังและนาฬิกาหน้าเว็บทุกๆ 1 วินาที
