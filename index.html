@@ -552,7 +552,8 @@
         }
 
         function openChangeCodeModal() {
-            const modal = new bootstrap.Modal(document.getElementById('changeCodeModal'));
+            const modalEl = document.getElementById('changeCodeModal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
             document.getElementById('newRegCodeInput').value = currentRegCode;
             modal.show();
         }
