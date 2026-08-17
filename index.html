@@ -99,6 +99,10 @@
                         <option value="America/New_York">🇺🇸 New York, Toronto (EST)</option>
                     </select>
                 </div>
+                <!-- Live Clock Display (24h) -->
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-dark border border-secondary text-info px-3 py-2 fs-6" id="liveClockDisplay" style="letter-spacing: 1px;">00:00:00</span>
+                </div>
             </div>
             <div>
                 <button id="notifyToggleBtn" onclick="toggleNotifications()" class="btn btn-warning btn-sm fw-bold" data-i18n="enableNotify">🔔 เปิดระบบเสียง & แจ้งเตือน</button>
@@ -583,6 +587,10 @@
         });
 
         function renderTable() {
+            // อัปเดตนาฬิกาดิจิทัลหน้าเว็บแบบ Realtime 24h ตาม Timezone
+            const nowTimeObj = new Date();
+            document.getElementById('liveClockDisplay').innerText = format24h(nowTimeObj);
+
             const tbody = document.getElementById('bossTableBody');
             tbody.innerHTML = '';
             const langData = TRANSLATIONS[currentLang];
@@ -663,7 +671,7 @@
         document.getElementById('tzSelect').value = currentTz;
         applyLanguage();
 
-        // อัปเดตนับถอยหลังทุกๆ 1 วินาที
+        // อัปเดตนับถอยหลังและนาฬิกาหน้าเว็บทุกๆ 1 วินาที
         setInterval(renderTable, 1000);
     </script>
 </body>
