@@ -225,6 +225,7 @@
                             <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>
                             <th data-i18n="thCountdown">นับถอยหลัง</th>
                             <th data-i18n="thNotice">เตือนล่วงหน้า</th>
+                            <th data-i18n="thRecordedBy">ผู้บันทึก</th>
                             <th data-i18n="thAction">จัดการ</th>
                         </tr>
                     </thead>
@@ -321,6 +322,7 @@
                 thSpawnTime: "เวลาเกิด (24 ชม.)",
                 thCountdown: "นับถอยหลัง",
                 thNotice: "เตือนล่วงหน้า",
+                thRecordedBy: "ผู้บันทึก",
                 thAction: "จัดการ",
                 emptyMsg: "📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ",
                 spawned: "⚔️ เกิดแล้ว!",
@@ -378,6 +380,7 @@
                 thSpawnTime: "Spawn Time (24h)",
                 thCountdown: "Countdown",
                 thNotice: "Notice",
+                thRecordedBy: "Recorded By",
                 thAction: "Action",
                 emptyMsg: "📌 No boss times recorded in the system",
                 spawned: "⚔️ Spawned!",
@@ -589,7 +592,8 @@
                     killTimeMs: killMs,
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
-                    notifiedSpawn: item.notifiedSpawn || false
+                    notifiedSpawn: item.notifiedSpawn || false,
+                    recordedBy: item.recordedBy || 'ไม่ระบุ' // รับค่าชื่อคนบันทึกจากฐานข้อมูล
                 };
             });
             renderTable();
@@ -775,6 +779,9 @@
             const killTimeVal = killTimeInput.value.trim();
             const customNotice = parseInt(noticeInput.value) || 5;
 
+            // ดึงชื่อผู้ใช้ที่กำลังล็อกอินอยู่ หรือถ้าหาไม่เจอให้แสดง 'ไม่ระบุ'
+            const currentUser = sessionStorage.getItem('logged_user') || 'ไม่ระบุ';
+
             let now = new Date();
             let killDate = new Date();
 
@@ -824,7 +831,8 @@
                 noticeMinutes: customNotice,
                 notified_advance: false,
                 notifiedNotice: false,
-                notifiedSpawn: false
+                notifiedSpawn: false,
+                recordedBy: currentUser // บันทึกชื่อผู้ใช้ลงฐานข้อมูล
             });
 
             bossSelect.value = '';
@@ -851,7 +859,8 @@
 
             const keys = Object.keys(activeBosses);
             if (keys.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-white py-3 fw-normal">${langData.emptyMsg}</td></tr>`;
+                // ปรับเปลี่ยน colspan ให้ครอบคลุมคอลัมน์ใหม่จาก 6 เป็น 7
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-white py-3 fw-normal">${langData.emptyMsg}</td></tr>`;
                 return;
             }
 
@@ -912,6 +921,7 @@
                     <td>${spawnTimeStr} น.</td>
                     <td><span class="badge ${badgeClass}">${countdownStr}</span></td>
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
+                    <td><small class="text-warning">👤 ${data.recordedBy}</small></td>
                     <td>
                         <button class="btn btn-outline-danger btn-sm" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
                     </td>
