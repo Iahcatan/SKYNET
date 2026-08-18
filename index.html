@@ -582,7 +582,7 @@
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: item.recordedBy || 'ไม่ระบุ' // รับค่าชื่อคนบันทึกจากฐานข้อมูล
+                    recordedBy: item.recordedBy || 'ไม่ระบุ'
                 };
             });
             renderTable();
@@ -717,6 +717,7 @@
             }
         }
 
+        // --- ส่วนที่เขียนเพิ่มให้สมบูรณ์ ---
         function format24h(dateObj) {
             if (!dateObj || isNaN(dateObj.getTime())) return "00:00:00";
             const options = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, hourCycle: 'h23' };
@@ -725,4 +726,179 @@
             const formatter = new Intl.DateTimeFormat('en-GB', options);
             const parts = formatter.formatToParts(dateObj);
             let h = '00', m = '00', s = '00';
-            for (const part of parts
+            for (const part of parts) {
+                if (part.type === 'hour') h = part.value;
+                if (part.type === 'minute') m = part.value;
+                if (part.type === 'second') s = part.value;
+            }
+            return `${h}:${m}:${s}`;
+        }
+
+        function parseInputTime(timeStr) {
+            if (!timeStr) return new Date();
+            let h, m;
+            if (timeStr.includes(':')) {
+                const parts = timeStr.split(':');
+                h = parseInt(parts[0], 10);
+                m = parseInt(parts[1], 10);
+            } else if (timeStr.length === 3) {
+                h = parseInt(timeStr.substring(0, 1), 10);
+                m = parseInt(timeStr.substring(1, 3), 10);
+            } else if (timeStr.length === 4) {
+                h = parseInt(timeStr.substring(0, 2), 10);
+                m = parseInt(timeStr.substring(2, 4), 10);
+            } else {
+                return null;
+            }
+
+            if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+
+            const now = new Date();
+            let d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
+            
+            // ป้องกันกรณีกรอกเวลาของเมื่อวาน
+            if (d.getTime() > now.getTime() + 60000) {
+                d.setDate(d.getDate() - 1);
+            }
+            return d;
+        }
+
+        document.getElementById('bossForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const bossInput = document.getElementById('bossSelect').value.trim();
+            const timeInput = document.getElementById('killTime').value.trim();
+            const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
+
+            if (!bossInput) return;
+
+            let killDate = parseInputTime(timeInput);
+            if (!killDate) {
+                alert(TRANSLATIONS[currentLang].invalidTimeAlert);
+                return;
+            }
+
+            const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
+            const spawnTimeMs = killDate.getTime() + (cdSec * 1000);
+            const currentUser = localStorage.getItem('logged_user') || 'Unknown';
+
+            await bossRef.child(bossInput).set({
+                killTimeMs: killDate.getTime(),
+                spawnTimeMs: spawnTimeMs,
+                noticeMinutes: noticeMin,
+                recordedBy: currentUser,
+                notifiedNotice: false,
+                notifiedSpawn: false
+            });
+
+            document.getElementById('bossForm').reset();
+            document.getElementById('noticeMinutes').value = 5;
+        });
+
+        function deleteBoss(bossName) {
+            bossRef.child(bossName).remove();
+        }
+
+        document.getElementById('clearAllBtn').addEventListener('click', async () => {
+            if (confirm(TRANSLATIONS[currentLang].confirmClear)) {
+                await bossRef.remove();
+            }
+        });
+
+        function renderTable() {
+            const tbody = document.getElementById('bossTableBody');
+            tbody.innerHTML = '';
+            const langData = TRANSLATIONS[currentLang];
+            const sortedBosses = Object.keys(activeBosses).sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
+
+            if (sortedBosses.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
+                return;
+            }
+
+            sortedBosses.forEach(bossName => {
+                const data = activeBosses[bossName];
+                const tr = document.createElement('tr');
+                const killTimeStr = format24h(new Date(data.killTimeMs));
+                const spawnTimeStr = format24h(new Date(data.spawnTimeMs));
+                
+                tr.innerHTML = `
+                    <td class="fw-bold text-warning">${bossName}</td>
+                    <td>${killTimeStr}</td>
+                    <td class="text-info">${spawnTimeStr}</td>
+                    <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
+                    <td>${data.noticeMinutes} ${langData.minUnit}</td>
+                    <td><span class="badge bg-secondary">${data.recordedBy}</span></td>
+                    <td>
+                        <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+            updateCountdowns();
+        }
+
+        function updateCountdowns() {
+            const nowMs = new Date().getTime();
+            document.getElementById('liveClockDisplay').innerText = format24h(new Date());
+
+            Object.keys(activeBosses).forEach(bossName => {
+                const data = activeBosses[bossName];
+                const diffMs = data.spawnTimeMs - nowMs;
+                const cdCell = document.getElementById(`cd-${bossName}`);
+                
+                if (!cdCell) return;
+
+                if (diffMs <= 0) {
+                    cdCell.innerHTML = `<span class="text-success">${TRANSLATIONS[currentLang].spawned}</span>`;
+                    if (!data.notifiedSpawn) {
+                        playAlertSound('spawn');
+                        sendBrowserNotification(`⚔️ ${bossName} เกิดแล้ว!`, `บอส ${bossName} ได้เกิดแล้วในขณะนี้`);
+                        bossRef.child(bossName).update({ notifiedSpawn: true });
+                    }
+                } else {
+                    const totalSec = Math.floor(diffMs / 1000);
+                    const h = Math.floor(totalSec / 3600);
+                    const m = Math.floor((totalSec % 3600) / 60);
+                    const s = totalSec % 60;
+                    
+                    cdCell.innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                    
+                    const noticeMs = data.noticeMinutes * 60 * 1000;
+                    if (diffMs <= noticeMs && diffMs > noticeMs - 5000 && !data.notifiedNotice) {
+                         playAlertSound('notice');
+                         sendBrowserNotification(`⏳ ${bossName} ใกล้เกิด!`, `บอส ${bossName} จะเกิดในอีก ${data.noticeMinutes} นาที`);
+                         bossRef.child(bossName).update({ notifiedNotice: true });
+                    }
+                }
+            });
+        }
+
+        // --- ฟังก์ชันเริ่มต้นการทำงาน ---
+        function initApp() {
+            // โหลดรายชื่อบอสลงใน Datalist
+            const dataList = document.getElementById('bossOptions');
+            Object.keys(BOSS_DATABASE).sort().forEach(boss => {
+                const option = document.createElement('option');
+                option.value = boss;
+                dataList.appendChild(option);
+            });
+
+            // ตั้งค่า UI เบื้องต้น
+            document.getElementById('langSelect').value = currentLang;
+            document.getElementById('tzSelect').value = currentTz;
+            
+            applyLanguage();
+            
+            // !! จุดสำคัญที่แก้ปัญหาเข้าหน้าเว็บไม่ได้ !! //
+            // ตรวจสอบสถานะการล็อกอินทุกครั้งที่โหลดหน้าเว็บ
+            checkAuthSession();
+
+            // เริ่มระบบนาฬิกาและการนับถอยหลัง
+            setInterval(updateCountdowns, 1000);
+        }
+
+        // สั่งให้โค้ดเริ่มทำงานหลังจากโหลดหน้าเว็บเสร็จ
+        window.addEventListener('DOMContentLoaded', initApp);
+    </script>
+</body>
+</html>
