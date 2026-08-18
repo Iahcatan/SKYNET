@@ -178,7 +178,7 @@
         <div class="card p-4 mb-4 shadow-sm">
             <h4 class="card-title text-warning mb-3" data-i18n="formTitle">⏱️ บันทึกเวลาบอสตาย</h4>
             <form id="bossForm" class="row g-3" autocomplete="off">
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <label class="form-label" data-i18n="labelBoss">เลือก หรือ พิมพ์ชื่อบอส</label>
                     <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." data-i18n-ph="phBoss" required autocomplete="off">
                     <datalist id="bossOptions"></datalist>
@@ -188,7 +188,11 @@
                     <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">
                     <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
+                    <label class="form-label" data-i18n="labelSpTime">เพิ่มเวลาพิเศษ (นาที)</label>
+                    <input type="number" id="spTime" class="form-control" min="0" placeholder="0">
+                </div>
+                <div class="col-md-2">
                     <label class="form-label" data-i18n="labelNotice">แจ้งเตือนล่วงหน้า (นาที)</label>
                     <input type="number" id="noticeMinutes" class="form-control" min="1" value="5">
                 </div>
@@ -304,6 +308,7 @@
                 labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
+                labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
                 phKillTime: "เช่น 17:30 หรือ 1730",
                 hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",
                 labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",
@@ -372,6 +377,7 @@
                 labelBoss: "Select or Type Boss Name",
                 phBoss: "Type to search or select...",
                 labelKillTime: "Kill Time (24h Format)",
+                labelSpTime: "Special Time (mins)",
                 phKillTime: "e.g. 17:30 or 1730",
                 hintKillTime: "*Leave blank to use current time",
                 labelNotice: "Advance Notice (Mins)",
@@ -437,12 +443,10 @@
                 enableNotify: "🔔 소리 및 알림 켜기",
                 disableNotify: "🔕 소리 및 알림 끄기",
                 formTitle: "⏱️ 보스 처치 시간 기록",
-                labelBoss: "보스 เลือก หรือ พิมพ์ชื่อบอส",
-                labelBoss: "보스 เลือก หรือ พิมพ์ชื่อบอส",
-                labelBoss: "보스 เลือก หรือ พิมพ์ชื่อบอส",
                 labelBoss: "보스 선택 또는 입력",
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
+                labelSpTime: "추가 시간 (분)",
                 phKillTime: "예: 17:30 또는 1730",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
                 labelNotice: "사전 알림 (분)",
@@ -854,6 +858,7 @@
             const bossInput = document.getElementById('bossSelect').value.trim();
             const timeInput = document.getElementById('killTime').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
+            const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
 
             if (!bossInput) return;
 
@@ -864,7 +869,8 @@
             }
 
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
-            const spawnTimeMs = killDate.getTime() + (cdSec * 1000);
+            // เพิ่มเวลาพิเศษบวกเข้าไปเป็นมิลลิวินาที (spTimeMin * 60 * 1000)
+            const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
             const currentUser = localStorage.getItem('logged_user') || 'Unknown';
 
             await bossRef.child(bossInput).set({
