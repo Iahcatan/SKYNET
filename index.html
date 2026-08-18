@@ -81,6 +81,16 @@
 <body>
     <div id="authContainer" class="container py-5" style="max-width: 450px;">
         <div class="card p-4 shadow-lg">
+            
+            <!-- เพิ่มตัวเลือกภาษาสำหรับหน้า Login / Register -->
+            <div class="d-flex justify-content-end mb-2">
+                <select id="authLangSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">
+                    <option value="th">🇹🇭 ไทย (TH)</option>
+                    <option value="en">🇺🇸 English (EN)</option>
+                    <option value="ko">🇰🇷 한국어 (KO)</option>
+                </select>
+            </div>
+
             <h3 class="text-center text-warning mb-4" data-i18n="authTitle">⚔️ Boss Timer Access</h3>
             
             <ul class="nav nav-tabs nav-justified mb-3" id="authTabs" role="tablist">
@@ -700,6 +710,13 @@
         function changeLanguage(lang) {
             currentLang = lang;
             localStorage.setItem('app_lang', lang);
+
+            // อัปเดต dropdown ให้ตรงกันทั้งหน้า Login และหน้า Dashboard
+            const authLangSelect = document.getElementById('authLangSelect');
+            const langSelect = document.getElementById('langSelect');
+            if (authLangSelect) authLangSelect.value = lang;
+            if (langSelect) langSelect.value = lang;
+
             applyLanguage();
         }
 
@@ -978,6 +995,10 @@
             });
 
             document.getElementById('langSelect').value = currentLang;
+            // เพิ่มส่วนให้ dropdown หน้า login อัปเดตภาษาที่ระบบจำไว้
+            const authLangSelect = document.getElementById('authLangSelect');
+            if (authLangSelect) authLangSelect.value = currentLang;
+            
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
