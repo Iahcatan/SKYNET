@@ -97,11 +97,11 @@
                     <form id="loginForm" autocomplete="off">
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
-                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกชื่อผู้ใช้" required>
+                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกชื่อผู้ใช้" data-i18n-ph="phLoginUser" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
-                            <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" required>
+                            <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" data-i18n-ph="phLoginPass" required>
                         </div>
                         <div class="form-check mb-3">
                             <input class="form-check-input" type="checkbox" id="rememberMe">
@@ -115,15 +115,15 @@
                     <form id="registerForm" autocomplete="off">
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
-                            <input type="text" id="regUser" class="form-control" placeholder="ตั้งชื่อผู้ใช้" required>
+                            <input type="text" id="regUser" class="form-control" placeholder="ตั้งชื่อผู้ใช้" data-i18n-ph="phRegUser" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
-                            <input type="password" id="regPass" class="form-control" placeholder="ตั้งรหัสผ่าน" required>
+                            <input type="password" id="regPass" class="form-control" placeholder="ตั้งรหัสผ่าน" data-i18n-ph="phRegPass" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelRegCode">โค้ดสำหรับสมัคร</label>
-                            <input type="password" id="regCode" class="form-control" placeholder="กรอกโค้ดสำหรับสมัคร" required>
+                            <input type="password" id="regCode" class="form-control" placeholder="กรอกโค้ดสำหรับสมัคร" data-i18n-ph="phRegCode" required>
                         </div>
                         <button type="submit" class="btn btn-success w-100 fw-bold" data-i18n="btnRegister">📝 ลงทะเบียน</button>
                     </form>
@@ -237,7 +237,7 @@
                     <form id="changeCodeForm">
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelNewRegCode">โค้ดสมัครใหม่</label>
-                            <input type="text" id="newRegCodeInput" class="form-control" placeholder="กรอกโค้ดสำหรับสมัครใหม่" required>
+                            <input type="text" id="newRegCodeInput" class="form-control" placeholder="กรอกโค้ดสำหรับสมัครใหม่" data-i18n-ph="phNewRegCode" required>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnSaveCode">💾 บันทึกโค้ดใหม่</button>
                     </form>
@@ -286,6 +286,12 @@
                 modalChangeCodeTitle: "🔑 เปลี่ยนโค้ดสำหรับสมัคร",
                 labelNewRegCode: "โค้ดสมัครใหม่",
                 btnSaveCode: "💾 บันทึกโค้ดใหม่",
+                phLoginUser: "กรอกชื่อผู้ใช้",
+                phLoginPass: "กรอกรหัสผ่าน",
+                phRegUser: "ตั้งชื่อผู้ใช้",
+                phRegPass: "ตั้งรหัสผ่าน",
+                phRegCode: "กรอกโค้ดสำหรับสมัคร",
+                phNewRegCode: "กรอกโค้ดสำหรับสมัครใหม่",
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 ภาษา:",
@@ -344,6 +350,12 @@
                 modalChangeCodeTitle: "🔑 Change Registration Code",
                 labelNewRegCode: "New Registration Code",
                 btnSaveCode: "💾 Save New Code",
+                phLoginUser: "Enter username",
+                phLoginPass: "Enter password",
+                phRegUser: "Set username",
+                phRegPass: "Set password",
+                phRegCode: "Enter registration code",
+                phNewRegCode: "Enter new registration code",
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 Language:",
@@ -461,7 +473,6 @@
                 document.getElementById('rememberMe').checked = true;
             }
 
-            // เปลี่ยนมาใช้ localStorage สำหรับการล็อกอินค้าง
             const loggedUser = localStorage.getItem('logged_user');
             if (loggedUser) {
                 document.getElementById('authContainer').style.display = 'none';
@@ -532,13 +543,11 @@
                 localStorage.removeItem('saved_username');
             }
 
-            // จัดเก็บใน localStorage แทน sessionStorage เพื่อให้ล็อกอินค้างได้
             localStorage.setItem('logged_user', userData.username);
             checkAuthSession();
         });
 
         function logout() {
-            // ลบข้อมูลเมื่อกดออกจากระบบ
             localStorage.removeItem('logged_user');
             checkAuthSession();
         }
@@ -675,7 +684,6 @@
             }
         }
 
-        // ระบบสลับ เปิด-ปิด แจ้งเตือน
         function toggleNotifications() {
             const langData = TRANSLATIONS[currentLang];
             
@@ -717,7 +725,6 @@
             }
         }
 
-        // --- ส่วนที่เขียนเพิ่มให้สมบูรณ์ ---
         function format24h(dateObj) {
             if (!dateObj || isNaN(dateObj.getTime())) return "00:00:00";
             const options = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, hourCycle: 'h23' };
@@ -756,7 +763,6 @@
             const now = new Date();
             let d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
             
-            // ป้องกันกรณีกรอกเวลาของเมื่อวาน
             if (d.getTime() > now.getTime() + 60000) {
                 d.setDate(d.getDate() - 1);
             }
@@ -873,9 +879,7 @@
             });
         }
 
-        // --- ฟังก์ชันเริ่มต้นการทำงาน ---
         function initApp() {
-            // โหลดรายชื่อบอสลงใน Datalist
             const dataList = document.getElementById('bossOptions');
             Object.keys(BOSS_DATABASE).sort().forEach(boss => {
                 const option = document.createElement('option');
@@ -883,21 +887,15 @@
                 dataList.appendChild(option);
             });
 
-            // ตั้งค่า UI เบื้องต้น
             document.getElementById('langSelect').value = currentLang;
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
-            
-            // !! จุดสำคัญที่แก้ปัญหาเข้าหน้าเว็บไม่ได้ !! //
-            // ตรวจสอบสถานะการล็อกอินทุกครั้งที่โหลดหน้าเว็บ
             checkAuthSession();
 
-            // เริ่มระบบนาฬิกาและการนับถอยหลัง
             setInterval(updateCountdowns, 1000);
         }
 
-        // สั่งให้โค้ดเริ่มทำงานหลังจากโหลดหน้าเว็บเสร็จ
         window.addEventListener('DOMContentLoaded', initApp);
     </script>
 </body>
