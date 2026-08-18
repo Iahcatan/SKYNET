@@ -149,7 +149,8 @@
                     <label class="form-label mb-0 text-nowrap" data-i18n="labelLanguage">🌐 ภาษา:</label>
                     <select id="langSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">
                         <option value="th">🇹🇭 ไทย (TH)</option>
-                        <option value="en">English (EN)</option>
+                        <option value="en">🇺🇸 English (EN)</option>
+                        <option value="ko">🇰🇷 한국어 (KO)</option>
                     </select>
                 </div>
                 <div class="d-flex align-items-center gap-2">
@@ -333,7 +334,11 @@
                 errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
                 regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
                 errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
-                codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!"
+                codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",
+                spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
+                spawnNotifyBody: "บอส {boss} ได้เกิดแล้วในขณะนี้",
+                noticeNotifyTitle: "⏳ {boss} ใกล้เกิด!",
+                noticeNotifyBody: "บอส {boss} จะเกิดในอีก {min} นาที"
             },
             en: {
                 authTitle: "⚔️ Boss Timer Access",
@@ -397,7 +402,82 @@
                 errUserExists: "Username already exists!",
                 regSuccess: "Registration successful! Please login.",
                 errLoginFailed: "Invalid username or password!",
-                codeChangedSuccess: "Registration code updated successfully!"
+                codeChangedSuccess: "Registration code updated successfully!",
+                spawnNotifyTitle: "⚔️ {boss} Spawned!",
+                spawnNotifyBody: "Boss {boss} has spawned!",
+                noticeNotifyTitle: "⏳ {boss} Spawning Soon!",
+                noticeNotifyBody: "Boss {boss} will spawn in {min} minutes"
+            },
+            ko: {
+                authTitle: "⚔️ Boss Timer Access",
+                tabLogin: "로그인",
+                tabRegister: "회원가입",
+                labelUsername: "사용자 이름",
+                labelPassword: "비밀번호",
+                labelRegCode: "가입 코드",
+                rememberMe: "사용자 이름 저장",
+                btnLogin: "🔑 로그인",
+                btnRegister: "📝 회원가입",
+                btnLogout: "🚪 로그아웃",
+                btnConfigCode: "🔑 가입 코드 변경",
+                modalChangeCodeTitle: "🔑 가입 코드 변경",
+                labelNewRegCode: "새 가입 코드",
+                btnSaveCode: "💾 새 코드 저장",
+                phLoginUser: "사용자 이름을 입력하세요",
+                phLoginPass: "비밀번호를 입력하세요",
+                phRegUser: "사용자 이름 설정",
+                phRegPass: "비밀번호 설정",
+                phRegCode: "가입 코드를 입력하세요",
+                phNewRegCode: "새 가입 코드를 입력하세요",
+                title: "⚔️ Boss Timer Dashboard (Eternal)",
+                online: "🟢 실시간 동기화 활성화",
+                labelLanguage: "🌐 언어:",
+                labelTimezone: "🌍 시간대:",
+                tzAuto: "💻 자동 (기기 설정)",
+                enableNotify: "🔔 소리 및 알림 켜기",
+                disableNotify: "🔕 소리 및 알림 끄기",
+                formTitle: "⏱️ 보스 처치 시간 기록",
+                labelBoss: "보스 เลือก หรือ พิมพ์ชื่อบอส",
+                labelBoss: "보스 เลือก หรือ พิมพ์ชื่อบอส",
+                labelBoss: "보스 เลือก หรือ พิมพ์ชื่อบอส",
+                labelBoss: "보스 선택 또는 입력",
+                phBoss: "검색 또는 선택...",
+                labelKillTime: "처치 시간 (24시간 형식)",
+                phKillTime: "예: 17:30 또는 1730",
+                hintKillTime: "*현재 시간을 사용하려면 비워두세요",
+                labelNotice: "사전 알림 (분)",
+                btnSave: "⚔️ 시간 저장",
+                tableTitle: "📜 최근 보스 시간표",
+                btnClear: "전체 목록 삭제",
+                thBoss: "보스 이름",
+                thKillTime: "처치 시간 (24h)",
+                thSpawnTime: "젠 시간 (24h)",
+                thCountdown: "카운트다운",
+                thNotice: "사전 알림",
+                thRecordedBy: "기록자",
+                thAction: "관리",
+                emptyMsg: "📌 시스템에 기록된 보스 시간이 없습니다",
+                spawned: "⚔️ 젠 완료!",
+                btnDelete: "삭제",
+                hourUnit: "시간",
+                minUnit: "분",
+                secUnit: "초",
+                footer: "실시간 보스 카운트다운 시스템 • 클라우드 자동 동기화",
+                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 หรือ 17:45)",
+                confirmClear: "모든 보스 타이머를 삭제하시겠습니까?",
+                notifyReadyTitle: "⚔️ 알림 시스템 준비 완료",
+                notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",
+                noNotifySupport: "이 브라우저는 팝업 알림을 지원하지 않습니다.",
+                grantNotifyPrompt: "브라우저에서 알림 권한을 허용해주세요.",
+                errRegCodeInvalid: "가입 코드가 올바르지 않습니다!",
+                errUserExists: "이미 존재하는 사용자 이름입니다!",
+                regSuccess: "회원가입 성공! 로그인해주세요.",
+                errLoginFailed: "사용자 이름 หรือ 비밀번호가 올바르지 않습니다!",
+                codeChangedSuccess: "가입 코드가 성공적으로 변경되었습니다!",
+                spawnNotifyTitle: "⚔️ {boss} 젠 완료!",
+                spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",
+                noticeNotifyTitle: "⏳ {boss} 젠 임박!",
+                noticeNotifyBody: "보스 {boss}(이)가 {min}분 후에 젠됩니다."
             }
         };
 
@@ -858,7 +938,9 @@
                     cdCell.innerHTML = `<span class="text-success">${TRANSLATIONS[currentLang].spawned}</span>`;
                     if (!data.notifiedSpawn) {
                         playAlertSound('spawn');
-                        sendBrowserNotification(`⚔️ ${bossName} เกิดแล้ว!`, `บอส ${bossName} ได้เกิดแล้วในขณะนี้`);
+                        const title = (TRANSLATIONS[currentLang].spawnNotifyTitle || "⚔️ {boss} Spawned!").replace('{boss}', bossName);
+                        const body = (TRANSLATIONS[currentLang].spawnNotifyBody || "Boss {boss} has spawned!").replace('{boss}', bossName);
+                        sendBrowserNotification(title, body);
                         bossRef.child(bossName).update({ notifiedSpawn: true });
                     }
                 } else {
@@ -872,7 +954,9 @@
                     const noticeMs = data.noticeMinutes * 60 * 1000;
                     if (diffMs <= noticeMs && diffMs > noticeMs - 5000 && !data.notifiedNotice) {
                          playAlertSound('notice');
-                         sendBrowserNotification(`⏳ ${bossName} ใกล้เกิด!`, `บอส ${bossName} จะเกิดในอีก ${data.noticeMinutes} นาที`);
+                         const title = (TRANSLATIONS[currentLang].noticeNotifyTitle || "⏳ {boss} Spawning Soon!").replace('{boss}', bossName);
+                         const body = (TRANSLATIONS[currentLang].noticeNotifyBody || "Boss {boss} will spawn in {min} mins").replace('{boss}', bossName).replace('{min}', data.noticeMinutes);
+                         sendBrowserNotification(title, body);
                          bossRef.child(bossName).update({ notifiedNotice: true });
                     }
                 }
