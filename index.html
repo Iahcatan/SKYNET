@@ -82,7 +82,6 @@
     <div id="authContainer" class="container py-5" style="max-width: 450px;">
         <div class="card p-4 shadow-lg">
             
-            <!-- เพิ่มตัวเลือกภาษาสำหรับหน้า Login / Register -->
             <div class="d-flex justify-content-end mb-2">
                 <select id="authLangSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">
                     <option value="th">🇹🇭 ไทย (TH)</option>
@@ -180,7 +179,8 @@
                     <span class="badge bg-dark border border-secondary text-info px-3 py-2 fs-6" id="liveClockDisplay" style="letter-spacing: 1px;">00:00:00</span>
                 </div>
             </div>
-            <div>
+            <div class="d-flex gap-2">
+                <button onclick="openBotSettingsModal()" class="btn btn-outline-info btn-sm fw-bold" data-i18n="btnBotSettings">⚙️ ตั้งค่าบอท</button>
                 <button id="notifyToggleBtn" onclick="toggleNotifications()" class="btn btn-warning btn-sm fw-bold" data-i18n="enableNotify">🔔 เปิดระบบเสียง & แจ้งเตือน</button>
             </div>
         </div>
@@ -241,6 +241,7 @@
         </footer>
     </div>
 
+    <!-- Modal เปลี่ยนรหัสผ่าน -->
     <div class="modal fade" id="changeCodeModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content p-3">
@@ -261,6 +262,33 @@
         </div>
     </div>
 
+    <!-- Modal ตั้งค่า Bot Notification -->
+    <div class="modal fade" id="botSettingsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content p-3">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title text-info" data-i18n="modalBotSettingsTitle">⚙️ ตั้งค่าแจ้งเตือนบอท</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <h6 class="text-warning mb-3" data-i18n="labelVoiceLang">🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)</h6>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="ttsThToggle">
+                        <label class="form-check-label" for="ttsThToggle">🇹🇭 ภาษาไทย (TH)</label>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="ttsEnToggle">
+                        <label class="form-check-label" for="ttsEnToggle">🇺🇸 ภาษาอังกฤษ (EN)</label>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="ttsKoToggle">
+                        <label class="form-check-label" for="ttsKoToggle">🇰🇷 ภาษาเกาหลี (KO)</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = {
@@ -273,6 +301,7 @@
         const bossRef = db.ref('boss_schedule');
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
+        const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
 
         // โค้ดสมัครเริ่มต้น
         let currentRegCode = "1234";
@@ -283,6 +312,31 @@
                 settingsRef.child('register_code').set("1234");
             }
         });
+
+        // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน
+        botSettingsRef.on('value', (snap) => {
+            const data = snap.val() || {};
+            // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
+            document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
+            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
+            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
+        });
+
+        // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
+        ['ttsThToggle', 'ttsEnToggle', 'ttsKoToggle'].forEach(id => {
+            document.getElementById(id).addEventListener('change', (e) => {
+                const key = id === 'ttsThToggle' ? 'tts_th_enabled' : 
+                            id === 'ttsEnToggle' ? 'tts_en_enabled' : 'tts_ko_enabled';
+                botSettingsRef.child(key).set(e.target.checked);
+            });
+        });
+
+        // ฟังก์ชันเปิด Modal ตั้งค่า Bot
+        function openBotSettingsModal() {
+            const modalEl = document.getElementById('botSettingsModal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            modal.show();
+        }
 
         // --- 2. ฐานข้อมูลภาษา (i18n) ---
         const TRANSLATIONS = {
@@ -301,6 +355,9 @@
                 modalChangeCodeTitle: "🔑 เปลี่ยนโค้ดสำหรับสมัคร",
                 labelNewRegCode: "โค้ดสมัครใหม่",
                 btnSaveCode: "💾 บันทึกโค้ดใหม่",
+                btnBotSettings: "⚙️ ตั้งค่าบอท",
+                modalBotSettingsTitle: "⚙️ ตั้งค่าแจ้งเตือนบอท",
+                labelVoiceLang: "🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)",
                 phLoginUser: "กรอกชื่อผู้ใช้",
                 phLoginPass: "กรอกรหัสผ่าน",
                 phRegUser: "ตั้งชื่อผู้ใช้",
@@ -370,6 +427,9 @@
                 modalChangeCodeTitle: "🔑 Change Registration Code",
                 labelNewRegCode: "New Registration Code",
                 btnSaveCode: "💾 Save New Code",
+                btnBotSettings: "⚙️ Bot Settings",
+                modalBotSettingsTitle: "⚙️ Bot Notification Settings",
+                labelVoiceLang: "🔊 Voice Notification Languages",
                 phLoginUser: "Enter username",
                 phLoginPass: "Enter password",
                 phRegUser: "Set username",
@@ -439,6 +499,9 @@
                 modalChangeCodeTitle: "🔑 가입 코드 변경",
                 labelNewRegCode: "새 가입 코드",
                 btnSaveCode: "💾 새 코드 저장",
+                btnBotSettings: "⚙️ 봇 설정",
+                modalBotSettingsTitle: "⚙️ 봇 알림 설정",
+                labelVoiceLang: "🔊 음성 알림 언어",
                 phLoginUser: "사용자 이름을 입력하세요",
                 phLoginPass: "비밀번호를 입력하세요",
                 phRegUser: "사용자 이름 설정",
@@ -711,7 +774,6 @@
             currentLang = lang;
             localStorage.setItem('app_lang', lang);
 
-            // อัปเดต dropdown ให้ตรงกันทั้งหน้า Login และหน้า Dashboard
             const authLangSelect = document.getElementById('authLangSelect');
             const langSelect = document.getElementById('langSelect');
             if (authLangSelect) authLangSelect.value = lang;
@@ -886,7 +948,6 @@
             }
 
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
-            // เพิ่มเวลาพิเศษบวกเข้าไปเป็นมิลลิวินาที (spTimeMin * 60 * 1000)
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
             const currentUser = localStorage.getItem('logged_user') || 'Unknown';
 
@@ -995,7 +1056,6 @@
             });
 
             document.getElementById('langSelect').value = currentLang;
-            // เพิ่มส่วนให้ dropdown หน้า login อัปเดตภาษาที่ระบบจำไว้
             const authLangSelect = document.getElementById('authLangSelect');
             if (authLangSelect) authLangSelect.value = currentLang;
             
