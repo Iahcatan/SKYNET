@@ -9,6 +9,7 @@
     
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
     <style>
@@ -117,6 +118,10 @@
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
+                        <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
+                            🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
+                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
+                        </div>
                     </form>
                 </div>
 
@@ -147,6 +152,7 @@
             <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
                 <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
+                <button id="adminPanelMenuBtn" onclick="scrollToAdminPanel()" data-admin-only class="btn btn-outline-danger btn-sm" style="display:none;">🛡️ Admin Panel</button>
                 <button onclick="openChangeCodeModal()" data-admin-only class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>
                 <button onclick="logout()" class="btn btn-outline-danger btn-sm" data-i18n="btnLogout">🚪 ออกจากระบบ</button>
             </div>
@@ -190,7 +196,7 @@
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                 <div>
                     <h4 class="card-title text-danger mb-1" data-i18n="adminPanelTitle">🛡️ Admin • จัดการผู้ใช้งาน</h4>
-                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน</small>
+                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติอยู่ในตารางด้านล่าง</small>
                 </div>
                 <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
             </div>
@@ -341,22 +347,37 @@
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = {
+            // IMPORTANT: Firebase Authentication ต้องใช้ Web App config ครบชุด
+            // ให้นำค่าจาก Firebase Console > Project settings > Your apps > Web app มาใส่
+            apiKey: "PASTE_YOUR_FIREBASE_API_KEY_HERE",
+            authDomain: "PASTE_YOUR_FIREBASE_AUTH_DOMAIN_HERE",
+            projectId: "PASTE_YOUR_FIREBASE_PROJECT_ID_HERE",
+            storageBucket: "PASTE_YOUR_FIREBASE_STORAGE_BUCKET_HERE",
+            messagingSenderId: "PASTE_YOUR_FIREBASE_MESSAGING_SENDER_ID_HERE",
+            appId: "PASTE_YOUR_FIREBASE_APP_ID_HERE",
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
         };
+
+        // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
+        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
+            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
+        }
 
         // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
+        const auth = firebase.auth();
         const bossRef = db.ref('boss_schedule');
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
         const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
         const sessionsRef = db.ref('dashboard_sessions');
 
-        // 🔐 Admin account: สร้างอัตโนมัติครั้งแรก หากยังไม่มี
-        // เปลี่ยนค่า ADMIN_DEFAULT_PASSWORD ก่อนนำระบบขึ้นใช้งานจริง
+        // 🔐 Admin account
+        // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด
+        // users/<ADMIN_UID> เป็น role=admin และ status=approved ใน Realtime Database
+        // ไม่มีการสร้าง Admin อัตโนมัติจากหน้าเว็บ เพื่อป้องกันผู้ใช้ทั่วไปยกระดับสิทธิ์
         const ADMIN_DEFAULT_USERNAME = "admin";
-        const ADMIN_DEFAULT_PASSWORD = "Admin@1234";
         const ACTIVE_SESSION_TIMEOUT_MS = 90000;
 
         // โค้ดสมัครเริ่มต้น
@@ -479,7 +500,7 @@
                 errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",
                 errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",
                 adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",
-                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน",
+                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติอยู่ในตารางด้านล่าง",
                 adminRefresh: "🔄 รีเฟรช",
                 adminPending: "รออนุมัติ",
                 adminActive: "กำลังใช้งาน",
@@ -577,7 +598,7 @@
                 errWeakAccount: "Username must be at least 3 characters and password at least 6 characters.",
                 errAdminUsername: "The admin username is reserved.",
                 adminPanelTitle: "🛡️ Admin • User Management",
-                adminPanelSubtitle: "Approve registrations, review history, and see active users.",
+                adminPanelSubtitle: "Approve registrations, review history, and see active users. Approval buttons are in the table below.",
                 adminRefresh: "🔄 Refresh",
                 adminPending: "Pending",
                 adminActive: "Active Now",
@@ -687,13 +708,13 @@
                 adminThLastSeen: "최근 활동",
                 adminThLogins: "로그인 횟수",
                 adminThAction: "관리",
-                adminApprove: "승인",
-                adminReject: "거부",
-                adminDisable: "비활성화",
-                adminActivate: "활성화",
-                adminNoUsers: "사용자가 없습니다.",
-                adminOnly: "Admin만 사용할 수 있습니다.",
-                adminCannotChangeAdmin: "Admin 계정의 상태는 변경할 수 없습니다."
+                adminApprove: "อนุมัติ",
+                adminReject: "ปฏิเสธ",
+                adminDisable: "ปิดใช้งาน",
+                adminActivate: "เปิดใช้งาน",
+                adminNoUsers: "ยังไม่มีผู้ใช้งาน",
+                adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
+                adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
             }
         };
 
@@ -755,50 +776,26 @@
             "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
-        // --- 3. ระบบ Authentication & Session ---
-        async function hashPassword(str) {
-            const buffer = new TextEncoder().encode(str);
-            const hash = await crypto.subtle.digest('SHA-256', buffer);
-            return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
+        // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---
+        const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";
+        settingsRef.child('register_code').on('value', (snap) => {
+            if (snap.exists() && snap.val()) currentRegCode = snap.val();
+            else settingsRef.child('register_code').set("1234");
+        });
 
         function makeUserKey(username) {
             return username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+        }
+
+        function usernameToAuthEmail(username) {
+            return `${makeUserKey(username)}${AUTH_EMAIL_DOMAIN}`;
         }
 
         function formatAdminDate(value) {
             if (!value) return '-';
             const d = new Date(value);
             if (isNaN(d.getTime())) return '-';
-            return d.toLocaleString('th-TH', {
-                year: 'numeric', month: '2-digit', day: '2-digit',
-                hour: '2-digit', minute: '2-digit', second: '2-digit'
-            });
-        }
-
-        async function ensureAdminAccount() {
-            const adminKey = makeUserKey(ADMIN_DEFAULT_USERNAME);
-            const adminRef = usersRef.child(adminKey);
-            const snap = await adminRef.once('value');
-            const now = new Date().toISOString();
-
-            if (!snap.exists()) {
-                const pwdHash = await hashPassword(ADMIN_DEFAULT_PASSWORD);
-                await adminRef.set({
-                    username: ADMIN_DEFAULT_USERNAME,
-                    password: pwdHash,
-                    role: 'admin',
-                    status: 'approved',
-                    createdAt: now,
-                    approvedAt: now,
-                    approvedBy: 'SYSTEM',
-                    lastLoginAt: null,
-                    lastLogoutAt: null,
-                    lastSeenAt: null,
-                    loginCount: 0
-                });
-                console.log('✅ สร้าง Admin account เริ่มต้นแล้ว:', ADMIN_DEFAULT_USERNAME);
-            }
+            return d.toLocaleString('th-TH', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
         }
 
         let currentSessionId = null;
@@ -810,279 +807,177 @@
             currentSessionId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`);
             currentUserKey = userKey;
             currentUserData = userData;
-
             const now = new Date().toISOString();
+
             await sessionsRef.child(currentSessionId).set({
-                userKey: userKey,
-                username: userData.username,
-                loginAt: now,
-                lastSeenAt: now,
-                active: true
+                userKey, username:userData.username, loginAt:now, lastSeenAt:now, active:true
             });
-
             await usersRef.child(userKey).update({
-                lastLoginAt: now,
-                lastSeenAt: now,
-                lastLogoutAt: null,
-                loginCount: (Number(userData.loginCount) || 0) + 1
+                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null,
+                loginCount:(Number(userData.loginCount)||0)+1
             });
-
             localStorage.setItem('logged_user', userData.username);
             localStorage.setItem('logged_user_key', userKey);
             localStorage.setItem('logged_session_id', currentSessionId);
             localStorage.setItem('logged_role', userData.role || 'user');
-
             startSessionHeartbeat();
         }
 
         function startSessionHeartbeat() {
             if (heartbeatTimer) clearInterval(heartbeatTimer);
             heartbeatTimer = setInterval(async () => {
-                const sessionId = localStorage.getItem('logged_session_id');
-                const userKey = localStorage.getItem('logged_user_key');
-                if (!sessionId || !userKey) return;
-
-                const now = new Date().toISOString();
+                const sessionId=localStorage.getItem('logged_session_id');
+                const userKey=localStorage.getItem('logged_user_key');
+                if (!sessionId || !userKey || !auth.currentUser) return;
+                const now=new Date().toISOString();
                 try {
-                    await sessionsRef.child(sessionId).update({ lastSeenAt: now, active: true });
-                    await usersRef.child(userKey).update({ lastSeenAt: now });
-                } catch (err) {
-                    console.warn('Session heartbeat error:', err);
-                }
-            }, 30000);
+                    await sessionsRef.child(sessionId).update({lastSeenAt:now,active:true});
+                    await usersRef.child(userKey).update({lastSeenAt:now});
+                } catch(err) { console.warn('Session heartbeat error:',err); }
+            },30000);
         }
 
-        async function endUserSession() {
-            const sessionId = localStorage.getItem('logged_session_id');
-            const userKey = localStorage.getItem('logged_user_key');
-            const now = new Date().toISOString();
-
-            if (heartbeatTimer) {
-                clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
-            }
-
+        async function endUserSession(signOutAuth=true) {
+            const sessionId=localStorage.getItem('logged_session_id');
+            const userKey=localStorage.getItem('logged_user_key');
+            const now=new Date().toISOString();
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer=null; }
             try {
-                if (sessionId) {
-                    await sessionsRef.child(sessionId).update({
-                        lastSeenAt: now,
-                        logoutAt: now,
-                        active: false
-                    });
-                }
-                if (userKey) {
-                    await usersRef.child(userKey).update({
-                        lastSeenAt: now,
-                        lastLogoutAt: now
-                    });
-                }
-            } catch (err) {
-                console.warn('Session logout update error:', err);
-            }
-
-            localStorage.removeItem('logged_user');
-            localStorage.removeItem('logged_user_key');
-            localStorage.removeItem('logged_session_id');
-            localStorage.removeItem('logged_role');
-            currentSessionId = null;
-            currentUserKey = null;
-            currentUserData = null;
+                if (sessionId) await sessionsRef.child(sessionId).update({lastSeenAt:now,logoutAt:now,active:false});
+                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now});
+            } catch(err) { console.warn('Session logout update error:',err); }
+            if (signOutAuth) { try { await auth.signOut(); } catch(err) {} }
+            ['logged_user','logged_user_key','logged_session_id','logged_role'].forEach(k=>localStorage.removeItem(k));
+            currentSessionId=null; currentUserKey=null; currentUserData=null;
         }
 
-        async function checkAuthSession() {
-            const savedUser = localStorage.getItem('saved_username');
-            if (savedUser) {
-                document.getElementById('loginUser').value = savedUser;
-                document.getElementById('rememberMe').checked = true;
-            }
+        async function checkAuthSession(firebaseUserOverride=null) {
+            const savedUser=localStorage.getItem('saved_username');
+            if(savedUser){document.getElementById('loginUser').value=savedUser;document.getElementById('rememberMe').checked=true;}
 
-            const loggedUser = localStorage.getItem('logged_user');
-            const loggedUserKey = localStorage.getItem('logged_user_key');
-
-            if (loggedUser && loggedUserKey) {
-                try {
-                    const snap = await usersRef.child(loggedUserKey).once('value');
-                    if (!snap.exists()) throw new Error('USER_NOT_FOUND');
-
-                    const userData = snap.val();
-                    if (userData.username !== loggedUser || userData.status !== 'approved') {
-                        await endUserSession();
-                        throw new Error('ACCOUNT_NOT_APPROVED');
+            const firebaseUser=firebaseUserOverride || auth.currentUser;
+            if(firebaseUser){
+                try{
+                    const snap=await usersRef.child(firebaseUser.uid).once('value');
+                    if(!snap.exists()) throw new Error('USER_NOT_FOUND');
+                    const userData=snap.val();
+                    if(userData.status!=='approved'){
+                        await endUserSession(true);
+                        throw new Error(userData.status==='pending'?'ACCOUNT_PENDING':'ACCOUNT_NOT_APPROVED');
                     }
 
-                    currentUserData = userData;
-                    currentUserKey = loggedUserKey;
-
-                    document.getElementById('authContainer').style.display = 'none';
-                    document.getElementById('mainDashboard').style.display = 'block';
-                    document.getElementById('userBadge').innerText =
-                        `👤 ${loggedUser}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
-
-                    const adminPanel = document.getElementById('adminPanel');
-                    const adminOnlyButtons = document.querySelectorAll('[data-admin-only]');
-                    if (userData.role === 'admin') {
-                        adminPanel.style.display = 'block';
-                        adminOnlyButtons.forEach(el => el.style.display = '');
+                    currentUserData=userData;
+                    currentUserKey=firebaseUser.uid;
+                    document.getElementById('authContainer').style.display='none';
+                    document.getElementById('mainDashboard').style.display='block';
+                    document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
+                    const adminPanel=document.getElementById('adminPanel');
+                    const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
+                    const adminMenu=document.getElementById('adminPanelMenuBtn');
+                    if(userData.role==='admin'){
+                        adminPanel.style.display='block';
+                        adminOnlyButtons.forEach(el=>el.style.display='');
+                        if(adminMenu) adminMenu.style.display='inline-block';
                         await loadAdminUsers();
-                    } else {
-                        adminPanel.style.display = 'none';
-                        adminOnlyButtons.forEach(el => el.style.display = 'none');
+                    }else{
+                        adminPanel.style.display='none';
+                        adminOnlyButtons.forEach(el=>el.style.display='none');
+                        if(adminMenu) adminMenu.style.display='none';
                     }
-
-                    startSessionHeartbeat();
-                    return;
-                } catch (err) {
-                    if (err.message === 'ACCOUNT_NOT_APPROVED') {
-                        alert(TRANSLATIONS[currentLang].errAccountNotApproved);
-                    }
+                    if(!currentSessionId) await createUserSession(firebaseUser.uid,userData);
+                    else startSessionHeartbeat();
+                    return true;
+                }catch(err){
+                    if(err.message==='ACCOUNT_PENDING') alert(TRANSLATIONS[currentLang].errPendingApproval);
+                    else if(err.message==='ACCOUNT_NOT_APPROVED') alert(TRANSLATIONS[currentLang].errAccountNotApproved);
                 }
             }
-
-            document.getElementById('authContainer').style.display = 'block';
-            document.getElementById('mainDashboard').style.display = 'none';
-            const adminPanel = document.getElementById('adminPanel');
-            if (adminPanel) adminPanel.style.display = 'none';
+            document.getElementById('authContainer').style.display='block';
+            document.getElementById('mainDashboard').style.display='none';
+            const adminPanel=document.getElementById('adminPanel'); if(adminPanel) adminPanel.style.display='none';
+            const adminMenu=document.getElementById('adminPanelMenuBtn'); if(adminMenu) adminMenu.style.display='none';
+            document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
+            return false;
         }
 
-        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+        function scrollToAdminPanel(){
+            const panel=document.getElementById('adminPanel');
+            if(panel) panel.scrollIntoView({behavior:'smooth',block:'start'});
+        }
+
+        document.getElementById('registerForm').addEventListener('submit',async(e)=>{
             e.preventDefault();
-
-            const username = document.getElementById('regUser').value.trim();
-            const password = document.getElementById('regPass').value;
-            const regCode = document.getElementById('regCode').value.trim();
-
-            if (username.length < 3 || password.length < 6) {
-                alert(TRANSLATIONS[currentLang].errWeakAccount);
-                return;
+            const username=document.getElementById('regUser').value.trim();
+            const password=document.getElementById('regPass').value;
+            const regCode=document.getElementById('regCode').value.trim();
+            if(username.length<3 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}
+            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
+            if(regCode!==currentRegCode){alert(TRANSLATIONS[currentLang].errRegCodeInvalid);return;}
+            try{
+                const cred=await auth.createUserWithEmailAndPassword(usernameToAuthEmail(username),password);
+                const now=new Date().toISOString();
+                await usersRef.child(cred.user.uid).set({
+                    username, usernameKey:makeUserKey(username), role:'user', status:'pending', createdAt:now,
+                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
+                });
+                await auth.signOut();
+                alert(TRANSLATIONS[currentLang].regPending);
+                document.getElementById('registerForm').reset();
+                new bootstrap.Tab(document.getElementById('login-tab')).show();
+            }catch(err){
+                console.error(err);
+                if(err.code==='auth/email-already-in-use') alert(TRANSLATIONS[currentLang].errUserExists);
+                else alert(TRANSLATIONS[currentLang].errLoginFailed);
             }
-
-            if (makeUserKey(username) === makeUserKey(ADMIN_DEFAULT_USERNAME)) {
-                alert(TRANSLATIONS[currentLang].errAdminUsername);
-                return;
-            }
-
-            if (regCode !== currentRegCode) {
-                alert(TRANSLATIONS[currentLang].errRegCodeInvalid);
-                return;
-            }
-
-            const userKey = makeUserKey(username);
-            const snap = await usersRef.child(userKey).once('value');
-
-            if (snap.exists()) {
-                alert(TRANSLATIONS[currentLang].errUserExists);
-                return;
-            }
-
-            const pwdHash = await hashPassword(password);
-            const now = new Date().toISOString();
-
-            await usersRef.child(userKey).set({
-                username: username,
-                password: pwdHash,
-                role: 'user',
-                status: 'pending',
-                createdAt: now,
-                approvedAt: null,
-                approvedBy: null,
-                rejectedAt: null,
-                rejectedBy: null,
-                lastLoginAt: null,
-                lastLogoutAt: null,
-                lastSeenAt: null,
-                loginCount: 0
-            });
-
-            alert(TRANSLATIONS[currentLang].regPending);
-            document.getElementById('registerForm').reset();
-            const loginTab = new bootstrap.Tab(document.getElementById('login-tab'));
-            loginTab.show();
         });
 
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        document.getElementById('loginForm').addEventListener('submit',async(e)=>{
             e.preventDefault();
-
-            const username = document.getElementById('loginUser').value.trim();
-            const password = document.getElementById('loginPass').value;
-            const rememberMe = document.getElementById('rememberMe').checked;
-
-            const userKey = makeUserKey(username);
-            const snap = await usersRef.child(userKey).once('value');
-
-            if (!snap.exists()) {
+            const username=document.getElementById('loginUser').value.trim();
+            const password=document.getElementById('loginPass').value;
+            const rememberMe=document.getElementById('rememberMe').checked;
+            if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
+            try{
+                const cred=await auth.signInWithEmailAndPassword(usernameToAuthEmail(username),password);
+                const snap=await usersRef.child(cred.user.uid).once('value');
+                if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
+                const userData=snap.val();
+                if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
+                if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
+                if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
+                if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
+                await createUserSession(cred.user.uid,userData);
+                await checkAuthSession(cred.user);
+            }catch(err){
+                console.error('Firebase Authentication login error:',err);
                 alert(TRANSLATIONS[currentLang].errLoginFailed);
-                return;
             }
-
-            const userData = snap.val();
-            const pwdHash = await hashPassword(password);
-
-            if (userData.password !== pwdHash) {
-                alert(TRANSLATIONS[currentLang].errLoginFailed);
-                return;
-            }
-
-            if (userData.status === 'pending') {
-                alert(TRANSLATIONS[currentLang].errPendingApproval);
-                return;
-            }
-
-            if (userData.status === 'rejected' || userData.status === 'disabled') {
-                alert(TRANSLATIONS[currentLang].errAccountRejected);
-                return;
-            }
-
-            if (userData.status !== 'approved') {
-                alert(TRANSLATIONS[currentLang].errAccountNotApproved);
-                return;
-            }
-
-            if (rememberMe) {
-                localStorage.setItem('saved_username', username);
-            } else {
-                localStorage.removeItem('saved_username');
-            }
-
-            await createUserSession(userKey, userData);
-            await checkAuthSession();
         });
 
-        async function logout() {
-            await endUserSession();
-            checkAuthSession();
+        async function logout(){await endUserSession(true);checkAuthSession();}
+
+        function openChangeCodeModal(){
+            const modalEl=document.getElementById('changeCodeModal');
+            const modal=bootstrap.Modal.getOrCreateInstance(modalEl);
+            document.getElementById('newRegCodeInput').value=currentRegCode; modal.show();
         }
 
-        function openChangeCodeModal() {
-            const modalEl = document.getElementById('changeCodeModal');
-            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-            document.getElementById('newRegCodeInput').value = currentRegCode;
-            modal.show();
-        }
-
-        document.getElementById('changeCodeForm').addEventListener('submit', async (e) => {
+        document.getElementById('changeCodeForm').addEventListener('submit',async(e)=>{
             e.preventDefault();
-
-            const adminKey = localStorage.getItem('logged_user_key');
-            if (!adminKey) return;
-
-            const adminSnap = await usersRef.child(adminKey).once('value');
-            const adminData = adminSnap.val();
-            if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
-                alert(TRANSLATIONS[currentLang].adminOnly);
-                return;
-            }
-
-            const newCode = document.getElementById('newRegCodeInput').value.trim();
-            if (newCode) {
-                await settingsRef.child('register_code').set(newCode);
-                alert(TRANSLATIONS[currentLang].codeChangedSuccess);
-                const modalEl = document.getElementById('changeCodeModal');
-                const modal = bootstrap.Modal.getInstance(modalEl);
-                if (modal) modal.hide();
-            }
+            if(!await requireAdmin())return;
+            const newCode=document.getElementById('newRegCodeInput').value.trim();
+            if(newCode){await settingsRef.child('register_code').set(newCode);alert(TRANSLATIONS[currentLang].codeChangedSuccess);const modal=bootstrap.Modal.getInstance(document.getElementById('changeCodeModal'));if(modal)modal.hide();}
         });
 
         // --- Admin User Management ---
+        async function requireAdmin(){
+            const uid=auth.currentUser && auth.currentUser.uid;
+            if(!uid)return false;
+            const snap=await usersRef.child(uid).once('value'); const user=snap.val();
+            if(!user||user.role!=='admin'||user.status!=='approved'){alert(TRANSLATIONS[currentLang].adminOnly);return false;}
+            currentUserKey=uid; currentUserData=user; return true;
+        }
+
         async function loadAdminUsers() {
             if (!currentUserKey) currentUserKey = localStorage.getItem('logged_user_key');
             if (!currentUserKey) return;
@@ -1110,8 +1005,11 @@
                 )[0];
 
                 const lastSeen = user.lastSeenAt || (latestSession && latestSession.lastSeenAt);
-                const active = !!lastSeen && (nowMs - new Date(lastSeen).getTime() <= ACTIVE_SESSION_TIMEOUT_MS) &&
-                               !!latestSession && latestSession.active !== false;
+                const active = userSessions.some(session => {
+                    if (!session || session.active === false || !session.lastSeenAt) return false;
+                    const age = nowMs - new Date(session.lastSeenAt).getTime();
+                    return age >= 0 && age <= ACTIVE_SESSION_TIMEOUT_MS;
+                });
 
                 return { key, user, active };
             });
@@ -1238,25 +1136,23 @@
             await loadAdminUsers();
         }
 
-        async function requireApprovedUser() {
-            const userKey = localStorage.getItem('logged_user_key');
-            if (!userKey) {
-                alert(TRANSLATIONS[currentLang].errAccountNotApproved);
-                await checkAuthSession();
-                return false;
-            }
-            const snap = await usersRef.child(userKey).once('value');
-            const user = snap.val();
-            if (!user || user.status !== 'approved') {
-                await endUserSession();
-                await checkAuthSession();
-                alert(TRANSLATIONS[currentLang].errAccountNotApproved);
-                return false;
-            }
-            currentUserKey = userKey;
-            currentUserData = user;
-            return true;
+        async function requireApprovedUser(){
+            const uid=auth.currentUser && auth.currentUser.uid;
+            if(!uid){await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}
+            const snap=await usersRef.child(uid).once('value'); const user=snap.val();
+            if(!user||user.status!=='approved'){await endUserSession(true);await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}
+            currentUserKey=uid;currentUserData=user;return true;
         }
+
+        // Firebase Authentication session listener
+        auth.onAuthStateChanged(async (firebaseUser) => {
+            if (firebaseUser) {
+                await checkAuthSession(firebaseUser);
+            } else {
+                const dashboard=document.getElementById('mainDashboard');
+                if(dashboard && dashboard.style.display==='block') await checkAuthSession(null);
+            }
+        });
 
         // --- 4. ระบบ Real-time Sync จาก Firebase ---
 
@@ -1596,12 +1492,8 @@
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
-            ensureAdminAccount()
-                .then(() => checkAuthSession())
-                .catch(err => {
-                    console.error("Admin initialization error:", err);
-                    checkAuthSession();
-                });
+            auth.onAuthStateChanged(() => checkAuthSession());
+            checkAuthSession();
 
             setInterval(updateCountdowns, 1000);
             setInterval(() => {
