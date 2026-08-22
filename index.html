@@ -107,7 +107,7 @@
                     <form id="loginForm" autocomplete="off">
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelEmail">อีเมล</label>
-                            <input type="email" id="loginUser" class="form-control" placeholder="กรอกอีเมล" data-i18n-ph="phRegEmail" required>
+                            <input type="email" id="loginUser" class="form-control" placeholder="กรอกอีเมล" data-i18n-ph="phLoginUser" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
@@ -331,7 +331,7 @@
                 btnBotSettings: "⚙️ ตั้งค่าบอท",
                 modalBotSettingsTitle: "⚙️ ตั้งค่าแจ้งเตือนบอท",
                 labelVoiceLang: "🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)",
-                phLoginUser: "กรอกชื่อผู้ใช้",
+                phLoginUser: "กรอกอีเมล",
                 phLoginPass: "กรอกรหัสผ่าน",
                 phRegUser: "ตั้งชื่อผู้ใช้",
                 phRegPass: "ตั้งรหัสผ่าน",
@@ -473,7 +473,7 @@
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
                 labelSpTime: "추가 시간 (분)",
-                phKillTime: "예: 17:30 หรือ 1730",
+                phKillTime: "예: 17:30 또는 1730",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
@@ -493,7 +493,7 @@
                 minUnit: "분",
                 secUnit: "초",
                 footer: "실시간 보스 카운트다운 시스템 • 클라우드 자동 동기화",
-                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 หรือ 17:45)",
+                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 또는 17:45)",
                 confirmClear: "모든 보스 타이머를 삭제하시겠습니까?",
                 notifyReadyTitle: "⚔️ 알림 시스템 준비 완료",
                 notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",
@@ -617,7 +617,7 @@
                     await auth.signOut();
                     if(data.status === 'disabled') {
                         alert('บัญชีนี้ถูกปิดใช้งาน');
-                    } else if(data.status === 'pending') {
+                    } else if (data.status === 'pending') {
                         alert('บัญชีของคุณยังไม่ได้รับการอนุมัติจากผู้ดูแลระบบ กรุณารออนุมัติ');
                     } else {
                         alert('สถานะบัญชีของคุณไม่ถูกต้อง');
@@ -687,7 +687,7 @@
                     username,
                     email, 
                     role: 'user',
-                    status: 'pending',      // ตั้งสถานะรออนุมัติ
+                    status: 'pending',
                     createdAt: firebase.database.ServerValue.TIMESTAMP,
                     approvedAt: null,
                     approvedBy: null,
@@ -752,6 +752,7 @@
             };
             usersRef.on('value', adminUsersListener, err => console.error('Admin users listener:', err));
         }
+
         function escapeHtml(v){ return String(v ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
         function formatDateValue(v){ if(!v) return '-'; const n=typeof v==='number'?v:Date.parse(v); return isNaN(n)?'-':new Date(n).toLocaleString('th-TH'); }
         async function requireAdmin(){ if(!currentUserData || currentUserData.role!=='admin'){ alert('เฉพาะ Admin เท่านั้น'); return false; } return true; }
@@ -961,7 +962,7 @@
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
             
-            const currentUser = currentUserData?.username || auth.currentUser?.email || 'Unknown';
+            const currentUser = currentUserData?.email || auth.currentUser?.email || 'Unknown';
 
             await bossRef.child(bossInput).set({
                 killTimeMs: killDate.getTime(),
