@@ -113,13 +113,9 @@
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
                             <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" data-i18n-ph="phLoginPass" required>
                         </div>
-                        <div class="d-flex justify-content-between align-items-center mb-3">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="rememberMe">
-                                <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
-                            </div>
-                            <!-- เพิ่มปุ่มลืมรหัสผ่านตรงนี้ -->
-                            <a href="#" onclick="openForgotPasswordModal()" class="text-info small text-decoration-none">ลืมรหัสผ่าน?</a>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="rememberMe">
+                            <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
@@ -300,7 +296,7 @@
         </footer>
     </div>
 
-    <!-- Modal เปลี่ยนรหัสผ่าน (โค้ดสมัคร) -->
+    <!-- Modal เปลี่ยนรหัสผ่าน -->
     <div class="modal fade" id="changeCodeModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content p-3">
@@ -348,31 +344,6 @@
         </div>
     </div>
 
-    <!-- Modal ลืมรหัสผ่าน (เพิ่มใหม่) -->
-    <div class="modal fade" id="forgotPasswordModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content p-3">
-                <div class="modal-header border-secondary">
-                    <h5 class="modal-title text-info">🔑 ลืมรหัสผ่าน</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <form id="forgotPasswordForm">
-                        <div class="mb-3">
-                            <label class="form-label">อีเมลจริงของบัญชี (Admin Email)</label>
-                            <input type="email" id="resetEmailInput" class="form-control" placeholder="กรอกอีเมลเพื่อรับลิงก์รีเซ็ต" required>
-                            <small class="text-white-50 d-block mt-2">
-                                *ระบบจะส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่อีเมลนี้<br>
-                                *รองรับเฉพาะบัญชีที่สร้างด้วยอีเมลจริงผ่าน Firebase Console เท่านั้น (บัญชีสมาชิกทั่วไปที่ใช้ Username จะไม่สามารถรับอีเมลได้)
-                            </small>
-                        </div>
-                        <button type="submit" class="btn btn-primary w-100 fw-bold">📨 ส่งลิงก์รีเซ็ตรหัสผ่าน</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = {
@@ -389,18 +360,20 @@
             console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
         }
 
+        // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
         const bossRef = db.ref('boss_schedule');
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
-        const botSettingsRef = db.ref('bot_settings'); 
+        const botSettingsRef = db.ref('bot_settings');
         const sessionsRef = db.ref('dashboard_sessions');
 
         const ADMIN_DEFAULT_USERNAME = "admin";
         const ACTIVE_SESSION_TIMEOUT_MS = 90000;
 
+        // โค้ดสมัครเริ่มต้น
         let currentRegCode = "1234";
         settingsRef.child('register_code').on('value', (snap) => {
             if (snap.exists() && snap.val()) {
@@ -410,6 +383,7 @@
             }
         });
 
+        // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน
         botSettingsRef.on('value', (snap) => {
             const data = snap.val() || {};
             document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
@@ -435,37 +409,6 @@
             const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
             modal.show();
         }
-
-        // เพิ่มฟังก์ชันสำหรับเปิด Modal ลืมรหัสผ่าน
-        function openForgotPasswordModal() {
-            const modalEl = document.getElementById('forgotPasswordModal');
-            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-            modal.show();
-        }
-
-        // เพิ่ม Event Listener สำหรับจัดการการส่งฟอร์มลืมรหัสผ่าน
-        document.getElementById('forgotPasswordForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const email = document.getElementById('resetEmailInput').value.trim();
-            if (!email) return;
-            
-            try {
-                await auth.sendPasswordResetEmail(email);
-                alert("ระบบได้ส่งลิงก์สำหรับรีเซ็ตรหัสผ่านไปยังอีเมลของคุณแล้ว กรุณาตรวจสอบกล่องข้อความ (หรือในโฟลเดอร์ Junk/Spam)");
-                const modal = bootstrap.Modal.getInstance(document.getElementById('forgotPasswordModal'));
-                if (modal) modal.hide();
-                document.getElementById('forgotPasswordForm').reset();
-            } catch (err) {
-                console.error("Forgot password error:", err);
-                if (err.code === 'auth/user-not-found') {
-                    alert("ไม่พบอีเมลนี้ในระบบ กรุณาตรวจสอบความถูกต้องอีกครั้ง");
-                } else if (err.code === 'auth/invalid-email') {
-                    alert("รูปแบบอีเมลไม่ถูกต้อง");
-                } else {
-                    alert("เกิดข้อผิดพลาด: " + err.message);
-                }
-            }
-        });
 
         // --- 2. ฐานข้อมูลภาษา (i18n) ---
         const TRANSLATIONS = {
@@ -825,10 +768,6 @@
 
         // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---
         const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";
-        settingsRef.child('register_code').on('value', (snap) => {
-            if (snap.exists() && snap.val()) currentRegCode = snap.val();
-            else settingsRef.child('register_code').set("1234");
-        });
 
         function makeUserKey(username) {
             return username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
@@ -857,11 +796,11 @@
             const now = new Date().toISOString();
 
             await sessionsRef.child(currentSessionId).set({
-                userKey, username:userData.username, loginAt:now, lastSeenAt:now, active:true
+                userKey, username: userData.username, loginAt: now, lastSeenAt: now, active: true
             });
             await usersRef.child(userKey).update({
-                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null,
-                loginCount:(Number(userData.loginCount)||0)+1
+                lastLoginAt: now, lastSeenAt: now, lastLogoutAt: null,
+                loginCount: (Number(userData.loginCount) || 0) + 1
             });
             localStorage.setItem('logged_user', userData.username);
             localStorage.setItem('logged_user_key', userKey);
@@ -873,156 +812,156 @@
         function startSessionHeartbeat() {
             if (heartbeatTimer) clearInterval(heartbeatTimer);
             heartbeatTimer = setInterval(async () => {
-                const sessionId=localStorage.getItem('logged_session_id');
-                const userKey=localStorage.getItem('logged_user_key');
+                const sessionId = localStorage.getItem('logged_session_id');
+                const userKey = localStorage.getItem('logged_user_key');
                 if (!sessionId || !userKey || !auth.currentUser) return;
-                const now=new Date().toISOString();
+                const now = new Date().toISOString();
                 try {
-                    await sessionsRef.child(sessionId).update({lastSeenAt:now,active:true});
-                    await usersRef.child(userKey).update({lastSeenAt:now});
-                } catch(err) { console.warn('Session heartbeat error:',err); }
-            },30000);
+                    await sessionsRef.child(sessionId).update({ lastSeenAt: now, active: true });
+                    await usersRef.child(userKey).update({ lastSeenAt: now });
+                } catch(err) { console.warn('Session heartbeat error:', err); }
+            }, 30000);
         }
 
-        async function endUserSession(signOutAuth=true) {
-            const sessionId=localStorage.getItem('logged_session_id');
-            const userKey=localStorage.getItem('logged_user_key');
-            const now=new Date().toISOString();
-            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer=null; }
+        async function endUserSession(signOutAuth = true) {
+            const sessionId = localStorage.getItem('logged_session_id');
+            const userKey = localStorage.getItem('logged_user_key');
+            const now = new Date().toISOString();
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
             try {
-                if (sessionId) await sessionsRef.child(sessionId).update({lastSeenAt:now,logoutAt:now,active:false});
-                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now});
-            } catch(err) { console.warn('Session logout update error:',err); }
+                if (sessionId) await sessionsRef.child(sessionId).update({ lastSeenAt: now, logoutAt: now, active: false });
+                if (userKey) await usersRef.child(userKey).update({ lastSeenAt: now, lastLogoutAt: now });
+            } catch(err) { console.warn('Session logout update error:', err); }
             if (signOutAuth) { try { await auth.signOut(); } catch(err) {} }
-            ['logged_user','logged_user_key','logged_session_id','logged_role'].forEach(k=>localStorage.removeItem(k));
-            currentSessionId=null; currentUserKey=null; currentUserData=null;
+            ['logged_user', 'logged_user_key', 'logged_session_id', 'logged_role'].forEach(k => localStorage.removeItem(k));
+            currentSessionId = null; currentUserKey = null; currentUserData = null;
         }
 
-        async function checkAuthSession(firebaseUserOverride=null) {
-            const savedUser=localStorage.getItem('saved_username');
-            if(savedUser){document.getElementById('loginUser').value=savedUser;document.getElementById('rememberMe').checked=true;}
+        async function checkAuthSession(firebaseUserOverride = null) {
+            const savedUser = localStorage.getItem('saved_username');
+            if (savedUser) { document.getElementById('loginUser').value = savedUser; document.getElementById('rememberMe').checked = true; }
 
-            const firebaseUser=firebaseUserOverride || auth.currentUser;
-            if(firebaseUser){
-                try{
-                    const snap=await usersRef.child(firebaseUser.uid).once('value');
-                    if(!snap.exists()) throw new Error('USER_NOT_FOUND');
-                    const userData=snap.val();
-                    if(userData.status!=='approved'){
+            const firebaseUser = firebaseUserOverride || auth.currentUser;
+            if (firebaseUser) {
+                try {
+                    const snap = await usersRef.child(firebaseUser.uid).once('value');
+                    if (!snap.exists()) throw new Error('USER_NOT_FOUND');
+                    const userData = snap.val();
+                    if (userData.status !== 'approved') {
                         await endUserSession(true);
-                        throw new Error(userData.status==='pending'?'ACCOUNT_PENDING':'ACCOUNT_NOT_APPROVED');
+                        throw new Error(userData.status === 'pending' ? 'ACCOUNT_PENDING' : 'ACCOUNT_NOT_APPROVED');
                     }
 
-                    currentUserData=userData;
-                    currentUserKey=firebaseUser.uid;
-                    document.getElementById('authContainer').style.display='none';
-                    document.getElementById('mainDashboard').style.display='block';
-                    document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
-                    const adminPanel=document.getElementById('adminPanel');
-                    const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
-                    const adminMenu=document.getElementById('adminPanelMenuBtn');
-                    if(userData.role==='admin'){
-                        adminPanel.style.display='block';
-                        adminOnlyButtons.forEach(el=>el.style.display='');
-                        if(adminMenu) adminMenu.style.display='inline-block';
+                    currentUserData = userData;
+                    currentUserKey = firebaseUser.uid;
+                    document.getElementById('authContainer').style.display = 'none';
+                    document.getElementById('mainDashboard').style.display = 'block';
+                    document.getElementById('userBadge').innerText = `👤 ${userData.username || firebaseUser.email}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
+                    const adminPanel = document.getElementById('adminPanel');
+                    const adminOnlyButtons = document.querySelectorAll('[data-admin-only]');
+                    const adminMenu = document.getElementById('adminPanelMenuBtn');
+                    if (userData.role === 'admin') {
+                        adminPanel.style.display = 'block';
+                        adminOnlyButtons.forEach(el => el.style.display = '');
+                        if (adminMenu) adminMenu.style.display = 'inline-block';
                         await loadAdminUsers();
-                    }else{
-                        adminPanel.style.display='none';
-                        adminOnlyButtons.forEach(el=>el.style.display='none');
-                        if(adminMenu) adminMenu.style.display='none';
+                    } else {
+                        adminPanel.style.display = 'none';
+                        adminOnlyButtons.forEach(el => el.style.display = 'none');
+                        if (adminMenu) adminMenu.style.display = 'none';
                     }
-                    if(!currentSessionId) await createUserSession(firebaseUser.uid,userData);
+                    if (!currentSessionId) await createUserSession(firebaseUser.uid, userData);
                     else startSessionHeartbeat();
                     return true;
-                }catch(err){
-                    if(err.message==='ACCOUNT_PENDING') alert(TRANSLATIONS[currentLang].errPendingApproval);
-                    else if(err.message==='ACCOUNT_NOT_APPROVED') alert(TRANSLATIONS[currentLang].errAccountNotApproved);
+                } catch(err) {
+                    if (err.message === 'ACCOUNT_PENDING') alert(TRANSLATIONS[currentLang].errPendingApproval);
+                    else if (err.message === 'ACCOUNT_NOT_APPROVED') alert(TRANSLATIONS[currentLang].errAccountNotApproved);
                 }
             }
-            document.getElementById('authContainer').style.display='block';
-            document.getElementById('mainDashboard').style.display='none';
-            const adminPanel=document.getElementById('adminPanel'); if(adminPanel) adminPanel.style.display='none';
-            const adminMenu=document.getElementById('adminPanelMenuBtn'); if(adminMenu) adminMenu.style.display='none';
-            document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
+            document.getElementById('authContainer').style.display = 'block';
+            document.getElementById('mainDashboard').style.display = 'none';
+            const adminPanel = document.getElementById('adminPanel'); if (adminPanel) adminPanel.style.display = 'none';
+            const adminMenu = document.getElementById('adminPanelMenuBtn'); if (adminMenu) adminMenu.style.display = 'none';
+            document.querySelectorAll('[data-admin-only]').forEach(el => el.style.display = 'none');
             return false;
         }
 
-        function scrollToAdminPanel(){
-            const panel=document.getElementById('adminPanel');
-            if(panel) panel.scrollIntoView({behavior:'smooth',block:'start'});
+        function scrollToAdminPanel() {
+            const panel = document.getElementById('adminPanel');
+            if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
 
-        document.getElementById('registerForm').addEventListener('submit',async(e)=>{
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const username=document.getElementById('regUser').value.trim();
-            const password=document.getElementById('regPass').value;
-            const regCode=document.getElementById('regCode').value.trim();
-            if(username.length<3 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}
-            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
-            if(regCode!==currentRegCode){alert(TRANSLATIONS[currentLang].errRegCodeInvalid);return;}
-            try{
-                const cred=await auth.createUserWithEmailAndPassword(usernameToAuthEmail(username),password);
-                const now=new Date().toISOString();
+            const username = document.getElementById('regUser').value.trim();
+            const password = document.getElementById('regPass').value;
+            const regCode = document.getElementById('regCode').value.trim();
+            if (username.length < 3 || password.length < 6) { alert(TRANSLATIONS[currentLang].errWeakAccount); return; }
+            if (makeUserKey(username) === makeUserKey(ADMIN_DEFAULT_USERNAME)) { alert(TRANSLATIONS[currentLang].errAdminUsername); return; }
+            if (regCode !== currentRegCode) { alert(TRANSLATIONS[currentLang].errRegCodeInvalid); return; }
+            try {
+                const cred = await auth.createUserWithEmailAndPassword(usernameToAuthEmail(username), password);
+                const now = new Date().toISOString();
                 await usersRef.child(cred.user.uid).set({
-                    username, usernameKey:makeUserKey(username), role:'user', status:'pending', createdAt:now,
-                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
+                    username, usernameKey: makeUserKey(username), role: 'user', status: 'pending', createdAt: now,
+                    approvedAt: null, approvedBy: null, rejectedAt: null, rejectedBy: null, lastLoginAt: null, lastLogoutAt: null, lastSeenAt: null, loginCount: 0
                 });
                 await auth.signOut();
                 alert(TRANSLATIONS[currentLang].regPending);
                 document.getElementById('registerForm').reset();
                 new bootstrap.Tab(document.getElementById('login-tab')).show();
-            }catch(err){
+            } catch(err) {
                 console.error(err);
-                if(err.code==='auth/email-already-in-use') alert(TRANSLATIONS[currentLang].errUserExists);
+                if (err.code === 'auth/email-already-in-use') alert(TRANSLATIONS[currentLang].errUserExists);
                 else alert(TRANSLATIONS[currentLang].errLoginFailed);
             }
         });
 
-        document.getElementById('loginForm').addEventListener('submit',async(e)=>{
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const username=document.getElementById('loginUser').value.trim();
-            const password=document.getElementById('loginPass').value;
-            const rememberMe=document.getElementById('rememberMe').checked;
-            if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
-            try{
-                const cred=await auth.signInWithEmailAndPassword(usernameToAuthEmail(username),password);
-                const snap=await usersRef.child(cred.user.uid).once('value');
-                if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
-                const userData=snap.val();
-                if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
-                if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
-                if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
-                if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
-                await createUserSession(cred.user.uid,userData);
+            const username = document.getElementById('loginUser').value.trim();
+            const password = document.getElementById('loginPass').value;
+            const rememberMe = document.getElementById('rememberMe').checked;
+            if (!username || !password) { alert(TRANSLATIONS[currentLang].errLoginFailed); return; }
+            try {
+                const cred = await auth.signInWithEmailAndPassword(usernameToAuthEmail(username), password);
+                const snap = await usersRef.child(cred.user.uid).once('value');
+                if (!snap.exists()) { await auth.signOut(); alert(TRANSLATIONS[currentLang].errLoginFailed); return; }
+                const userData = snap.val();
+                if (userData.status === 'pending') { await auth.signOut(); alert(TRANSLATIONS[currentLang].errPendingApproval); return; }
+                if (userData.status === 'rejected' || userData.status === 'disabled') { await auth.signOut(); alert(TRANSLATIONS[currentLang].errAccountRejected); return; }
+                if (userData.status !== 'approved') { await auth.signOut(); alert(TRANSLATIONS[currentLang].errAccountNotApproved); return; }
+                if (rememberMe) localStorage.setItem('saved_username', username); else localStorage.removeItem('saved_username');
+                await createUserSession(cred.user.uid, userData);
                 await checkAuthSession(cred.user);
-            }catch(err){
-                console.error('Firebase Authentication login error:',err);
+            } catch(err) {
+                console.error('Firebase Authentication login error:', err);
                 alert(TRANSLATIONS[currentLang].errLoginFailed);
             }
         });
 
-        async function logout(){await endUserSession(true);checkAuthSession();}
+        async function logout() { await endUserSession(true); checkAuthSession(); }
 
-        function openChangeCodeModal(){
-            const modalEl=document.getElementById('changeCodeModal');
-            const modal=bootstrap.Modal.getOrCreateInstance(modalEl);
-            document.getElementById('newRegCodeInput').value=currentRegCode; modal.show();
+        function openChangeCodeModal() {
+            const modalEl = document.getElementById('changeCodeModal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            document.getElementById('newRegCodeInput').value = currentRegCode; modal.show();
         }
 
-        document.getElementById('changeCodeForm').addEventListener('submit',async(e)=>{
+        document.getElementById('changeCodeForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            if(!await requireAdmin())return;
-            const newCode=document.getElementById('newRegCodeInput').value.trim();
-            if(newCode){await settingsRef.child('register_code').set(newCode);alert(TRANSLATIONS[currentLang].codeChangedSuccess);const modal=bootstrap.Modal.getInstance(document.getElementById('changeCodeModal'));if(modal)modal.hide();}
+            if (!await requireAdmin()) return;
+            const newCode = document.getElementById('newRegCodeInput').value.trim();
+            if (newCode) { await settingsRef.child('register_code').set(newCode); alert(TRANSLATIONS[currentLang].codeChangedSuccess); const modal = bootstrap.Modal.getInstance(document.getElementById('changeCodeModal')); if (modal) modal.hide(); }
         });
 
         // --- Admin User Management ---
-        async function requireAdmin(){
-            const uid=auth.currentUser && auth.currentUser.uid;
-            if(!uid)return false;
-            const snap=await usersRef.child(uid).once('value'); const user=snap.val();
-            if(!user||user.role!=='admin'||user.status!=='approved'){alert(TRANSLATIONS[currentLang].adminOnly);return false;}
-            currentUserKey=uid; currentUserData=user; return true;
+        async function requireAdmin() {
+            const uid = auth.currentUser && auth.currentUser.uid;
+            if (!uid) return false;
+            const snap = await usersRef.child(uid).once('value'); const user = snap.val();
+            if (!user || user.role !== 'admin' || user.status !== 'approved') { alert(TRANSLATIONS[currentLang].adminOnly); return false; }
+            currentUserKey = uid; currentUserData = user; return true;
         }
 
         async function loadAdminUsers() {
@@ -1182,25 +1121,24 @@
             await loadAdminUsers();
         }
 
-        async function requireApprovedUser(){
-            const uid=auth.currentUser && auth.currentUser.uid;
-            if(!uid){await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}
-            const snap=await usersRef.child(uid).once('value'); const user=snap.val();
-            if(!user||user.status!=='approved'){await endUserSession(true);await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}
-            currentUserKey=uid;currentUserData=user;return true;
+        async function requireApprovedUser() {
+            const uid = auth.currentUser && auth.currentUser.uid;
+            if (!uid) { await checkAuthSession(); alert(TRANSLATIONS[currentLang].errAccountNotApproved); return false; }
+            const snap = await usersRef.child(uid).once('value'); const user = snap.val();
+            if (!user || user.status !== 'approved') { await endUserSession(true); await checkAuthSession(); alert(TRANSLATIONS[currentLang].errAccountNotApproved); return false; }
+            currentUserKey = uid; currentUserData = user; return true;
         }
 
         auth.onAuthStateChanged(async (firebaseUser) => {
             if (firebaseUser) {
                 await checkAuthSession(firebaseUser);
             } else {
-                const dashboard=document.getElementById('mainDashboard');
-                if(dashboard && dashboard.style.display==='block') await checkAuthSession(null);
+                const dashboard = document.getElementById('mainDashboard');
+                if (dashboard && dashboard.style.display === 'block') await checkAuthSession(null);
             }
         });
 
         // --- 4. ระบบ Real-time Sync จาก Firebase ---
-
         bossRef.on('value', (snapshot) => {
             const rawData = snapshot.val() || {};
             activeBosses = {};
@@ -1226,7 +1164,6 @@
             renderTable();
         });
 
-        // --- UI & Control Functions ---
         function applyLanguage() {
             const langData = TRANSLATIONS[currentLang];
             document.querySelectorAll('[data-i18n]').forEach(el => {
@@ -1537,7 +1474,6 @@
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
-            auth.onAuthStateChanged(() => checkAuthSession());
             checkAuthSession();
 
             setInterval(updateCountdowns, 1000);
