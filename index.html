@@ -147,7 +147,7 @@
             <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
                 <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
-                <button onclick="openChangeCodeModal()" class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>
+                <button onclick="openChangeCodeModal()" data-admin-only class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>
                 <button onclick="logout()" class="btn btn-outline-danger btn-sm" data-i18n="btnLogout">🚪 ออกจากระบบ</button>
             </div>
         </div>
@@ -182,6 +182,55 @@
             <div class="d-flex gap-2">
                 <button onclick="openBotSettingsModal()" class="btn btn-outline-info btn-sm fw-bold" data-i18n="btnBotSettings">⚙️ ตั้งค่าบอท</button>
                 <button id="notifyToggleBtn" onclick="toggleNotifications()" class="btn btn-warning btn-sm fw-bold" data-i18n="enableNotify">🔔 เปิดระบบเสียง & แจ้งเตือน</button>
+            </div>
+        </div>
+
+        <!-- 🔐 Admin User Management -->
+        <div id="adminPanel" class="card p-4 mb-4 shadow-sm" style="display:none;">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <div>
+                    <h4 class="card-title text-danger mb-1" data-i18n="adminPanelTitle">🛡️ Admin • จัดการผู้ใช้งาน</h4>
+                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน</small>
+                </div>
+                <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
+            </div>
+
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <div class="card p-3 h-100">
+                        <div class="text-warning small" data-i18n="adminPending">รออนุมัติ</div>
+                        <div class="fs-3 fw-bold" id="adminPendingCount">0</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 h-100">
+                        <div class="text-success small" data-i18n="adminActive">กำลังใช้งาน</div>
+                        <div class="fs-3 fw-bold" id="adminActiveCount">0</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 h-100">
+                        <div class="text-info small" data-i18n="adminTotal">ผู้ใช้ทั้งหมด</div>
+                        <div class="fs-3 fw-bold" id="adminTotalCount">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th data-i18n="adminThUser">ผู้ใช้</th>
+                            <th data-i18n="adminThStatus">สถานะ</th>
+                            <th data-i18n="adminThCreated">สมัครเมื่อ</th>
+                            <th data-i18n="adminThLastLogin">เข้าสู่ระบบล่าสุด</th>
+                            <th data-i18n="adminThLastSeen">ใช้งานล่าสุด</th>
+                            <th data-i18n="adminThLogins">จำนวนครั้ง</th>
+                            <th data-i18n="adminThAction">จัดการ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="adminUsersBody"></tbody>
+                </table>
             </div>
         </div>
 
@@ -302,6 +351,13 @@
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
         const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
+        const sessionsRef = db.ref('dashboard_sessions');
+
+        // 🔐 Admin account: สร้างอัตโนมัติครั้งแรก หากยังไม่มี
+        // เปลี่ยนค่า ADMIN_DEFAULT_PASSWORD ก่อนนำระบบขึ้นใช้งานจริง
+        const ADMIN_DEFAULT_USERNAME = "admin";
+        const ADMIN_DEFAULT_PASSWORD = "Admin@1234";
+        const ACTIVE_SESSION_TIMEOUT_MS = 90000;
 
         // โค้ดสมัครเริ่มต้น
         let currentRegCode = "1234";
@@ -324,15 +380,20 @@
 
         // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
         ['ttsThToggle', 'ttsEnToggle', 'ttsKoToggle'].forEach(id => {
-            document.getElementById(id).addEventListener('change', (e) => {
+            document.getElementById(id).addEventListener('change', async (e) => {
+                if (!await requireApprovedUser()) {
+                    e.target.checked = !e.target.checked;
+                    return;
+                }
                 const key = id === 'ttsThToggle' ? 'tts_th_enabled' : 
                             id === 'ttsEnToggle' ? 'tts_en_enabled' : 'tts_ko_enabled';
-                botSettingsRef.child(key).set(e.target.checked);
+                await botSettingsRef.child(key).set(e.target.checked);
             });
         });
 
         // ฟังก์ชันเปิด Modal ตั้งค่า Bot
-        function openBotSettingsModal() {
+        async function openBotSettingsModal() {
+            if (!await requireApprovedUser()) return;
             const modalEl = document.getElementById('botSettingsModal');
             const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
             modal.show();
@@ -410,7 +471,33 @@
                 spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
                 spawnNotifyBody: "บอส {boss} ได้เกิดแล้วในขณะนี้",
                 noticeNotifyTitle: "⏳ {boss} ใกล้เกิด!",
-                noticeNotifyBody: "บอส {boss} จะเกิดในอีก {min} นาที"
+                noticeNotifyBody: "บอส {boss} จะเกิดในอีก {min} นาที",
+                regPending: "ลงทะเบียนสำเร็จ แต่บัญชียังรอ Admin อนุมัติ จึงยังเข้าใช้งานไม่ได้",
+                errPendingApproval: "บัญชีนี้กำลังรอ Admin อนุมัติ",
+                errAccountRejected: "บัญชีนี้ถูกปฏิเสธหรือปิดการใช้งานโดย Admin",
+                errAccountNotApproved: "บัญชีนี้ยังไม่ได้รับอนุมัติจาก Admin",
+                errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",
+                errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",
+                adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",
+                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน",
+                adminRefresh: "🔄 รีเฟรช",
+                adminPending: "รออนุมัติ",
+                adminActive: "กำลังใช้งาน",
+                adminTotal: "ผู้ใช้ทั้งหมด",
+                adminThUser: "ผู้ใช้",
+                adminThStatus: "สถานะ",
+                adminThCreated: "สมัครเมื่อ",
+                adminThLastLogin: "เข้าสู่ระบบล่าสุด",
+                adminThLastSeen: "ใช้งานล่าสุด",
+                adminThLogins: "จำนวนครั้ง",
+                adminThAction: "จัดการ",
+                adminApprove: "อนุมัติ",
+                adminReject: "ปฏิเสธ",
+                adminDisable: "ปิดใช้งาน",
+                adminActivate: "เปิดใช้งาน",
+                adminNoUsers: "ยังไม่มีผู้ใช้งาน",
+                adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
+                adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
             },
             en: {
                 authTitle: "⚔️ Boss Timer Access",
@@ -482,7 +569,33 @@
                 spawnNotifyTitle: "⚔️ {boss} Spawned!",
                 spawnNotifyBody: "Boss {boss} has spawned!",
                 noticeNotifyTitle: "⏳ {boss} Spawning Soon!",
-                noticeNotifyBody: "Boss {boss} will spawn in {min} minutes"
+                noticeNotifyBody: "Boss {boss} will spawn in {min} minutes",
+                regPending: "Registration submitted. Your account is pending Admin approval.",
+                errPendingApproval: "This account is waiting for Admin approval.",
+                errAccountRejected: "This account was rejected or disabled by Admin.",
+                errAccountNotApproved: "This account has not been approved by Admin.",
+                errWeakAccount: "Username must be at least 3 characters and password at least 6 characters.",
+                errAdminUsername: "The admin username is reserved.",
+                adminPanelTitle: "🛡️ Admin • User Management",
+                adminPanelSubtitle: "Approve registrations, review history, and see active users.",
+                adminRefresh: "🔄 Refresh",
+                adminPending: "Pending",
+                adminActive: "Active Now",
+                adminTotal: "Total Users",
+                adminThUser: "User",
+                adminThStatus: "Status",
+                adminThCreated: "Registered",
+                adminThLastLogin: "Last Login",
+                adminThLastSeen: "Last Seen",
+                adminThLogins: "Logins",
+                adminThAction: "Action",
+                adminApprove: "Approve",
+                adminReject: "Reject",
+                adminDisable: "Disable",
+                adminActivate: "Activate",
+                adminNoUsers: "No users found.",
+                adminOnly: "Admin only.",
+                adminCannotChangeAdmin: "The Admin account cannot be changed."
             },
             ko: {
                 authTitle: "⚔️ Boss Timer Access",
@@ -554,7 +667,33 @@
                 spawnNotifyTitle: "⚔️ {boss} 젠 완료!",
                 spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",
                 noticeNotifyTitle: "⏳ {boss} 젠 임박!",
-                noticeNotifyBody: "보스 {boss}(이)가 {min}분 후에 젠됩니다."
+                noticeNotifyBody: "보스 {boss}(이)가 {min}분 후에 젠됩니다.",
+                regPending: "회원가입이 완료되었습니다. Admin 승인을 기다려 주세요.",
+                errPendingApproval: "이 계정은 Admin 승인을 기다리고 있습니다.",
+                errAccountRejected: "이 계정은 Admin에 의해 거부되었거나 비활성화되었습니다.",
+                errAccountNotApproved: "이 계정은 아직 Admin의 승인을 받지 못했습니다.",
+                errWeakAccount: "사용자 이름은 3자 이상, 비밀번호는 6자 이상이어야 합니다.",
+                errAdminUsername: "admin 사용자 이름은 일반 가입에 사용할 수 없습니다.",
+                adminPanelTitle: "🛡️ Admin • 사용자 관리",
+                adminPanelSubtitle: "가입 승인, 이용 기록 및 현재 접속 사용자를 확인합니다.",
+                adminRefresh: "🔄 새로고침",
+                adminPending: "승인 대기",
+                adminActive: "현재 접속",
+                adminTotal: "전체 사용자",
+                adminThUser: "사용자",
+                adminThStatus: "상태",
+                adminThCreated: "가입일",
+                adminThLastLogin: "최근 로그인",
+                adminThLastSeen: "최근 활동",
+                adminThLogins: "로그인 횟수",
+                adminThAction: "관리",
+                adminApprove: "승인",
+                adminReject: "거부",
+                adminDisable: "비활성화",
+                adminActivate: "활성화",
+                adminNoUsers: "사용자가 없습니다.",
+                adminOnly: "Admin만 사용할 수 있습니다.",
+                adminCannotChangeAdmin: "Admin 계정의 상태는 변경할 수 없습니다."
             }
         };
 
@@ -623,7 +762,134 @@
             return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
         }
 
-        function checkAuthSession() {
+        function makeUserKey(username) {
+            return username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+        }
+
+        function formatAdminDate(value) {
+            if (!value) return '-';
+            const d = new Date(value);
+            if (isNaN(d.getTime())) return '-';
+            return d.toLocaleString('th-TH', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            });
+        }
+
+        async function ensureAdminAccount() {
+            const adminKey = makeUserKey(ADMIN_DEFAULT_USERNAME);
+            const adminRef = usersRef.child(adminKey);
+            const snap = await adminRef.once('value');
+            const now = new Date().toISOString();
+
+            if (!snap.exists()) {
+                const pwdHash = await hashPassword(ADMIN_DEFAULT_PASSWORD);
+                await adminRef.set({
+                    username: ADMIN_DEFAULT_USERNAME,
+                    password: pwdHash,
+                    role: 'admin',
+                    status: 'approved',
+                    createdAt: now,
+                    approvedAt: now,
+                    approvedBy: 'SYSTEM',
+                    lastLoginAt: null,
+                    lastLogoutAt: null,
+                    lastSeenAt: null,
+                    loginCount: 0
+                });
+                console.log('✅ สร้าง Admin account เริ่มต้นแล้ว:', ADMIN_DEFAULT_USERNAME);
+            }
+        }
+
+        let currentSessionId = null;
+        let currentUserKey = null;
+        let currentUserData = null;
+        let heartbeatTimer = null;
+
+        async function createUserSession(userKey, userData) {
+            currentSessionId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`);
+            currentUserKey = userKey;
+            currentUserData = userData;
+
+            const now = new Date().toISOString();
+            await sessionsRef.child(currentSessionId).set({
+                userKey: userKey,
+                username: userData.username,
+                loginAt: now,
+                lastSeenAt: now,
+                active: true
+            });
+
+            await usersRef.child(userKey).update({
+                lastLoginAt: now,
+                lastSeenAt: now,
+                lastLogoutAt: null,
+                loginCount: (Number(userData.loginCount) || 0) + 1
+            });
+
+            localStorage.setItem('logged_user', userData.username);
+            localStorage.setItem('logged_user_key', userKey);
+            localStorage.setItem('logged_session_id', currentSessionId);
+            localStorage.setItem('logged_role', userData.role || 'user');
+
+            startSessionHeartbeat();
+        }
+
+        function startSessionHeartbeat() {
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            heartbeatTimer = setInterval(async () => {
+                const sessionId = localStorage.getItem('logged_session_id');
+                const userKey = localStorage.getItem('logged_user_key');
+                if (!sessionId || !userKey) return;
+
+                const now = new Date().toISOString();
+                try {
+                    await sessionsRef.child(sessionId).update({ lastSeenAt: now, active: true });
+                    await usersRef.child(userKey).update({ lastSeenAt: now });
+                } catch (err) {
+                    console.warn('Session heartbeat error:', err);
+                }
+            }, 30000);
+        }
+
+        async function endUserSession() {
+            const sessionId = localStorage.getItem('logged_session_id');
+            const userKey = localStorage.getItem('logged_user_key');
+            const now = new Date().toISOString();
+
+            if (heartbeatTimer) {
+                clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
+
+            try {
+                if (sessionId) {
+                    await sessionsRef.child(sessionId).update({
+                        lastSeenAt: now,
+                        logoutAt: now,
+                        active: false
+                    });
+                }
+                if (userKey) {
+                    await usersRef.child(userKey).update({
+                        lastSeenAt: now,
+                        lastLogoutAt: now
+                    });
+                }
+            } catch (err) {
+                console.warn('Session logout update error:', err);
+            }
+
+            localStorage.removeItem('logged_user');
+            localStorage.removeItem('logged_user_key');
+            localStorage.removeItem('logged_session_id');
+            localStorage.removeItem('logged_role');
+            currentSessionId = null;
+            currentUserKey = null;
+            currentUserData = null;
+        }
+
+        async function checkAuthSession() {
             const savedUser = localStorage.getItem('saved_username');
             if (savedUser) {
                 document.getElementById('loginUser').value = savedUser;
@@ -631,42 +897,103 @@
             }
 
             const loggedUser = localStorage.getItem('logged_user');
-            if (loggedUser) {
-                document.getElementById('authContainer').style.display = 'none';
-                document.getElementById('mainDashboard').style.display = 'block';
-                document.getElementById('userBadge').innerText = `👤 ${loggedUser}`;
-            } else {
-                document.getElementById('authContainer').style.display = 'block';
-                document.getElementById('mainDashboard').style.display = 'none';
+            const loggedUserKey = localStorage.getItem('logged_user_key');
+
+            if (loggedUser && loggedUserKey) {
+                try {
+                    const snap = await usersRef.child(loggedUserKey).once('value');
+                    if (!snap.exists()) throw new Error('USER_NOT_FOUND');
+
+                    const userData = snap.val();
+                    if (userData.username !== loggedUser || userData.status !== 'approved') {
+                        await endUserSession();
+                        throw new Error('ACCOUNT_NOT_APPROVED');
+                    }
+
+                    currentUserData = userData;
+                    currentUserKey = loggedUserKey;
+
+                    document.getElementById('authContainer').style.display = 'none';
+                    document.getElementById('mainDashboard').style.display = 'block';
+                    document.getElementById('userBadge').innerText =
+                        `👤 ${loggedUser}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
+
+                    const adminPanel = document.getElementById('adminPanel');
+                    const adminOnlyButtons = document.querySelectorAll('[data-admin-only]');
+                    if (userData.role === 'admin') {
+                        adminPanel.style.display = 'block';
+                        adminOnlyButtons.forEach(el => el.style.display = '');
+                        await loadAdminUsers();
+                    } else {
+                        adminPanel.style.display = 'none';
+                        adminOnlyButtons.forEach(el => el.style.display = 'none');
+                    }
+
+                    startSessionHeartbeat();
+                    return;
+                } catch (err) {
+                    if (err.message === 'ACCOUNT_NOT_APPROVED') {
+                        alert(TRANSLATIONS[currentLang].errAccountNotApproved);
+                    }
+                }
             }
+
+            document.getElementById('authContainer').style.display = 'block';
+            document.getElementById('mainDashboard').style.display = 'none';
+            const adminPanel = document.getElementById('adminPanel');
+            if (adminPanel) adminPanel.style.display = 'none';
         }
 
         document.getElementById('registerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+
             const username = document.getElementById('regUser').value.trim();
             const password = document.getElementById('regPass').value;
             const regCode = document.getElementById('regCode').value.trim();
+
+            if (username.length < 3 || password.length < 6) {
+                alert(TRANSLATIONS[currentLang].errWeakAccount);
+                return;
+            }
+
+            if (makeUserKey(username) === makeUserKey(ADMIN_DEFAULT_USERNAME)) {
+                alert(TRANSLATIONS[currentLang].errAdminUsername);
+                return;
+            }
 
             if (regCode !== currentRegCode) {
                 alert(TRANSLATIONS[currentLang].errRegCodeInvalid);
                 return;
             }
 
-            const userKey = username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+            const userKey = makeUserKey(username);
             const snap = await usersRef.child(userKey).once('value');
+
             if (snap.exists()) {
                 alert(TRANSLATIONS[currentLang].errUserExists);
                 return;
             }
 
             const pwdHash = await hashPassword(password);
+            const now = new Date().toISOString();
+
             await usersRef.child(userKey).set({
                 username: username,
                 password: pwdHash,
-                createdAt: new Date().toISOString()
+                role: 'user',
+                status: 'pending',
+                createdAt: now,
+                approvedAt: null,
+                approvedBy: null,
+                rejectedAt: null,
+                rejectedBy: null,
+                lastLoginAt: null,
+                lastLogoutAt: null,
+                lastSeenAt: null,
+                loginCount: 0
             });
 
-            alert(TRANSLATIONS[currentLang].regSuccess);
+            alert(TRANSLATIONS[currentLang].regPending);
             document.getElementById('registerForm').reset();
             const loginTab = new bootstrap.Tab(document.getElementById('login-tab'));
             loginTab.show();
@@ -674,11 +1001,12 @@
 
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+
             const username = document.getElementById('loginUser').value.trim();
             const password = document.getElementById('loginPass').value;
             const rememberMe = document.getElementById('rememberMe').checked;
 
-            const userKey = username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+            const userKey = makeUserKey(username);
             const snap = await usersRef.child(userKey).once('value');
 
             if (!snap.exists()) {
@@ -694,18 +1022,33 @@
                 return;
             }
 
+            if (userData.status === 'pending') {
+                alert(TRANSLATIONS[currentLang].errPendingApproval);
+                return;
+            }
+
+            if (userData.status === 'rejected' || userData.status === 'disabled') {
+                alert(TRANSLATIONS[currentLang].errAccountRejected);
+                return;
+            }
+
+            if (userData.status !== 'approved') {
+                alert(TRANSLATIONS[currentLang].errAccountNotApproved);
+                return;
+            }
+
             if (rememberMe) {
                 localStorage.setItem('saved_username', username);
             } else {
                 localStorage.removeItem('saved_username');
             }
 
-            localStorage.setItem('logged_user', userData.username);
-            checkAuthSession();
+            await createUserSession(userKey, userData);
+            await checkAuthSession();
         });
 
-        function logout() {
-            localStorage.removeItem('logged_user');
+        async function logout() {
+            await endUserSession();
             checkAuthSession();
         }
 
@@ -718,6 +1061,17 @@
 
         document.getElementById('changeCodeForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+
+            const adminKey = localStorage.getItem('logged_user_key');
+            if (!adminKey) return;
+
+            const adminSnap = await usersRef.child(adminKey).once('value');
+            const adminData = adminSnap.val();
+            if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
+                alert(TRANSLATIONS[currentLang].adminOnly);
+                return;
+            }
+
             const newCode = document.getElementById('newRegCodeInput').value.trim();
             if (newCode) {
                 await settingsRef.child('register_code').set(newCode);
@@ -728,7 +1082,184 @@
             }
         });
 
+        // --- Admin User Management ---
+        async function loadAdminUsers() {
+            if (!currentUserKey) currentUserKey = localStorage.getItem('logged_user_key');
+            if (!currentUserKey) return;
+
+            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminData = adminSnap.val();
+
+            if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
+                document.getElementById('adminPanel').style.display = 'none';
+                return;
+            }
+
+            currentUserData = adminData;
+
+            const usersSnap = await usersRef.once('value');
+            const users = usersSnap.val() || {};
+            const sessionsSnap = await sessionsRef.once('value');
+            const sessions = sessionsSnap.val() || {};
+            const nowMs = Date.now();
+
+            const userRows = Object.entries(users).map(([key, user]) => {
+                const userSessions = Object.values(sessions).filter(s => s && s.userKey === key);
+                const latestSession = userSessions.sort((a, b) =>
+                    new Date(b.lastSeenAt || b.loginAt || 0) - new Date(a.lastSeenAt || a.loginAt || 0)
+                )[0];
+
+                const lastSeen = user.lastSeenAt || (latestSession && latestSession.lastSeenAt);
+                const active = !!lastSeen && (nowMs - new Date(lastSeen).getTime() <= ACTIVE_SESSION_TIMEOUT_MS) &&
+                               !!latestSession && latestSession.active !== false;
+
+                return { key, user, active };
+            });
+
+            const pendingCount = userRows.filter(x => x.user.status === 'pending').length;
+            const activeCount = userRows.filter(x => x.active && x.user.status === 'approved').length;
+
+            document.getElementById('adminPendingCount').innerText = pendingCount;
+            document.getElementById('adminActiveCount').innerText = activeCount;
+            document.getElementById('adminTotalCount').innerText = userRows.length;
+
+            const tbody = document.getElementById('adminUsersBody');
+            tbody.innerHTML = '';
+
+            userRows.sort((a, b) => {
+                const order = { pending: 0, approved: 1, rejected: 2, disabled: 3 };
+                return (order[a.user.status] ?? 9) - (order[b.user.status] ?? 9) ||
+                       (new Date(b.user.createdAt || 0) - new Date(a.user.createdAt || 0));
+            });
+
+            userRows.forEach(({ key, user, active }) => {
+                const statusBadge = user.role === 'admin'
+                    ? '<span class="badge bg-danger">🛡️ ADMIN</span>'
+                    : user.status === 'pending'
+                        ? '<span class="badge bg-warning text-dark">⏳ Pending</span>'
+                        : user.status === 'approved'
+                            ? `<span class="badge ${active ? 'bg-success' : 'bg-primary'}">${active ? '🟢 Active' : '✅ Approved'}</span>`
+                            : user.status === 'rejected'
+                                ? '<span class="badge bg-danger">❌ Rejected</span>'
+                                : '<span class="badge bg-secondary">⛔ Disabled</span>';
+
+                let actionHtml = '-';
+                if (user.role !== 'admin') {
+                    if (user.status === 'pending') {
+                        actionHtml = `
+                            <div class="d-flex gap-1 flex-wrap">
+                                <button class="btn btn-sm btn-success" onclick="setUserStatus('${key}', 'approved')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button>
+                                <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'rejected')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
+                            </div>`;
+                    } else if (user.status === 'approved') {
+                        actionHtml = `<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;
+                    } else if (user.status === 'disabled' || user.status === 'rejected') {
+                        actionHtml = `<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}', 'approved')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;
+                    }
+                }
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>
+                        <div class="fw-bold text-info">${escapeHtml(user.username || key)}</div>
+                        <small class="text-white-50">${user.role === 'admin' ? 'Admin' : 'User'}</small>
+                    </td>
+                    <td>${statusBadge}</td>
+                    <td><small>${formatAdminDate(user.createdAt)}</small></td>
+                    <td><small>${formatAdminDate(user.lastLoginAt)}</small></td>
+                    <td><small>${formatAdminDate(user.lastSeenAt)}</small></td>
+                    <td>${Number(user.loginCount) || 0}</td>
+                    <td>${actionHtml}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            if (!userRows.length) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
+            }
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+            }[ch]));
+        }
+
+        async function setUserStatus(userKey, newStatus) {
+            if (!currentUserKey) return;
+
+            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminData = adminSnap.val();
+            if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
+                alert(TRANSLATIONS[currentLang].adminOnly);
+                return;
+            }
+
+            const targetSnap = await usersRef.child(userKey).once('value');
+            if (!targetSnap.exists()) return;
+            const target = targetSnap.val();
+
+            if (target.role === 'admin') {
+                alert(TRANSLATIONS[currentLang].adminCannotChangeAdmin);
+                return;
+            }
+
+            const now = new Date().toISOString();
+            const updates = { status: newStatus };
+
+            if (newStatus === 'approved') {
+                updates.approvedAt = now;
+                updates.approvedBy = adminData.username;
+                updates.rejectedAt = null;
+                updates.rejectedBy = null;
+            } else if (newStatus === 'rejected') {
+                updates.rejectedAt = now;
+                updates.rejectedBy = adminData.username;
+            }
+
+            await usersRef.child(userKey).update(updates);
+
+            // หากถูกปิดการใช้งาน ให้ปิด session ที่กำลัง active ของ user นั้นด้วย
+            if (newStatus === 'disabled' || newStatus === 'rejected') {
+                const sessionsSnap = await sessionsRef.once('value');
+                const sessions = sessionsSnap.val() || {};
+                const sessionUpdates = {};
+                Object.entries(sessions).forEach(([sessionId, session]) => {
+                    if (session && session.userKey === userKey && session.active !== false) {
+                        sessionUpdates[`${sessionId}/active`] = false;
+                        sessionUpdates[`${sessionId}/logoutAt`] = now;
+                    }
+                });
+                if (Object.keys(sessionUpdates).length) {
+                    await sessionsRef.update(sessionUpdates);
+                }
+            }
+
+            await loadAdminUsers();
+        }
+
+        async function requireApprovedUser() {
+            const userKey = localStorage.getItem('logged_user_key');
+            if (!userKey) {
+                alert(TRANSLATIONS[currentLang].errAccountNotApproved);
+                await checkAuthSession();
+                return false;
+            }
+            const snap = await usersRef.child(userKey).once('value');
+            const user = snap.val();
+            if (!user || user.status !== 'approved') {
+                await endUserSession();
+                await checkAuthSession();
+                alert(TRANSLATIONS[currentLang].errAccountNotApproved);
+                return false;
+            }
+            currentUserKey = userKey;
+            currentUserData = user;
+            return true;
+        }
+
         // --- 4. ระบบ Real-time Sync จาก Firebase ---
+
         bossRef.on('value', (snapshot) => {
             const rawData = snapshot.val() || {};
             activeBosses = {};
@@ -934,6 +1465,7 @@
 
         document.getElementById('bossForm').addEventListener('submit', async (e) => {
             e.preventDefault();
+            if (!await requireApprovedUser()) return;
             const bossInput = document.getElementById('bossSelect').value.trim();
             const timeInput = document.getElementById('killTime').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
@@ -964,11 +1496,13 @@
             document.getElementById('noticeMinutes').value = 5;
         });
 
-        function deleteBoss(bossName) {
-            bossRef.child(bossName).remove();
+        async function deleteBoss(bossName) {
+            if (!await requireApprovedUser()) return;
+            await bossRef.child(bossName).remove();
         }
 
         document.getElementById('clearAllBtn').addEventListener('click', async () => {
+            if (!await requireApprovedUser()) return;
             if (confirm(TRANSLATIONS[currentLang].confirmClear)) {
                 await bossRef.remove();
             }
@@ -1062,10 +1596,29 @@
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
-            checkAuthSession();
+            ensureAdminAccount()
+                .then(() => checkAuthSession())
+                .catch(err => {
+                    console.error("Admin initialization error:", err);
+                    checkAuthSession();
+                });
 
             setInterval(updateCountdowns, 1000);
+            setInterval(() => {
+                if (currentUserData && currentUserData.role === 'admin') loadAdminUsers();
+            }, 30000);
         }
+
+        window.addEventListener('beforeunload', () => {
+            const sessionId = localStorage.getItem('logged_session_id');
+            if (sessionId) {
+                sessionsRef.child(sessionId).update({
+                    lastSeenAt: new Date().toISOString(),
+                    active: false,
+                    logoutAt: new Date().toISOString()
+                });
+            }
+        });
 
         window.addEventListener('DOMContentLoaded', initApp);
     </script>
