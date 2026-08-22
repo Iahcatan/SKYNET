@@ -374,9 +374,8 @@
         const sessionsRef = db.ref('dashboard_sessions');
 
         // 🔐 Admin account
-        // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด
-        // users/<ADMIN_UID> เป็น role=admin และ status=approved ใน Realtime Database
-        // ไม่มีการสร้าง Admin อัตโนมัติจากหน้าเว็บ เพื่อป้องกันผู้ใช้ทั่วไปยกระดับสิทธิ์
+        // เดิมบัญชี Admin ต้องสร้างใน Firebase แต่ได้ทำการแก้ไขให้สร้างผ่านหน้าเว็บได้
+        // โดยใช้ชื่อผู้ใช้ "admin" จะได้รับสิทธิ์ Admin และอนุมัติอัตโนมัติ
         const ADMIN_DEFAULT_USERNAME = "admin";
         const ACTIVE_SESSION_TIMEOUT_MS = 90000;
 
@@ -486,7 +485,7 @@
                 grantNotifyPrompt: "กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ",
                 errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",
                 errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
-                regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
+                regSuccess: "ลงทะเบียนและรับสิทธิ์สำเร็จ! กรุณาเข้าสู่ระบบ",
                 errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
                 codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",
                 spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
@@ -911,17 +910,40 @@
             const password=document.getElementById('regPass').value;
             const regCode=document.getElementById('regCode').value.trim();
             if(username.length<3 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}
-            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
+            
+            // นำเงื่อนไขการบล็อกชื่อ admin ออก เพื่อให้สามารถสมัครเป็นแอดมินเองได้
+            // if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
+            
             if(regCode!==currentRegCode){alert(TRANSLATIONS[currentLang].errRegCodeInvalid);return;}
+            
+            let userRole = 'user';
+            let userStatus = 'pending';
+            let approvedAtVal = null;
+            let approvedByVal = null;
+
+            // หากผู้ใช้สมัครด้วยชื่อแอดมิน ให้สิทธิ์เป็น Admin และอนุมัติสถานะการล็อกอินอัตโนมัติ
+            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){
+                userRole = 'admin';
+                userStatus = 'approved';
+                approvedAtVal = new Date().toISOString();
+                approvedByVal = 'system';
+            }
+
             try{
                 const cred=await auth.createUserWithEmailAndPassword(usernameToAuthEmail(username),password);
                 const now=new Date().toISOString();
                 await usersRef.child(cred.user.uid).set({
-                    username, usernameKey:makeUserKey(username), role:'user', status:'pending', createdAt:now,
-                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
+                    username, usernameKey:makeUserKey(username), role:userRole, status:userStatus, createdAt:now,
+                    approvedAt:approvedAtVal,approvedBy:approvedByVal,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
                 });
                 await auth.signOut();
-                alert(TRANSLATIONS[currentLang].regPending);
+                
+                if (userStatus === 'approved') {
+                    alert(TRANSLATIONS[currentLang].regSuccess);
+                } else {
+                    alert(TRANSLATIONS[currentLang].regPending);
+                }
+                
                 document.getElementById('registerForm').reset();
                 new bootstrap.Tab(document.getElementById('login-tab')).show();
             }catch(err){
