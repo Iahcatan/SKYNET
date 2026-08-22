@@ -106,8 +106,8 @@
                 <div class="tab-pane fade show active" id="loginPane" role="tabpanel">
                     <form id="loginForm" autocomplete="off">
                         <div class="mb-3">
-                            <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
-                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกอีเมล" data-i18n-ph="phLoginUser" required>
+                            <label class="form-label" data-i18n="labelEmail">อีเมล</label>
+                            <input type="email" id="loginUser" class="form-control" placeholder="กรอกอีเมล" data-i18n-ph="phRegEmail" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
@@ -115,7 +115,7 @@
                         </div>
                         <div class="form-check mb-3">
                             <input class="form-check-input" type="checkbox" id="rememberMe">
-                            <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
+                            <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำการเข้าสู่ระบบ</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
                         <button type="button" onclick="sendPasswordReset()" class="btn btn-link text-info w-100 mt-2" data-i18n="forgotPassword">ลืมรหัสผ่าน? ส่งลิงก์รีเซ็ต</button>
@@ -136,10 +136,6 @@
                             <label class="form-label" data-i18n="labelEmail">อีเมล</label>
                             <input type="email" id="regEmail" class="form-control" placeholder="อีเมลสำหรับเข้าสู่ระบบและรีเซ็ตรหัสผ่าน" data-i18n-ph="phRegEmail" required>
                         </div>
-                        <div class="mb-3">
-                            <label class="form-label" data-i18n="labelRegCode">โค้ดสำหรับสมัคร</label>
-                            <input type="password" id="regCode" class="form-control" placeholder="กรอกโค้ดสำหรับสมัคร" data-i18n-ph="phRegCode" required>
-                        </div>
                         <button type="submit" class="btn btn-success w-100 fw-bold" data-i18n="btnRegister">📝 ลงทะเบียน</button>
                     </form>
                 </div>
@@ -153,7 +149,6 @@
             <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
                 <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
-                <button onclick="openChangeCodeModal()" class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>
                 <button onclick="logout()" class="btn btn-outline-danger btn-sm" data-i18n="btnLogout">🚪 ออกจากระบบ</button>
             </div>
         </div>
@@ -262,27 +257,6 @@
         </footer>
     </div>
 
-    <!-- Modal เปลี่ยนรหัสผ่าน -->
-    <div class="modal fade" id="changeCodeModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content p-3">
-                <div class="modal-header border-secondary">
-                    <h5 class="modal-title text-warning" data-i18n="modalChangeCodeTitle">🔑 เปลี่ยนโค้ดสำหรับสมัคร</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <form id="changeCodeForm">
-                        <div class="mb-3">
-                            <label class="form-label" data-i18n="labelNewRegCode">โค้ดสมัครใหม่</label>
-                            <input type="text" id="newRegCodeInput" class="form-control" placeholder="กรอกโค้ดสำหรับสมัครใหม่" data-i18n-ph="phNewRegCode" required>
-                        </div>
-                        <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnSaveCode">💾 บันทึกโค้ดใหม่</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <!-- Modal ตั้งค่า Bot Notification -->
     <div class="modal fade" id="botSettingsModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -312,15 +286,15 @@
 
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
-          const firebaseConfig = {
-    apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqVAFuWby094",
-    authDomain: "skynet-3ad44.firebaseapp.com",
-    databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app",
-    projectId: "skynet-3ad44",
-    storageBucket: "skynet-3ad44.firebasestorage.app",
-    messagingSenderId: "7120270934",
-    appId: "1:7120270934:web:5e3db3f5dae6542352adf7"
-};
+        const firebaseConfig = {
+            apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqVAFuWby094",
+            authDomain: "skynet-3ad44.firebaseapp.com",
+            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "skynet-3ad44",
+            storageBucket: "skynet-3ad44.firebasestorage.app",
+            messagingSenderId: "7120270934",
+            appId: "1:7120270934:web:5e3db3f5dae6542352adf7"
+        };
 
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
@@ -331,7 +305,6 @@
         const botSettingsRef = db.ref('bot_settings');
         const sessionsRef = db.ref('dashboard_sessions');
 
-        let currentRegCode = "1234";
         let currentUserData = null;
         let activeBosses = {};
         let currentUserUid = null;
@@ -351,15 +324,10 @@
                 tabRegister: "ลงทะเบียน",
                 labelUsername: "ชื่อผู้ใช้",
                 labelPassword: "รหัสผ่าน",
-                labelRegCode: "โค้ดสำหรับสมัคร",
-                rememberMe: "จำชื่อผู้ใช้", forgotPassword: "ลืมรหัสผ่าน? ส่งลิงก์รีเซ็ต", labelEmail: "อีเมล", phRegEmail: "อีเมลสำหรับเข้าสู่ระบบและรีเซ็ตรหัสผ่าน",
+                rememberMe: "จำการเข้าสู่ระบบ", forgotPassword: "ลืมรหัสผ่าน? ส่งลิงก์รีเซ็ต", labelEmail: "อีเมล", phRegEmail: "อีเมลสำหรับเข้าสู่ระบบและรีเซ็ตรหัสผ่าน",
                 btnLogin: "🔑 เข้าสู่ระบบ",
                 btnRegister: "📝 ลงทะเบียน",
                 btnLogout: "🚪 ออกจากระบบ",
-                btnConfigCode: "🔑 เปลี่ยนโค้ดสมัคร",
-                modalChangeCodeTitle: "🔑 เปลี่ยนโค้ดสำหรับสมัคร",
-                labelNewRegCode: "โค้ดสมัครใหม่",
-                btnSaveCode: "💾 บันทึกโค้ดใหม่",
                 btnBotSettings: "⚙️ ตั้งค่าบอท",
                 modalBotSettingsTitle: "⚙️ ตั้งค่าแจ้งเตือนบอท",
                 labelVoiceLang: "🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)",
@@ -367,8 +335,6 @@
                 phLoginPass: "กรอกรหัสผ่าน",
                 phRegUser: "ตั้งชื่อผู้ใช้",
                 phRegPass: "ตั้งรหัสผ่าน",
-                phRegCode: "กรอกโค้ดสำหรับสมัคร",
-                phNewRegCode: "กรอกโค้ดสำหรับสมัครใหม่",
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 ภาษา:",
@@ -407,11 +373,9 @@
                 notifyReadyBody: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว",
                 noNotifySupport: "เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือนแบบ Pop-up",
                 grantNotifyPrompt: "กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ",
-                errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",
                 errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
                 regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
-                errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
-                codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",
+                errLoginFailed: "อีเมลหรือรหัสผ่านไม่ถูกต้อง!",
                 spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
                 spawnNotifyBody: "บอส {boss} ได้เกิดแล้วในขณะนี้",
                 noticeNotifyTitle: "⏳ {boss} ใกล้เกิด!",
@@ -423,24 +387,17 @@
                 tabRegister: "Register",
                 labelUsername: "Username",
                 labelPassword: "Password",
-                labelRegCode: "Registration Code",
-                rememberMe: "Remember Username", forgotPassword: "Forgot password? Send reset link", labelEmail: "Email", phRegEmail: "Email for login and password reset",
+                rememberMe: "Remember me", forgotPassword: "Forgot password? Send reset link", labelEmail: "Email", phRegEmail: "Email for login and password reset",
                 btnLogin: "🔑 Login",
                 btnRegister: "📝 Register",
                 btnLogout: "🚪 Logout",
-                btnConfigCode: "🔑 Change Reg Code",
-                modalChangeCodeTitle: "🔑 Change Registration Code",
-                labelNewRegCode: "New Registration Code",
-                btnSaveCode: "💾 Save New Code",
                 btnBotSettings: "⚙️ Bot Settings",
                 modalBotSettingsTitle: "⚙️ Bot Notification Settings",
                 labelVoiceLang: "🔊 Voice Notification Languages",
-                phLoginUser: "Enter username",
+                phLoginUser: "Enter email",
                 phLoginPass: "Enter password",
                 phRegUser: "Set username",
                 phRegPass: "Set password",
-                phRegCode: "Enter registration code",
-                phNewRegCode: "Enter new registration code",
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 Language:",
@@ -479,11 +436,9 @@
                 notifyReadyBody: "You will be alerted before boss spawns and when spawned.",
                 noNotifySupport: "This browser does not support Pop-up notifications.",
                 grantNotifyPrompt: "Please grant notification permissions in your browser.",
-                errRegCodeInvalid: "Invalid Registration Code!",
                 errUserExists: "Username already exists!",
                 regSuccess: "Registration successful! Please login.",
-                errLoginFailed: "Invalid username or password!",
-                codeChangedSuccess: "Registration code updated successfully!",
+                errLoginFailed: "Invalid email or password!",
                 spawnNotifyTitle: "⚔️ {boss} Spawned!",
                 spawnNotifyBody: "Boss {boss} has spawned!",
                 noticeNotifyTitle: "⏳ {boss} Spawning Soon!",
@@ -495,24 +450,17 @@
                 tabRegister: "회원가입",
                 labelUsername: "사용자 이름",
                 labelPassword: "비밀번호",
-                labelRegCode: "가입 코드",
-                rememberMe: "사용자 이름 저장", forgotPassword: "비밀번호를 잊으셨나요? 재설정 링크 보내기", labelEmail: "이메일", phRegEmail: "로그인 및 비밀번호 재설정 이메일",
+                rememberMe: "로그인 유지", forgotPassword: "비밀번호를 잊으셨나요? 재설정 링크 보내기", labelEmail: "이메일", phRegEmail: "로그인 및 비밀번호 재설정 이메일",
                 btnLogin: "🔑 로그인",
                 btnRegister: "📝 회원가입",
                 btnLogout: "🚪 로그아웃",
-                btnConfigCode: "🔑 가입 코드 변경",
-                modalChangeCodeTitle: "🔑 가입 코드 변경",
-                labelNewRegCode: "새 가입 코드",
-                btnSaveCode: "💾 새 코드 저장",
                 btnBotSettings: "⚙️ 봇 설정",
                 modalBotSettingsTitle: "⚙️ 봇 알림 설정",
                 labelVoiceLang: "🔊 음성 알림 언어",
-                phLoginUser: "사용자 이름을 입력하세요",
+                phLoginUser: "이메일을 입력하세요",
                 phLoginPass: "비밀번호를 입력하세요",
                 phRegUser: "사용자 이름 설정",
                 phRegPass: "비밀번호 설정",
-                phRegCode: "가입 코드를 입력하세요",
-                phNewRegCode: "새 가입 코드를 입력하세요",
                 title: "⚔️ Boss Timer Dashboard (Eternal)",
                 online: "🟢 실시간 동기화 활성화",
                 labelLanguage: "🌐 언어:",
@@ -551,11 +499,9 @@
                 notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",
                 noNotifySupport: "이 브라우저는 팝업 알림을 지원하지 않습니다.",
                 grantNotifyPrompt: "브라우저에서 알림 권한을 허용해주세요.",
-                errRegCodeInvalid: "가입 코드가 올바르지 않습니다!",
                 errUserExists: "이미 존재하는 사용자 이름입니다!",
                 regSuccess: "회원가입 성공! 로그인해주세요.",
-                errLoginFailed: "사용자 이름 หรือ 비밀번호가 올바르지 않습니다!",
-                codeChangedSuccess: "가입 코드가 성공적으로 변경되었습니다!",
+                errLoginFailed: "이메일 หรือ 비밀번호가 올바르지 않습니다!",
                 spawnNotifyTitle: "⚔️ {boss} 젠 완료!",
                 spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",
                 noticeNotifyTitle: "⏳ {boss} 젠 임박!",
@@ -563,7 +509,6 @@
             }
         };
 
-        
         const BOSS_DATABASE = {
             "Wadangka": { cd: 9000, notice: 30 }, "Elemental Queen": { cd: 9000, notice: 5 }, "Tank": { cd: 3500, notice: 5 },
             "Swirl Flame": { cd: 3500, notice: 5 }, "Maelstrom": { cd: 3500, notice: 5 }, "Twister": { cd: 3500, notice: 5 },
@@ -584,14 +529,9 @@
             "sandgrave": { cd: 1200, notice: 5 }, "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
-        // --- 3. Firebase listeners จะเริ่มหลัง Firebase Authentication เท่านั้น ---
+        // --- 3. Firebase listeners ---
         function startDatabaseListeners() {
             if (!auth.currentUser) return;
-
-            settingsRef.child('register_code').once('value').then(snap => {
-                if (snap.exists() && snap.val()) currentRegCode = String(snap.val());
-                else currentRegCode = '1234';
-            }).catch(err => console.error('Register code read error:', err));
 
             if (!botSettingsListenerAttached) {
                 botSettingsListenerAttached = true;
@@ -672,9 +612,9 @@
                 currentUserUid = user.uid; currentUserData = data;
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('mainDashboard').style.display = 'block';
+                // แสดงผลชื่อผู้ใช้แทนอีเมล์
                 document.getElementById('userBadge').innerText = `👤 ${data.username || user.email}`;
                 document.getElementById('adminPanel').style.display = data.role === 'admin' ? 'block' : 'none';
-                document.querySelector('[onclick="openChangeCodeModal()"]')?.classList.toggle('d-none', data.role !== 'admin');
                 document.querySelector('[onclick="openBotSettingsModal()"]')?.classList.toggle('d-none', data.role !== 'admin');
                 document.getElementById('clearAllBtn').classList.toggle('d-none', data.role !== 'admin');
                 startDatabaseListeners();
@@ -715,8 +655,7 @@
             const username = document.getElementById('regUser').value.trim();
             const password = document.getElementById('regPass').value;
             const email = document.getElementById('regEmail').value.trim().toLowerCase();
-            const regCode = document.getElementById('regCode').value.trim();
-            if (regCode !== currentRegCode) { alert('โค้ดสำหรับสมัครไม่ถูกต้อง!'); return; }
+            
             if (username.length < 3) { alert('ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร'); return; }
             if (password.length < 6) { alert('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'); return; }
             try {
@@ -782,18 +721,7 @@
         async function adminDisable(uid){ if(!await requireAdmin())return; await usersRef.child(uid).update({status:'disabled',disabledAt:firebase.database.ServerValue.TIMESTAMP,disabledBy:auth.currentUser.uid}); }
         async function adminActivate(uid){ if(!await requireAdmin())return; await usersRef.child(uid).update({status:'approved',activatedAt:firebase.database.ServerValue.TIMESTAMP,activatedBy:auth.currentUser.uid}); }
 
-        // --- 6. ตั้งค่า Registration Code / Bot ---
-        function openChangeCodeModal() {
-            if (!currentUserData || currentUserData.role !== 'admin') return alert('เฉพาะ Admin เท่านั้น');
-            document.getElementById('newRegCodeInput').value = currentRegCode;
-            bootstrap.Modal.getOrCreateInstance(document.getElementById('changeCodeModal')).show();
-        }
-        document.getElementById('changeCodeForm').addEventListener('submit', async e => {
-            e.preventDefault(); if (!await requireAdmin()) return;
-            const newCode=document.getElementById('newRegCodeInput').value.trim(); if(!newCode)return;
-            await settingsRef.child('register_code').set(newCode); currentRegCode=newCode;
-            alert('เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!'); bootstrap.Modal.getInstance(document.getElementById('changeCodeModal'))?.hide();
-        });
+        // --- 6. ตั้งค่า Bot ---
         function openBotSettingsModal(){ if(!currentUserData || currentUserData.role!=='admin') return alert('เฉพาะ Admin เท่านั้น'); bootstrap.Modal.getOrCreateInstance(document.getElementById('botSettingsModal')).show(); }
         ['ttsThToggle','ttsEnToggle','ttsKoToggle'].forEach(id=>document.getElementById(id).addEventListener('change',async e=>{ if(!await requireAdmin()){e.target.checked=!e.target.checked;return;} const key=id==='ttsThToggle'?'tts_th_enabled':id==='ttsEnToggle'?'tts_en_enabled':'tts_ko_enabled'; await botSettingsRef.child(key).set(e.target.checked); }));
 
@@ -845,8 +773,6 @@
                 notifyBtn.innerText = langData.enableNotify;
             }
         }
-
-
 
         // --- Audio System ---
         let audioCtx = null;
@@ -977,9 +903,7 @@
             return d;
         }
 
-
-
-        // --- 8. Boss Timer เดิม ---
+        // --- 8. Boss Timer ---
         document.getElementById('bossForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const bossInput = document.getElementById('bossSelect').value.trim();
@@ -997,7 +921,9 @@
 
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
-            const currentUser = localStorage.getItem('logged_user') || 'Unknown';
+            
+            // ดึงชื่อ Username มาแสดงแทน Email (แก้ไขจากโค้ดเดิมที่ไม่ยอมดึงค่า)
+            const currentUser = currentUserData?.username || auth.currentUser?.email || 'Unknown';
 
             await bossRef.child(bossInput).set({
                 killTimeMs: killDate.getTime(),
@@ -1094,8 +1020,6 @@
                 }
             });
         }
-
-
 
         function initApp() {
             const dataList = document.getElementById('bossOptions');
