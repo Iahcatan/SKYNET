@@ -9,6 +9,7 @@
     
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
     <style>
@@ -106,7 +107,7 @@
                     <form id="loginForm" autocomplete="off">
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
-                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกชื่อผู้ใช้" data-i18n-ph="phLoginUser" required>
+                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกอีเมล" data-i18n-ph="phLoginUser" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
@@ -117,6 +118,7 @@
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
+                        <button type="button" onclick="sendPasswordReset()" class="btn btn-link text-info w-100 mt-2" data-i18n="forgotPassword">ลืมรหัสผ่าน? ส่งลิงก์รีเซ็ต</button>
                     </form>
                 </div>
 
@@ -129,6 +131,10 @@
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
                             <input type="password" id="regPass" class="form-control" placeholder="ตั้งรหัสผ่าน" data-i18n-ph="phRegPass" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelEmail">อีเมล</label>
+                            <input type="email" id="regEmail" class="form-control" placeholder="อีเมลสำหรับเข้าสู่ระบบและรีเซ็ตรหัสผ่าน" data-i18n-ph="phRegEmail" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelRegCode">โค้ดสำหรับสมัคร</label>
@@ -149,6 +155,21 @@
                 <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
                 <button onclick="openChangeCodeModal()" class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>
                 <button onclick="logout()" class="btn btn-outline-danger btn-sm" data-i18n="btnLogout">🚪 ออกจากระบบ</button>
+            </div>
+        </div>
+
+        <div id="adminPanel" class="card p-4 mb-4 shadow-sm" style="display:none;">
+            <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+                <h4 class="text-warning mb-0">🛡️ Admin Panel</h4>
+                <span class="badge bg-warning text-dark" id="adminOnlineCount">ออนไลน์: 0</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle mb-0">
+                    <thead><tr>
+                        <th>สมาชิก</th><th>สถานะ</th><th>สมัครเมื่อ</th><th>Login ล่าสุด</th><th>Last Seen</th><th>ออนไลน์</th><th>จัดการ</th>
+                    </tr></thead>
+                    <tbody id="adminUsersBody"></tbody>
+                </table>
             </div>
         </div>
 
@@ -295,50 +316,28 @@
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
         };
 
-        // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
+        const auth = firebase.auth();
         const bossRef = db.ref('boss_schedule');
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
-        const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
+        const botSettingsRef = db.ref('bot_settings');
+        const sessionsRef = db.ref('dashboard_sessions');
 
-        // โค้ดสมัครเริ่มต้น
         let currentRegCode = "1234";
-        settingsRef.child('register_code').on('value', (snap) => {
-            if (snap.exists() && snap.val()) {
-                currentRegCode = snap.val();
-            } else {
-                settingsRef.child('register_code').set("1234");
-            }
-        });
+        let currentUserData = null;
+        let activeBosses = {};
+        let currentUserUid = null;
+        let isRegistering = false;
+        let adminUsersListener = null;
+        let bossListenerAttached = false;
+        let botSettingsListenerAttached = false;
+        let isNotifyEnabled = localStorage.getItem('notify_enabled') === 'true';
+        let currentLang = localStorage.getItem('app_lang') || 'th';
+        let currentTz = localStorage.getItem('app_tz') || 'auto';
 
-        // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน
-        botSettingsRef.on('value', (snap) => {
-            const data = snap.val() || {};
-            // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
-            document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
-            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
-            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
-        });
-
-        // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
-        ['ttsThToggle', 'ttsEnToggle', 'ttsKoToggle'].forEach(id => {
-            document.getElementById(id).addEventListener('change', (e) => {
-                const key = id === 'ttsThToggle' ? 'tts_th_enabled' : 
-                            id === 'ttsEnToggle' ? 'tts_en_enabled' : 'tts_ko_enabled';
-                botSettingsRef.child(key).set(e.target.checked);
-            });
-        });
-
-        // ฟังก์ชันเปิด Modal ตั้งค่า Bot
-        function openBotSettingsModal() {
-            const modalEl = document.getElementById('botSettingsModal');
-            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-            modal.show();
-        }
-
-        // --- 2. ฐานข้อมูลภาษา (i18n) ---
+        // --- 2. ระบบภาษาเดิมของ Dashboard ---
         const TRANSLATIONS = {
             th: {
                 authTitle: "⚔️ Boss Timer Access",
@@ -347,7 +346,7 @@
                 labelUsername: "ชื่อผู้ใช้",
                 labelPassword: "รหัสผ่าน",
                 labelRegCode: "โค้ดสำหรับสมัคร",
-                rememberMe: "จำชื่อผู้ใช้",
+                rememberMe: "จำชื่อผู้ใช้", forgotPassword: "ลืมรหัสผ่าน? ส่งลิงก์รีเซ็ต", labelEmail: "อีเมล", phRegEmail: "อีเมลสำหรับเข้าสู่ระบบและรีเซ็ตรหัสผ่าน",
                 btnLogin: "🔑 เข้าสู่ระบบ",
                 btnRegister: "📝 ลงทะเบียน",
                 btnLogout: "🚪 ออกจากระบบ",
@@ -419,7 +418,7 @@
                 labelUsername: "Username",
                 labelPassword: "Password",
                 labelRegCode: "Registration Code",
-                rememberMe: "Remember Username",
+                rememberMe: "Remember Username", forgotPassword: "Forgot password? Send reset link", labelEmail: "Email", phRegEmail: "Email for login and password reset",
                 btnLogin: "🔑 Login",
                 btnRegister: "📝 Register",
                 btnLogout: "🚪 Logout",
@@ -491,7 +490,7 @@
                 labelUsername: "사용자 이름",
                 labelPassword: "비밀번호",
                 labelRegCode: "가입 코드",
-                rememberMe: "사용자 이름 저장",
+                rememberMe: "사용자 이름 저장", forgotPassword: "비밀번호를 잊으셨나요? 재설정 링크 보내기", labelEmail: "이메일", phRegEmail: "로그인 및 비밀번호 재설정 이메일",
                 btnLogin: "🔑 로그인",
                 btnRegister: "📝 회원가입",
                 btnLogout: "🚪 로그아웃",
@@ -558,203 +557,241 @@
             }
         };
 
-        let currentLang = localStorage.getItem('app_lang') || 'th';
-        let currentTz = localStorage.getItem('app_tz') || 'auto';
-        let isNotifyEnabled = localStorage.getItem('notify_enabled') === 'true';
-        let activeBosses = {};
-
+        
         const BOSS_DATABASE = {
-            "Wadangka": { cd: 9000, notice: 30 },
-            "Elemental Queen": { cd: 9000, notice: 5 },
-            "Tank": { cd: 3500, notice: 5 },
-            "Swirl Flame": { cd: 3500, notice: 5 },
-            "Maelstrom": { cd: 3500, notice: 5 },
-            "Twister": { cd: 3500, notice: 5 },
-            "Bigmama": { cd: 172800, notice: 30 },
-            "Chief Magief": { cd: 1800, notice: 5 },
-            "Faith": { cd: 21180, notice: 30 },
-            "Apapa": { cd: 900, notice: 5 },
-            "Corrupt Forest Keeper": { cd: 3480, notice: 5 },
-            "Recluse": { cd: 40980, notice: 30 },
-            "Blackskull": { cd: 3410, notice: 5 },
-            "Sleepy Kooii": { cd: 1200, notice: 5 },
-            "Awaken Kooii": { cd: 3780, notice: 5 },
-            "Eeheehee": { cd: 4008, notice: 5 },
-            "Ooheeheek": { cd: 4083, notice: 5 },
-            "Oohehe": { cd: 3908, notice: 5 },
-            "Guardian Imp": { cd: 3780, notice: 5 },
-            "Devilang": { cd: 19980, notice: 30 },
-            "Blackjuno": { cd: 2100, notice: 5 },
-            "Blacksky": { cd: 2100, notice: 5 },
-            "Red Fox": { cd: 1200, notice: 5 },
-            "7tailfox": { cd: 1200, notice: 5 },
-            "777Tailfox": { cd: 1800, notice: 5 },
-            "Sunrise Flower": { cd: 1200, notice: 5 },
-            "Magma Senior Thief": { cd: 1200, notice: 5 },
-            "Bbinikjoe": { cd: 1200, notice: 5 },
-            "Bigmouse": { cd: 1200, notice: 5 },
-            "Caligo": { cd: 604800, notice: 60 },
-            "Poison Root Flower": { cd: 1690, notice: 5 },
-            "Contaminated Queen Bee": { cd: 1680, notice: 5 },
-            "Rotten Pudding": { cd: 1800, notice: 5 },
-            "Swamp Flower Monster": { cd: 1800, notice: 5 },
-            "Ukpana": { cd: 172800, notice: 30 },
-            "Darlene the Witch": { cd: 259200, notice: 30 },
-            "Illust": { cd: 259200, notice: 30 },
-            "Actaemon": { cd: 21600, notice: 30 },
-            "Aiyo's Protector": { cd: 259200, notice: 30 },
-            "Glucose": { cd: 1800, notice: 5 },
-            "Overload": { cd: 1792, notice: 5 },
-            "Soul Lich": { cd: 87300, notice: 30 },
-            "Platanista": { cd: 604800, notice: 60 },
-            "Barslaf": { cd: 172800, notice: 30 },
-            "Billiard": { cd: 28503, notice: 5 },
-            "Shaaack": { cd: 1800, notice: 5 },
-            "Suuuk": { cd: 1200, notice: 5 },
-            "Sususuk": { cd: 1200, notice: 5 },
-            "sandgrave": { cd: 1200, notice: 5 },
-            "Elder Beholder": { cd: 1200, notice: 5 }
+            "Wadangka": { cd: 9000, notice: 30 }, "Elemental Queen": { cd: 9000, notice: 5 }, "Tank": { cd: 3500, notice: 5 },
+            "Swirl Flame": { cd: 3500, notice: 5 }, "Maelstrom": { cd: 3500, notice: 5 }, "Twister": { cd: 3500, notice: 5 },
+            "Bigmama": { cd: 172800, notice: 30 }, "Chief Magief": { cd: 1800, notice: 5 }, "Faith": { cd: 21180, notice: 30 },
+            "Apapa": { cd: 900, notice: 5 }, "Corrupt Forest Keeper": { cd: 3480, notice: 5 }, "Recluse": { cd: 40980, notice: 30 },
+            "Blackskull": { cd: 3410, notice: 5 }, "Sleepy Kooii": { cd: 1200, notice: 5 }, "Awaken Kooii": { cd: 3780, notice: 5 },
+            "Eeheehee": { cd: 4008, notice: 5 }, "Ooheeheek": { cd: 4083, notice: 5 }, "Oohehe": { cd: 3908, notice: 5 },
+            "Guardian Imp": { cd: 3780, notice: 5 }, "Devilang": { cd: 19980, notice: 30 }, "Blackjuno": { cd: 2100, notice: 5 },
+            "Blacksky": { cd: 2100, notice: 5 }, "Red Fox": { cd: 1200, notice: 5 }, "7tailfox": { cd: 1200, notice: 5 },
+            "777Tailfox": { cd: 1800, notice: 5 }, "Sunrise Flower": { cd: 1200, notice: 5 }, "Magma Senior Thief": { cd: 1200, notice: 5 },
+            "Bbinikjoe": { cd: 1200, notice: 5 }, "Bigmouse": { cd: 1200, notice: 5 }, "Caligo": { cd: 604800, notice: 60 },
+            "Poison Root Flower": { cd: 1690, notice: 5 }, "Contaminated Queen Bee": { cd: 1680, notice: 5 }, "Rotten Pudding": { cd: 1800, notice: 5 },
+            "Swamp Flower Monster": { cd: 1800, notice: 5 }, "Ukpana": { cd: 172800, notice: 30 }, "Darlene the Witch": { cd: 259200, notice: 30 },
+            "Illust": { cd: 259200, notice: 30 }, "Actaemon": { cd: 21600, notice: 30 }, "Aiyo's Protector": { cd: 259200, notice: 30 },
+            "Glucose": { cd: 1800, notice: 5 }, "Overload": { cd: 1792, notice: 5 }, "Soul Lich": { cd: 87300, notice: 30 },
+            "Platanista": { cd: 604800, notice: 60 }, "Barslaf": { cd: 172800, notice: 30 }, "Billiard": { cd: 28503, notice: 5 },
+            "Shaaack": { cd: 1800, notice: 5 }, "Suuuk": { cd: 1200, notice: 5 }, "Sususuk": { cd: 1200, notice: 5 },
+            "sandgrave": { cd: 1200, notice: 5 }, "Elder Beholder": { cd: 1200, notice: 5 }
         };
 
-        // --- 3. ระบบ Authentication & Session ---
-        async function hashPassword(str) {
-            const buffer = new TextEncoder().encode(str);
-            const hash = await crypto.subtle.digest('SHA-256', buffer);
-            return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
+        // --- 3. Firebase listeners จะเริ่มหลัง Firebase Authentication เท่านั้น ---
+        function startDatabaseListeners() {
+            if (!auth.currentUser) return;
 
-        function checkAuthSession() {
-            const savedUser = localStorage.getItem('saved_username');
-            if (savedUser) {
-                document.getElementById('loginUser').value = savedUser;
-                document.getElementById('rememberMe').checked = true;
+            settingsRef.child('register_code').once('value').then(snap => {
+                if (snap.exists() && snap.val()) currentRegCode = String(snap.val());
+                else currentRegCode = '1234';
+            }).catch(err => console.error('Register code read error:', err));
+
+            if (!botSettingsListenerAttached) {
+                botSettingsListenerAttached = true;
+                botSettingsRef.on('value', snap => {
+                    const data = snap.val() || {};
+                    document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false;
+                    document.getElementById('ttsEnToggle').checked = data.tts_en_enabled === true;
+                    document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled === true;
+                }, err => console.error('Bot settings read error:', err));
             }
 
-            const loggedUser = localStorage.getItem('logged_user');
-            if (loggedUser) {
-                document.getElementById('authContainer').style.display = 'none';
-                document.getElementById('mainDashboard').style.display = 'block';
-                document.getElementById('userBadge').innerText = `👤 ${loggedUser}`;
-            } else {
+            if (!bossListenerAttached) {
+                bossListenerAttached = true;
+                bossRef.on('value', snapshot => {
+                    const rawData = snapshot.val() || {};
+                    activeBosses = {};
+                    Object.keys(rawData).forEach(bossName => {
+                        const item = rawData[bossName] || {};
+                        let spawnMs = item.spawnTimeMs;
+                        if (!spawnMs && item.spawn_time) spawnMs = new Date(item.spawn_time).getTime();
+                        const cdSec = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;
+                        let killMs = item.killTimeMs || (spawnMs - (cdSec * 1000));
+                        activeBosses[bossName] = {
+                            spawnTimeMs: spawnMs, killTimeMs: killMs,
+                            noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
+                            notifiedNotice: item.notified_advance || item.notifiedNotice || false,
+                            notifiedSpawn: item.notifiedSpawn || false, recordedBy: item.recordedBy || item.recorded_by || 'ไม่ระบุ'
+                        };
+                    });
+                    renderTable();
+                }, err => {
+                    console.error('Boss schedule read error:', err);
+                    document.getElementById('syncStatus').innerText = '🔴 Firebase Rules ปฏิเสธการเข้าถึง';
+                });
+            }
+        }
+
+        // --- 4. Firebase Authentication ---
+        function showAuthError(err) {
+            const code = err && err.code ? err.code : '';
+            const messages = {
+                'auth/invalid-credential':'อีเมลหรือรหัสผ่านไม่ถูกต้อง',
+                'auth/user-not-found':'ไม่พบผู้ใช้งานนี้',
+                'auth/wrong-password':'รหัสผ่านไม่ถูกต้อง',
+                'auth/email-already-in-use':'อีเมลนี้ถูกใช้งานแล้ว',
+                'auth/weak-password':'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร',
+                'auth/invalid-email':'รูปแบบอีเมลไม่ถูกต้อง',
+                'auth/too-many-requests':'มีการพยายามเข้าสู่ระบบมากเกินไป กรุณารอสักครู่',
+                'auth/network-request-failed':'เชื่อมต่อ Firebase ไม่สำเร็จ'
+            };
+            alert(messages[code] || (err && err.message) || 'เกิดข้อผิดพลาดในการยืนยันตัวตน');
+        }
+
+        auth.onAuthStateChanged(async user => {
+            if (isRegistering && user) return;
+            if (!user) {
+                currentUserUid = null; currentUserData = null;
                 document.getElementById('authContainer').style.display = 'block';
                 document.getElementById('mainDashboard').style.display = 'none';
+                document.getElementById('adminPanel').style.display = 'none';
+                return;
+            }
+
+            try {
+                const snap = await usersRef.child(user.uid).once('value');
+                if (!snap.exists()) {
+                    await auth.signOut();
+                    alert('ไม่พบข้อมูลสมาชิกในระบบ กรุณาติดต่อ Admin');
+                    return;
+                }
+                const data = snap.val() || {};
+                if (data.status !== 'approved' && data.role !== 'admin') {
+                    await auth.signOut();
+                    alert(data.status === 'disabled' ? 'บัญชีนี้ถูกปิดใช้งาน' : 'บัญชีของคุณยังไม่ได้รับการอนุมัติจาก Admin');
+                    return;
+                }
+
+                currentUserUid = user.uid; currentUserData = data;
+                document.getElementById('authContainer').style.display = 'none';
+                document.getElementById('mainDashboard').style.display = 'block';
+                document.getElementById('userBadge').innerText = `👤 ${data.username || user.email}`;
+                document.getElementById('adminPanel').style.display = data.role === 'admin' ? 'block' : 'none';
+                document.querySelector('[onclick="openChangeCodeModal()"]')?.classList.toggle('d-none', data.role !== 'admin');
+                document.querySelector('[onclick="openBotSettingsModal()"]')?.classList.toggle('d-none', data.role !== 'admin');
+                document.getElementById('clearAllBtn').classList.toggle('d-none', data.role !== 'admin');
+                startDatabaseListeners();
+                await updatePresence(true);
+                if (data.role === 'admin') startAdminPanel();
+            } catch (err) {
+                console.error(err);
+                await auth.signOut();
+                alert('ไม่สามารถอ่านสิทธิ์ผู้ใช้งานจาก Firebase ได้ กรุณาตรวจสอบ Rules');
+            }
+        });
+
+        async function updatePresence(online) {
+            if (!auth.currentUser) return;
+            const uid = auth.currentUser.uid;
+            const ref = sessionsRef.child(uid);
+            const now = firebase.database.ServerValue.TIMESTAMP;
+            if (online) {
+                await ref.update({ uid, username: currentUserData?.username || auth.currentUser.email, online: true, lastSeenAt: now, lastLoginAt: now, updatedAt: now });
+                ref.onDisconnect().update({ online: false, lastSeenAt: firebase.database.ServerValue.TIMESTAMP, updatedAt: firebase.database.ServerValue.TIMESTAMP });
+                await usersRef.child(uid).update({ online: true, lastSeenAt: now, lastLoginAt: now, loginCount: (currentUserData?.loginCount || 0) + 1 });
+                usersRef.child(uid).onDisconnect().update({ online: false, lastSeenAt: firebase.database.ServerValue.TIMESTAMP });
+            } else {
+                await ref.update({ online: false, lastSeenAt: now, updatedAt: now });
+                await usersRef.child(uid).update({ online: false, lastSeenAt: now });
             }
         }
 
-        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+        setInterval(() => {
+            if (auth.currentUser && currentUserData) {
+                sessionsRef.child(auth.currentUser.uid).update({ online:true, lastSeenAt: firebase.database.ServerValue.TIMESTAMP }).catch(()=>{});
+                usersRef.child(auth.currentUser.uid).update({ online:true, lastSeenAt: firebase.database.ServerValue.TIMESTAMP }).catch(()=>{});
+            }
+        }, 30000);
+
+        document.getElementById('registerForm').addEventListener('submit', async e => {
             e.preventDefault();
             const username = document.getElementById('regUser').value.trim();
             const password = document.getElementById('regPass').value;
+            const email = document.getElementById('regEmail').value.trim().toLowerCase();
             const regCode = document.getElementById('regCode').value.trim();
-
-            if (regCode !== currentRegCode) {
-                alert(TRANSLATIONS[currentLang].errRegCodeInvalid);
-                return;
-            }
-
-            const userKey = username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
-            const snap = await usersRef.child(userKey).once('value');
-            if (snap.exists()) {
-                alert(TRANSLATIONS[currentLang].errUserExists);
-                return;
-            }
-
-            const pwdHash = await hashPassword(password);
-            await usersRef.child(userKey).set({
-                username: username,
-                password: pwdHash,
-                createdAt: new Date().toISOString()
-            });
-
-            alert(TRANSLATIONS[currentLang].regSuccess);
-            document.getElementById('registerForm').reset();
-            const loginTab = new bootstrap.Tab(document.getElementById('login-tab'));
-            loginTab.show();
+            if (regCode !== currentRegCode) { alert('โค้ดสำหรับสมัครไม่ถูกต้อง!'); return; }
+            if (username.length < 3) { alert('ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร'); return; }
+            if (password.length < 6) { alert('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'); return; }
+            try {
+                isRegistering = true;
+                const credential = await auth.createUserWithEmailAndPassword(email, password);
+                const uid = credential.user.uid;
+                await usersRef.child(uid).set({ username, email, role:'user', status:'pending', createdAt: firebase.database.ServerValue.TIMESTAMP, approvedAt:null, approvedBy:null, lastLoginAt:null, lastSeenAt:null, loginCount:0 });
+                await auth.signOut();
+                isRegistering = false;
+                document.getElementById('registerForm').reset();
+                alert('ลงทะเบียนสำเร็จ แต่ต้องรอ Admin อนุมัติก่อนเข้าสู่ระบบ');
+                new bootstrap.Tab(document.getElementById('login-tab')).show();
+            } catch (err) { isRegistering = false; showAuthError(err); }
         });
 
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        document.getElementById('loginForm').addEventListener('submit', async e => {
             e.preventDefault();
-            const username = document.getElementById('loginUser').value.trim();
+            const email = document.getElementById('loginUser').value.trim();
             const password = document.getElementById('loginPass').value;
-            const rememberMe = document.getElementById('rememberMe').checked;
-
-            const userKey = username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
-            const snap = await usersRef.child(userKey).once('value');
-
-            if (!snap.exists()) {
-                alert(TRANSLATIONS[currentLang].errLoginFailed);
-                return;
-            }
-
-            const userData = snap.val();
-            const pwdHash = await hashPassword(password);
-
-            if (userData.password !== pwdHash) {
-                alert(TRANSLATIONS[currentLang].errLoginFailed);
-                return;
-            }
-
-            if (rememberMe) {
-                localStorage.setItem('saved_username', username);
-            } else {
-                localStorage.removeItem('saved_username');
-            }
-
-            localStorage.setItem('logged_user', userData.username);
-            checkAuthSession();
+            const remember = document.getElementById('rememberMe').checked;
+            try {
+                await auth.setPersistence(remember ? firebase.auth.Auth.Persistence.LOCAL : firebase.auth.Auth.Persistence.SESSION);
+                await auth.signInWithEmailAndPassword(email, password);
+            } catch (err) { showAuthError(err); }
         });
 
-        function logout() {
-            localStorage.removeItem('logged_user');
-            checkAuthSession();
+        async function sendPasswordReset() {
+            const email = document.getElementById('loginUser').value.trim();
+            if (!email) { alert('กรุณากรอกอีเมลก่อนกดลืมรหัสผ่าน'); return; }
+            try { await auth.sendPasswordResetEmail(email); alert('ส่งลิงก์รีเซ็ตรหัสผ่านไปยังอีเมลแล้ว กรุณาตรวจสอบ Inbox/Spam'); }
+            catch (err) { showAuthError(err); }
         }
 
+        async function logout() {
+            try { await updatePresence(false); } catch(e) {}
+            await auth.signOut();
+        }
+
+        // --- 5. Admin Panel ---
+        function startAdminPanel() {
+            if (adminUsersListener) usersRef.off('value', adminUsersListener);
+            adminUsersListener = snapshot => {
+                const all = snapshot.val() || {};
+                const rows = []; let onlineCount = 0;
+                Object.entries(all).forEach(([uid,u]) => {
+                    if (!u) return;
+                    const status = u.status || 'pending';
+                    const online = u.online === true;
+                    if (online) onlineCount++;
+                    const badge = status === 'approved' ? '<span class="badge bg-success">Approved</span>' : status === 'disabled' ? '<span class="badge bg-secondary">Disabled</span>' : '<span class="badge bg-warning text-dark">Pending</span>';
+                    rows.push(`<tr><td><b>${escapeHtml(u.username || '-')}</b><br><small>${escapeHtml(u.email || '-')}</small></td><td>${badge}</td><td>${formatDateValue(u.createdAt)}</td><td>${formatDateValue(u.lastLoginAt)}</td><td>${formatDateValue(u.lastSeenAt)}</td><td>${online ? '🟢 ออนไลน์' : '⚪ ออฟไลน์'}</td><td class="text-nowrap">${status === 'pending' ? `<button class="btn btn-sm btn-success me-1" onclick="adminApprove('${uid}')">✅ อนุมัติ</button><button class="btn btn-sm btn-danger" onclick="adminReject('${uid}')">❌ ปฏิเสธ</button>` : status === 'approved' ? `<button class="btn btn-sm btn-warning" onclick="adminDisable('${uid}')">⛔ Disable</button>` : `<button class="btn btn-sm btn-success" onclick="adminActivate('${uid}')">🟢 Activate</button>`}</td></tr>`);
+                });
+                document.getElementById('adminUsersBody').innerHTML = rows.length ? rows.join('') : '<tr><td colspan="7" class="text-center text-muted">ยังไม่มีสมาชิก</td></tr>';
+                document.getElementById('adminOnlineCount').innerText = `ออนไลน์: ${onlineCount}`;
+            };
+            usersRef.on('value', adminUsersListener, err => console.error('Admin users listener:', err));
+        }
+        function escapeHtml(v){ return String(v ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
+        function formatDateValue(v){ if(!v) return '-'; const n=typeof v==='number'?v:Date.parse(v); return isNaN(n)?'-':new Date(n).toLocaleString('th-TH'); }
+        async function requireAdmin(){ if(!currentUserData || currentUserData.role!=='admin'){ alert('เฉพาะ Admin เท่านั้น'); return false; } return true; }
+        async function adminApprove(uid){ if(!await requireAdmin())return; await usersRef.child(uid).update({status:'approved',approvedAt:firebase.database.ServerValue.TIMESTAMP,approvedBy:auth.currentUser.uid}); }
+        async function adminReject(uid){ if(!await requireAdmin())return; if(confirm('ต้องการปฏิเสธ/ลบบัญชีนี้หรือไม่?')) await usersRef.child(uid).update({status:'disabled',approvedAt:null,approvedBy:auth.currentUser.uid}); }
+        async function adminDisable(uid){ if(!await requireAdmin())return; await usersRef.child(uid).update({status:'disabled',disabledAt:firebase.database.ServerValue.TIMESTAMP,disabledBy:auth.currentUser.uid}); }
+        async function adminActivate(uid){ if(!await requireAdmin())return; await usersRef.child(uid).update({status:'approved',activatedAt:firebase.database.ServerValue.TIMESTAMP,activatedBy:auth.currentUser.uid}); }
+
+        // --- 6. ตั้งค่า Registration Code / Bot ---
         function openChangeCodeModal() {
-            const modalEl = document.getElementById('changeCodeModal');
-            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            if (!currentUserData || currentUserData.role !== 'admin') return alert('เฉพาะ Admin เท่านั้น');
             document.getElementById('newRegCodeInput').value = currentRegCode;
-            modal.show();
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('changeCodeModal')).show();
         }
-
-        document.getElementById('changeCodeForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const newCode = document.getElementById('newRegCodeInput').value.trim();
-            if (newCode) {
-                await settingsRef.child('register_code').set(newCode);
-                alert(TRANSLATIONS[currentLang].codeChangedSuccess);
-                const modalEl = document.getElementById('changeCodeModal');
-                const modal = bootstrap.Modal.getInstance(modalEl);
-                if (modal) modal.hide();
-            }
+        document.getElementById('changeCodeForm').addEventListener('submit', async e => {
+            e.preventDefault(); if (!await requireAdmin()) return;
+            const newCode=document.getElementById('newRegCodeInput').value.trim(); if(!newCode)return;
+            await settingsRef.child('register_code').set(newCode); currentRegCode=newCode;
+            alert('เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!'); bootstrap.Modal.getInstance(document.getElementById('changeCodeModal'))?.hide();
         });
+        function openBotSettingsModal(){ if(!currentUserData || currentUserData.role!=='admin') return alert('เฉพาะ Admin เท่านั้น'); bootstrap.Modal.getOrCreateInstance(document.getElementById('botSettingsModal')).show(); }
+        ['ttsThToggle','ttsEnToggle','ttsKoToggle'].forEach(id=>document.getElementById(id).addEventListener('change',async e=>{ if(!await requireAdmin()){e.target.checked=!e.target.checked;return;} const key=id==='ttsThToggle'?'tts_th_enabled':id==='ttsEnToggle'?'tts_en_enabled':'tts_ko_enabled'; await botSettingsRef.child(key).set(e.target.checked); }));
 
-        // --- 4. ระบบ Real-time Sync จาก Firebase ---
-        bossRef.on('value', (snapshot) => {
-            const rawData = snapshot.val() || {};
-            activeBosses = {};
-            
-            Object.keys(rawData).forEach(bossName => {
-                const item = rawData[bossName];
-                let spawnMs = item.spawnTimeMs;
-                if (!spawnMs && item.spawn_time) {
-                    spawnMs = new Date(item.spawn_time).getTime();
-                }
-                const cdSec = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;
-                let killMs = item.killTimeMs || (spawnMs - (cdSec * 1000));
-                
-                activeBosses[bossName] = {
-                    spawnTimeMs: spawnMs,
-                    killTimeMs: killMs,
-                    noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
-                    notifiedNotice: item.notified_advance || item.notifiedNotice || false,
-                    notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: item.recordedBy || 'ไม่ระบุ'
-                };
-            });
-            renderTable();
-        });
-
-        // --- UI & Control Functions ---
+        // --- 7. UI ภาษา / Timezone ---
         function applyLanguage() {
             const langData = TRANSLATIONS[currentLang];
             document.querySelectorAll('[data-i18n]').forEach(el => {
@@ -802,6 +839,8 @@
                 notifyBtn.innerText = langData.enableNotify;
             }
         }
+
+
 
         // --- Audio System ---
         let audioCtx = null;
@@ -932,6 +971,9 @@
             return d;
         }
 
+
+
+        // --- 8. Boss Timer เดิม ---
         document.getElementById('bossForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const bossInput = document.getElementById('bossSelect').value.trim();
@@ -1047,27 +1089,19 @@
             });
         }
 
+
+
         function initApp() {
             const dataList = document.getElementById('bossOptions');
-            Object.keys(BOSS_DATABASE).sort().forEach(boss => {
-                const option = document.createElement('option');
-                option.value = boss;
-                dataList.appendChild(option);
-            });
-
-            document.getElementById('langSelect').value = currentLang;
-            const authLangSelect = document.getElementById('authLangSelect');
-            if (authLangSelect) authLangSelect.value = currentLang;
-            
-            document.getElementById('tzSelect').value = currentTz;
-            
+            Object.keys(BOSS_DATABASE).sort().forEach(boss => { const option=document.createElement('option'); option.value=boss; dataList.appendChild(option); });
+            document.getElementById('langSelect').value=currentLang;
+            document.getElementById('authLangSelect').value=currentLang;
+            document.getElementById('tzSelect').value=currentTz;
             applyLanguage();
-            checkAuthSession();
-
-            setInterval(updateCountdowns, 1000);
+            const savedUser=localStorage.getItem('saved_username'); if(savedUser) { document.getElementById('loginUser').value=savedUser; document.getElementById('rememberMe').checked=true; }
+            setInterval(updateCountdowns,1000);
         }
-
-        window.addEventListener('DOMContentLoaded', initApp);
+        window.addEventListener('DOMContentLoaded',initApp);
     </script>
 </body>
 </html>
