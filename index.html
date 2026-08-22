@@ -112,6 +112,9 @@
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
                             <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" data-i18n-ph="phLoginPass" required>
+                            <div class="text-end mt-1">
+                                <a href="#" onclick="openForgotPasswordModal(); return false;" class="text-info small text-decoration-none" data-i18n="btnForgotPassword">ลืมรหัสผ่าน?</a>
+                            </div>
                         </div>
                         <div class="form-check mb-3">
                             <input class="form-check-input" type="checkbox" id="rememberMe">
@@ -317,6 +320,27 @@
         </div>
     </div>
 
+    <!-- Modal ส่งลิงก์ตั้งรหัสผ่านใหม่ (Password Reset) -->
+    <div class="modal fade" id="forgotPasswordModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content p-3">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title text-warning" data-i18n="modalForgotTitle">🔑 รีเซ็ตรหัสผ่าน</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="forgotPasswordForm">
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelForgotUser">ชื่อผู้ใช้ (Username)</label>
+                            <input type="text" id="forgotUserInput" class="form-control" placeholder="กรอกชื่อผู้ใช้ของคุณ" data-i18n-ph="phLoginUser" required>
+                        </div>
+                        <button type="submit" class="btn btn-warning w-100 fw-bold text-dark" data-i18n="btnSendReset">📤 ส่งลิงก์รีเซ็ตรหัสผ่าน</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal ตั้งค่า Bot Notification -->
     <div class="modal fade" id="botSettingsModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -424,6 +448,12 @@
                 btnRegister: "📝 ลงทะเบียน",
                 btnLogout: "🚪 ออกจากระบบ",
                 btnConfigCode: "🔑 เปลี่ยนโค้ดสมัคร",
+                btnForgotPassword: "ลืมรหัสผ่าน?",
+                modalForgotTitle: "🔑 รีเซ็ตรหัสผ่าน",
+                labelForgotUser: "ชื่อผู้ใช้ (Username)",
+                btnSendReset: "📤 ส่งลิงก์รีเซ็ตรหัสผ่าน",
+                forgotSuccess: "ส่งลิงก์รีเซ็ตรหัสผ่านเรียบร้อยแล้ว!",
+                errForgotUserNotFound: "กรุณากรอกชื่อผู้ใช้ให้ถูกต้อง",
                 modalChangeCodeTitle: "🔑 เปลี่ยนโค้ดสำหรับสมัคร",
                 labelNewRegCode: "โค้ดสมัครใหม่",
                 btnSaveCode: "💾 บันทึกโค้ดใหม่",
@@ -522,6 +552,12 @@
                 btnRegister: "📝 Register",
                 btnLogout: "🚪 Logout",
                 btnConfigCode: "🔑 Change Reg Code",
+                btnForgotPassword: "Forgot Password?",
+                modalForgotTitle: "🔑 Reset Password",
+                labelForgotUser: "Username",
+                btnSendReset: "📤 Send Reset Link",
+                forgotSuccess: "Password reset link sent successfully!",
+                errForgotUserNotFound: "Please enter a valid username.",
                 modalChangeCodeTitle: "🔑 Change Registration Code",
                 labelNewRegCode: "New Registration Code",
                 btnSaveCode: "💾 Save New Code",
@@ -620,6 +656,12 @@
                 btnRegister: "📝 회원가입",
                 btnLogout: "🚪 로그아웃",
                 btnConfigCode: "🔑 가입 코드 변경",
+                btnForgotPassword: "비밀번호 찾기",
+                modalForgotTitle: "🔑 비밀번호 재설정",
+                labelForgotUser: "사용자 이름",
+                btnSendReset: "📤 재설정 링크 보내기",
+                forgotSuccess: "비밀번호 재설정 링크가 전송되었습니다!",
+                errForgotUserNotFound: "올바른 사용자 이름을 입력하세요.",
                 modalChangeCodeTitle: "🔑 가입 코드 변경",
                 labelNewRegCode: "새 가입 코드",
                 btnSaveCode: "💾 새 코드 저장",
@@ -644,7 +686,7 @@
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
                 labelSpTime: "추가 시간 (분)",
-                phKillTime: "예: 17:30 또는 1730",
+                phKillTime: "예: 17:30 หรือ 1730",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
@@ -947,6 +989,35 @@
             const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
             document.getElementById('newRegCodeInput').value = currentRegCode; modal.show();
         }
+
+        function openForgotPasswordModal() {
+            const modalEl = document.getElementById('forgotPasswordModal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            const loginUserVal = document.getElementById('loginUser').value.trim();
+            if (loginUserVal) {
+                document.getElementById('forgotUserInput').value = loginUserVal;
+            }
+            modal.show();
+        }
+
+        document.getElementById('forgotPasswordForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('forgotUserInput').value.trim();
+            if (!username) {
+                alert(TRANSLATIONS[currentLang].errForgotUserNotFound);
+                return;
+            }
+            try {
+                const email = usernameToAuthEmail(username);
+                await auth.sendPasswordResetEmail(email);
+                alert(TRANSLATIONS[currentLang].forgotSuccess);
+                const modal = bootstrap.Modal.getInstance(document.getElementById('forgotPasswordModal'));
+                if (modal) modal.hide();
+            } catch (err) {
+                console.error("Password reset error:", err);
+                alert(err.message || TRANSLATIONS[currentLang].errLoginFailed);
+            }
+        });
 
         document.getElementById('changeCodeForm').addEventListener('submit', async (e) => {
             e.preventDefault();
