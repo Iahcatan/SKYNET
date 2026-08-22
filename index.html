@@ -113,9 +113,13 @@
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
                             <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" data-i18n-ph="phLoginPass" required>
                         </div>
-                        <div class="form-check mb-3">
-                            <input class="form-check-input" type="checkbox" id="rememberMe">
-                            <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="rememberMe">
+                                <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
+                            </div>
+                            <!-- เพิ่มปุ่มลืมรหัสผ่านตรงนี้ -->
+                            <a href="#" onclick="openForgotPasswordModal()" class="text-info small text-decoration-none">ลืมรหัสผ่าน?</a>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
@@ -296,7 +300,7 @@
         </footer>
     </div>
 
-    <!-- Modal เปลี่ยนรหัสผ่าน -->
+    <!-- Modal เปลี่ยนรหัสผ่าน (โค้ดสมัคร) -->
     <div class="modal fade" id="changeCodeModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content p-3">
@@ -344,11 +348,34 @@
         </div>
     </div>
 
+    <!-- Modal ลืมรหัสผ่าน (เพิ่มใหม่) -->
+    <div class="modal fade" id="forgotPasswordModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content p-3">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title text-info">🔑 ลืมรหัสผ่าน</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="forgotPasswordForm">
+                        <div class="mb-3">
+                            <label class="form-label">อีเมลจริงของบัญชี (Admin Email)</label>
+                            <input type="email" id="resetEmailInput" class="form-control" placeholder="กรอกอีเมลเพื่อรับลิงก์รีเซ็ต" required>
+                            <small class="text-white-50 d-block mt-2">
+                                *ระบบจะส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่อีเมลนี้<br>
+                                *รองรับเฉพาะบัญชีที่สร้างด้วยอีเมลจริงผ่าน Firebase Console เท่านั้น (บัญชีสมาชิกทั่วไปที่ใช้ Username จะไม่สามารถรับอีเมลได้)
+                            </small>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 fw-bold">📨 ส่งลิงก์รีเซ็ตรหัสผ่าน</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = {
-            // IMPORTANT: Firebase Authentication ต้องใช้ Web App config ครบชุด
-            // ให้นำค่าจาก Firebase Console > Project settings > Your apps > Web app มาใส่
             apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqVAFuWby094",
             authDomain: "skynet-3ad44.firebaseapp.com",
             projectId: "skynet-3ad44",
@@ -358,28 +385,22 @@
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
         };
 
-        // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
         if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
             console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
         }
 
-        // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
         const bossRef = db.ref('boss_schedule');
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
-        const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
+        const botSettingsRef = db.ref('bot_settings'); 
         const sessionsRef = db.ref('dashboard_sessions');
 
-        // 🔐 Admin account
-        // เดิมบัญชี Admin ต้องสร้างใน Firebase แต่ได้ทำการแก้ไขให้สร้างผ่านหน้าเว็บได้
-        // โดยใช้ชื่อผู้ใช้ "admin" จะได้รับสิทธิ์ Admin และอนุมัติอัตโนมัติ
         const ADMIN_DEFAULT_USERNAME = "admin";
         const ACTIVE_SESSION_TIMEOUT_MS = 90000;
 
-        // โค้ดสมัครเริ่มต้น
         let currentRegCode = "1234";
         settingsRef.child('register_code').on('value', (snap) => {
             if (snap.exists() && snap.val()) {
@@ -389,16 +410,13 @@
             }
         });
 
-        // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน
         botSettingsRef.on('value', (snap) => {
             const data = snap.val() || {};
-            // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
             document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
             document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
             document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
         });
 
-        // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
         ['ttsThToggle', 'ttsEnToggle', 'ttsKoToggle'].forEach(id => {
             document.getElementById(id).addEventListener('change', async (e) => {
                 if (!await requireApprovedUser()) {
@@ -411,13 +429,43 @@
             });
         });
 
-        // ฟังก์ชันเปิด Modal ตั้งค่า Bot
         async function openBotSettingsModal() {
             if (!await requireApprovedUser()) return;
             const modalEl = document.getElementById('botSettingsModal');
             const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
             modal.show();
         }
+
+        // เพิ่มฟังก์ชันสำหรับเปิด Modal ลืมรหัสผ่าน
+        function openForgotPasswordModal() {
+            const modalEl = document.getElementById('forgotPasswordModal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            modal.show();
+        }
+
+        // เพิ่ม Event Listener สำหรับจัดการการส่งฟอร์มลืมรหัสผ่าน
+        document.getElementById('forgotPasswordForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('resetEmailInput').value.trim();
+            if (!email) return;
+            
+            try {
+                await auth.sendPasswordResetEmail(email);
+                alert("ระบบได้ส่งลิงก์สำหรับรีเซ็ตรหัสผ่านไปยังอีเมลของคุณแล้ว กรุณาตรวจสอบกล่องข้อความ (หรือในโฟลเดอร์ Junk/Spam)");
+                const modal = bootstrap.Modal.getInstance(document.getElementById('forgotPasswordModal'));
+                if (modal) modal.hide();
+                document.getElementById('forgotPasswordForm').reset();
+            } catch (err) {
+                console.error("Forgot password error:", err);
+                if (err.code === 'auth/user-not-found') {
+                    alert("ไม่พบอีเมลนี้ในระบบ กรุณาตรวจสอบความถูกต้องอีกครั้ง");
+                } else if (err.code === 'auth/invalid-email') {
+                    alert("รูปแบบอีเมลไม่ถูกต้อง");
+                } else {
+                    alert("เกิดข้อผิดพลาด: " + err.message);
+                }
+            }
+        });
 
         // --- 2. ฐานข้อมูลภาษา (i18n) ---
         const TRANSLATIONS = {
@@ -485,7 +533,7 @@
                 grantNotifyPrompt: "กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ",
                 errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",
                 errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
-                regSuccess: "ลงทะเบียนและรับสิทธิ์สำเร็จ! กรุณาเข้าสู่ระบบ",
+                regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
                 errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
                 codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",
                 spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
@@ -910,40 +958,17 @@
             const password=document.getElementById('regPass').value;
             const regCode=document.getElementById('regCode').value.trim();
             if(username.length<3 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}
-            
-            // นำเงื่อนไขการบล็อกชื่อ admin ออก เพื่อให้สามารถสมัครเป็นแอดมินเองได้
-            // if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
-            
+            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
             if(regCode!==currentRegCode){alert(TRANSLATIONS[currentLang].errRegCodeInvalid);return;}
-            
-            let userRole = 'user';
-            let userStatus = 'pending';
-            let approvedAtVal = null;
-            let approvedByVal = null;
-
-            // หากผู้ใช้สมัครด้วยชื่อแอดมิน ให้สิทธิ์เป็น Admin และอนุมัติสถานะการล็อกอินอัตโนมัติ
-            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){
-                userRole = 'admin';
-                userStatus = 'approved';
-                approvedAtVal = new Date().toISOString();
-                approvedByVal = 'system';
-            }
-
             try{
                 const cred=await auth.createUserWithEmailAndPassword(usernameToAuthEmail(username),password);
                 const now=new Date().toISOString();
                 await usersRef.child(cred.user.uid).set({
-                    username, usernameKey:makeUserKey(username), role:userRole, status:userStatus, createdAt:now,
-                    approvedAt:approvedAtVal,approvedBy:approvedByVal,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
+                    username, usernameKey:makeUserKey(username), role:'user', status:'pending', createdAt:now,
+                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
                 });
                 await auth.signOut();
-                
-                if (userStatus === 'approved') {
-                    alert(TRANSLATIONS[currentLang].regSuccess);
-                } else {
-                    alert(TRANSLATIONS[currentLang].regPending);
-                }
-                
+                alert(TRANSLATIONS[currentLang].regPending);
                 document.getElementById('registerForm').reset();
                 new bootstrap.Tab(document.getElementById('login-tab')).show();
             }catch(err){
@@ -1139,7 +1164,6 @@
 
             await usersRef.child(userKey).update(updates);
 
-            // หากถูกปิดการใช้งาน ให้ปิด session ที่กำลัง active ของ user นั้นด้วย
             if (newStatus === 'disabled' || newStatus === 'rejected') {
                 const sessionsSnap = await sessionsRef.once('value');
                 const sessions = sessionsSnap.val() || {};
@@ -1166,7 +1190,6 @@
             currentUserKey=uid;currentUserData=user;return true;
         }
 
-        // Firebase Authentication session listener
         auth.onAuthStateChanged(async (firebaseUser) => {
             if (firebaseUser) {
                 await checkAuthSession(firebaseUser);
