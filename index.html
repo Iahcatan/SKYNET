@@ -572,6 +572,7 @@
         // --- 4. Firebase Authentication ---
         function showAuthError(err) {
             const code = err && err.code ? err.code : '';
+            const message = err && err.message ? err.message : '';
             const messages = {
                 'auth/invalid-credential':'อีเมลหรือรหัสผ่านไม่ถูกต้อง',
                 'auth/user-not-found':'ไม่พบผู้ใช้งานนี้',
@@ -582,7 +583,14 @@
                 'auth/too-many-requests':'มีการพยายามเข้าสู่ระบบมากเกินไป กรุณารอสักครู่',
                 'auth/network-request-failed':'เชื่อมต่อ Firebase ไม่สำเร็จ'
             };
-            alert(messages[code] || (err && err.message) || 'เกิดข้อผิดพลาดในการยืนยันตัวตน');
+
+            // ดักจับ Error โดเมนที่ยังไม่ได้รับอนุญาต (ให้ตรงกับภาพที่ผู้ใช้เจอ)
+            if (message.includes('requests-from-referer') || message.includes('are-blocked')) {
+                alert('โดเมนนี้ยังไม่ได้รับอนุญาต (Unauthorized Domain)\n\nกรุณาไปที่ Firebase Console:\n1. ไปที่ Authentication\n2. ไปที่แท็บ Settings\n3. ไปที่ Authorized domains\n4. เพิ่มโดเมน iahcatan.github.io ลงไป');
+                return;
+            }
+
+            alert(messages[code] || message || 'เกิดข้อผิดพลาดในการยืนยันตัวตน');
         }
 
         auth.onAuthStateChanged(async user => {
