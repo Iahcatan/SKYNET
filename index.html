@@ -473,7 +473,7 @@
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
                 labelSpTime: "추가 시간 (분)",
-                phKillTime: "예: 17:30 또는 1730",
+                phKillTime: "예: 17:30 หรือ 1730",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
@@ -501,7 +501,7 @@
                 grantNotifyPrompt: "브라우저에서 알림 권한을 허용해주세요.",
                 errUserExists: "이미 존재하는 사용자 이름입니다!",
                 regSuccess: "회원가입 성공! 로그인해주세요.",
-                errLoginFailed: "이메일 หรือ 비밀번호가 올바르지 않습니다!",
+                errLoginFailed: "이메일 또는 비밀번호가 올바르지 않습니다!",
                 spawnNotifyTitle: "⚔️ {boss} 젠 완료!",
                 spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",
                 noticeNotifyTitle: "⏳ {boss} 젠 임박!",
@@ -584,15 +584,15 @@
                 'auth/network-request-failed':'เชื่อมต่อ Firebase ไม่สำเร็จ'
             };
 
-            // ดักจับ Error โดเมนที่ยังไม่ได้รับอนุญาต (ให้ตรงกับภาพที่ผู้ใช้เจอ)
             if (message.includes('requests-from-referer') || message.includes('are-blocked')) {
-                alert('โดเมนนี้ยังไม่ได้รับอนุญาต (Unauthorized Domain)\n\nกรุณาไปที่ Firebase Console:\n1. ไปที่ Authentication\n2. ไปที่แท็บ Settings\n3. ไปที่ Authorized domains\n4. เพิ่มโดเมน iahcatan.github.io ลงไป');
+                alert('โดเมนนี้ยังไม่ได้รับอนุญาต (Unauthorized Domain)\n\nกรุณาไปที่ Firebase Console:\n1. ไปที่ Authentication\n2. ไปที่แท็บ Settings\n3. ไปที่ Authorized domains\n4. เพิ่มโดเมนของคุณลงไป');
                 return;
             }
 
             alert(messages[code] || message || 'เกิดข้อผิดพลาดในการยืนยันตัวตน');
         }
 
+        // ---------- ส่วน onAuthStateChanged ที่อัปเดตแล้ว ----------
         auth.onAuthStateChanged(async user => {
             if (isRegistering && user) return;
             if (!user) {
@@ -611,16 +611,24 @@
                     return;
                 }
                 const data = snap.val() || {};
+                
+                // เช็คสถานะ user
                 if (data.status !== 'approved' && data.role !== 'admin') {
                     await auth.signOut();
-                    alert(data.status === 'disabled' ? 'บัญชีนี้ถูกปิดใช้งาน' : 'บัญชีของคุณยังไม่ได้รับการอนุมัติจาก Admin');
+                    if(data.status === 'disabled') {
+                        alert('บัญชีนี้ถูกปิดใช้งาน');
+                    } else if(data.status === 'pending') {
+                        alert('บัญชีของคุณยังไม่ได้รับการอนุมัติจากผู้ดูแลระบบ กรุณารออนุมัติ');
+                    } else {
+                        alert('สถานะบัญชีของคุณไม่ถูกต้อง');
+                    }
                     return;
                 }
 
-                currentUserUid = user.uid; currentUserData = data;
+                currentUserUid = user.uid;
+                currentUserData = data;
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('mainDashboard').style.display = 'block';
-                // แสดงผลชื่อผู้ใช้แทนอีเมล์
                 document.getElementById('userBadge').innerText = `👤 ${data.username || user.email}`;
                 document.getElementById('adminPanel').style.display = data.role === 'admin' ? 'block' : 'none';
                 document.querySelector('[onclick="openBotSettingsModal()"]')?.classList.toggle('d-none', data.role !== 'admin');
@@ -658,25 +666,48 @@
             }
         }, 30000);
 
+        // ---------- ส่วนการลงทะเบียนที่อัปเดตแล้ว ----------
         document.getElementById('registerForm').addEventListener('submit', async e => {
             e.preventDefault();
             const username = document.getElementById('regUser').value.trim();
             const password = document.getElementById('regPass').value;
             const email = document.getElementById('regEmail').value.trim().toLowerCase();
             
-            if (username.length < 3) { alert('ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร'); return; }
+            if (username.length < 2) { alert('ชื่อผู้ใช้ต้องมีอย่างน้อย 2 ตัวอักษร'); return; }
             if (password.length < 6) { alert('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'); return; }
+
             try {
                 isRegistering = true;
+                // สร้างบัญชีผู้ใช้ Authentication
                 const credential = await auth.createUserWithEmailAndPassword(email, password);
                 const uid = credential.user.uid;
-                await usersRef.child(uid).set({ username, email, role:'user', status:'pending', createdAt: firebase.database.ServerValue.TIMESTAMP, approvedAt:null, approvedBy:null, lastLoginAt:null, lastSeenAt:null, loginCount:0 });
+
+                // บันทึกข้อมูลใน Realtime Database ใน node users
+                await usersRef.child(uid).set({
+                    username,
+                    email, 
+                    role: 'user',
+                    status: 'pending',      // ตั้งสถานะรออนุมัติ
+                    createdAt: firebase.database.ServerValue.TIMESTAMP,
+                    approvedAt: null,
+                    approvedBy: null,
+                    lastLoginAt: null,
+                    lastSeenAt: null,
+                    loginCount: 0,
+                    online: false
+                });
+
+                // ออกจากระบบหลังสมัครเสร็จเพื่อรออนุมัติ
                 await auth.signOut();
                 isRegistering = false;
                 document.getElementById('registerForm').reset();
                 alert('ลงทะเบียนสำเร็จ แต่ต้องรอ Admin อนุมัติก่อนเข้าสู่ระบบ');
+                // สลับกลับไปแท็บ Login
                 new bootstrap.Tab(document.getElementById('login-tab')).show();
-            } catch (err) { isRegistering = false; showAuthError(err); }
+            } catch (err) {
+                isRegistering = false;
+                showAuthError(err);
+            }
         });
 
         document.getElementById('loginForm').addEventListener('submit', async e => {
@@ -930,7 +961,6 @@
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
             
-            // ดึงชื่อ Username มาแสดงแทน Email (แก้ไขจากโค้ดเดิมที่ไม่ยอมดึงค่า)
             const currentUser = currentUserData?.username || auth.currentUser?.email || 'Unknown';
 
             await bossRef.child(bossInput).set({
