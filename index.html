@@ -763,7 +763,8 @@
 
         // --- 6. ตั้งค่า Bot ---
         function openBotSettingsModal(){ if(!currentUserData || currentUserData.role!=='admin') return alert('เฉพาะ Admin เท่านั้น'); bootstrap.Modal.getOrCreateInstance(document.getElementById('botSettingsModal')).show(); }
-        ['ttsThToggle','ttsEnToggle','ttsKoToggle'].forEach(id=>document.getElementById(id).addEventListener('change',async e=>{ if(!await requireAdmin()){e.target.checked=!e.target.checked;return;} const key=id==='ttsThToggle'?'tts_th_enabled':id==='ttsEnToggle'?'tts_en_enabled':'tts_ko_enabled'; await botSettingsRef.child(key).set(e.target.checked); }));
+        // SKYNET_TTS_SYNC_PATCH: keys must match bot.py / Firebase bot_settings.
+['ttsThToggle','ttsEnToggle','ttsKoToggle'].forEach(id=>document.getElementById(id).addEventListener('change',async e=>{ if(!await requireAdmin()){e.target.checked=!e.target.checked;return;} const key=id==='ttsThToggle'?'tts_th_enabled':id==='ttsEnToggle'?'tts_en_enabled':'tts_ko_enabled'; await botSettingsRef.child(key).set(e.target.checked); }));
 
         // --- 7. UI ภาษา / Timezone ---
         function applyLanguage() {
@@ -962,7 +963,7 @@
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
             
-            const currentUser = currentUserData?.email || auth.currentUser?.email || 'Unknown';
+            const currentUser = currentUserData?.username || auth.currentUser?.email || 'Unknown';
 
             await bossRef.child(bossInput).set({
                 killTimeMs: killDate.getTime(),
