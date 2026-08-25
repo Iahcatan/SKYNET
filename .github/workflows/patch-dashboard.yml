@@ -1,0 +1,61 @@
+name: Patch SKYNET Dashboard
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch dashboard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('index.html')
+          text = path.read_text(encoding='utf-8')
+          original = text
+
+          # Record the registered username, not the login email.
+          old = "const currentUser = currentUserData?.email || auth.currentUser?.email || 'Unknown';"
+          new = "const currentUser = currentUserData?.username || auth.currentUser?.email || 'Unknown';"
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          # Keep the three Dashboard Voice Notification switches explicitly
+          # synchronized with the exact Firebase keys consumed by bot.py.
+          marker = "['ttsThToggle','ttsEnToggle','ttsKoToggle'].forEach(id=>document.getElementById(id).addEventListener('change',async e=>{"
+          if marker in text and "// SKYNET_TTS_SYNC_PATCH" not in text:
+              text = text.replace(
+                  marker,
+                  "// SKYNET_TTS_SYNC_PATCH: keys must match bot.py / Firebase bot_settings.\n" + marker,
+                  1,
+              )
+
+          path.write_text(text, encoding='utf-8')
+
+          if text == original:
+              print('Dashboard already patched; no changes needed.')
+          else:
+              print('Dashboard patch applied.')
+          PY
+
+      - name: Commit dashboard patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- index.html; then
+            echo "No dashboard changes to commit."
+            exit 0
+          fi
+          git add index.html
+          git commit -m "fix: store registered username in boss Record by"
+          git push
