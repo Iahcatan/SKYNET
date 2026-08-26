@@ -11,6 +11,8 @@
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Firebase Web config is injected by SKYNET Render. This keeps the same dashboard usable from GitHub Pages. -->
+    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
 
     <style>
         body {
@@ -120,7 +122,7 @@
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
                             🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
-                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
+                            <span class="text-white-50 d-block">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
                         </div>
                     </form>
                 </div>
@@ -346,21 +348,16 @@
 
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
-        const firebaseConfig = {
-            // IMPORTANT: Firebase Authentication ต้องใช้ Web App config ครบชุด
-            // ให้นำค่าจาก Firebase Console > Project settings > Your apps > Web app มาใส่
-            apiKey: "PASTE_YOUR_FIREBASE_API_KEY_HERE",
-            authDomain: "PASTE_YOUR_FIREBASE_AUTH_DOMAIN_HERE",
-            projectId: "PASTE_YOUR_FIREBASE_PROJECT_ID_HERE",
-            storageBucket: "PASTE_YOUR_FIREBASE_STORAGE_BUCKET_HERE",
-            messagingSenderId: "PASTE_YOUR_FIREBASE_MESSAGING_SENDER_ID_HERE",
-            appId: "PASTE_YOUR_FIREBASE_APP_ID_HERE",
+        const firebaseConfig = Object.assign({
+            projectId: "skynet-3ad44",
+            authDomain: "skynet-3ad44.firebaseapp.com",
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
-        };
+        }, window.SKYNET_FIREBASE_CONFIG || {});
 
         // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
-        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
-            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
+        const firebaseConfigMissing = !firebaseConfig.apiKey || !firebaseConfig.authDomain || !firebaseConfig.appId;
+        if (firebaseConfigMissing) {
+            console.error('SKYNET Firebase Web config missing. Check FIREBASE_WEB_CONFIG_JSON on Render.');
         }
 
         // Initialize Firebase
@@ -950,7 +947,15 @@
                 await checkAuthSession(cred.user);
             }catch(err){
                 console.error('Firebase Authentication login error:',err);
-                alert(TRANSLATIONS[currentLang].errLoginFailed);
+                let msg = TRANSLATIONS[currentLang].errLoginFailed;
+                if (err && err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชีนี้ใน Firebase Authentication';
+                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
+                else if (err && err.code === 'auth/invalid-credential') msg = 'Username/Password ไม่ถูกต้อง หรือบัญชีนี้ยังไม่มีใน Firebase Authentication';
+                else if (err && err.code === 'auth/operation-not-allowed') msg = 'Firebase Authentication ยังไม่ได้เปิด Email/Password';
+                else if (err && err.code === 'auth/invalid-api-key') msg = 'Firebase Web API Key ไม่ถูกต้อง';
+                else if (err && err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ กรุณาตรวจ Web config';
+                else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่าใน Render';
+                alert(msg);
             }
         });
 
