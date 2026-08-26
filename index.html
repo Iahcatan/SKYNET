@@ -1061,7 +1061,7 @@
                         actionHtml = `
                             <div class="d-flex gap-1 flex-wrap">
                                 <button class="btn btn-sm btn-success" onclick="setUserStatus('${key}', 'approved')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button>
-                                <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'rejected')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
+                                <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'disabled')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
                             </div>`;
                     } else if (user.status === 'approved') {
                         actionHtml = `<button class="btn btn-sm btn-outline-danger" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminBan || 'Ban'}</button>`;
