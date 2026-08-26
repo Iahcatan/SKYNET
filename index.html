@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Boss Timer Dashboard</title>
+    <title>Boss Timer Eternal Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -11,8 +11,6 @@
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <!-- Firebase Web config is injected by SKYNET Render. This keeps the same dashboard usable from GitHub Pages. -->
-    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
 
     <style>
         body {
@@ -93,7 +91,7 @@
                 </select>
             </div>
 
-            <h3 class="text-center text-warning mb-4" data-i18n="authTitle">⚔️ Boss Timer Access</h3>
+            <div class="text-center mb-4"><img src="https://img2.pic.in.th/85cf3cd7-b2ad-4a9d-a2a2-d94ec53dd4c3.jpeg" alt="Boss Timer Logo" class="skynet-logo" loading="eager"><h3 class="text-warning mt-3 mb-0" data-i18n="authTitle">⚔️ Boss Timer Access</h3></div>
             
             <ul class="nav nav-tabs nav-justified mb-3" id="authTabs" role="tablist">
                 <li class="nav-item">
@@ -122,7 +120,7 @@
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
                             🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
-                            <span class="text-white-50 d-block">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
+                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
                         </div>
                     </form>
                 </div>
@@ -150,7 +148,7 @@
 
     <div id="mainDashboard" class="container py-4" style="display: none;">
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-            <h2 data-i18n="title">⚔️ Boss Timer Dashboard</h2>
+            <div class="dashboard-brand"><img src="https://img2.pic.in.th/85cf3cd7-b2ad-4a9d-a2a2-d94ec53dd4c3.jpeg" alt="Boss Timer Logo" class="skynet-logo"><h2 class="mb-0" data-i18n="title">Boss Timer Dashboard</h2></div>
             <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
                 <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
@@ -346,18 +344,26 @@
         </div>
     </div>
 
+    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
-        const firebaseConfig = Object.assign({
+        const firebaseConfig = window.SKYNET_FIREBASE_CONFIG || {
+            apiKey: "",
+            authDomain: "",
             projectId: "skynet-3ad44",
-            authDomain: "skynet-3ad44.firebaseapp.com",
+            storageBucket: "",
+            messagingSenderId: "",
+            appId: "",
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
-        }, window.SKYNET_FIREBASE_CONFIG || {});
+        };
 
         // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
-        const firebaseConfigMissing = !firebaseConfig.apiKey || !firebaseConfig.authDomain || !firebaseConfig.appId;
-        if (firebaseConfigMissing) {
-            console.error('SKYNET Firebase Web config missing. Check FIREBASE_WEB_CONFIG_JSON on Render.');
+        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
+            console.error('SKYNET Firebase Web config missing. Set FIREBASE_WEB_* on Render.');
+            document.addEventListener('DOMContentLoaded', () => {
+                const btn = document.querySelector('#loginForm button[type=submit]');
+                if (btn) btn.title = 'Firebase Web config is missing on the bot server';
+            });
         }
 
         // Initialize Firebase
@@ -511,8 +517,8 @@
                 adminThAction: "จัดการ",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
-                adminDisable: "ปิดใช้งาน",
-                adminActivate: "เปิดใช้งาน",
+                adminDisable: "แบน",
+                adminActivate: "ยกเลิกแบน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
                 adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
                 adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
@@ -609,8 +615,8 @@
                 adminThAction: "Action",
                 adminApprove: "Approve",
                 adminReject: "Reject",
-                adminDisable: "Disable",
-                adminActivate: "Activate",
+                adminDisable: "Ban",
+                adminActivate: "Unban",
                 adminNoUsers: "No users found.",
                 adminOnly: "Admin only.",
                 adminCannotChangeAdmin: "The Admin account cannot be changed."
@@ -707,8 +713,8 @@
                 adminThAction: "관리",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
-                adminDisable: "ปิดใช้งาน",
-                adminActivate: "เปิดใช้งาน",
+                adminDisable: "แบน",
+                adminActivate: "ยกเลิกแบน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
                 adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
                 adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
@@ -947,15 +953,7 @@
                 await checkAuthSession(cred.user);
             }catch(err){
                 console.error('Firebase Authentication login error:',err);
-                let msg = TRANSLATIONS[currentLang].errLoginFailed;
-                if (err && err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชีนี้ใน Firebase Authentication';
-                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
-                else if (err && err.code === 'auth/invalid-credential') msg = 'Username/Password ไม่ถูกต้อง หรือบัญชีนี้ยังไม่มีใน Firebase Authentication';
-                else if (err && err.code === 'auth/operation-not-allowed') msg = 'Firebase Authentication ยังไม่ได้เปิด Email/Password';
-                else if (err && err.code === 'auth/invalid-api-key') msg = 'Firebase Web API Key ไม่ถูกต้อง';
-                else if (err && err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ กรุณาตรวจ Web config';
-                else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่าใน Render';
-                alert(msg);
+                alert(TRANSLATIONS[currentLang].errLoginFailed);
             }
         });
 
@@ -1055,7 +1053,7 @@
                                 <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'rejected')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
                             </div>`;
                     } else if (user.status === 'approved') {
-                        actionHtml = `<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;
+                        actionHtml = `<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}', 'disabled')">🔨 ${TRANSLATIONS[currentLang].adminDisable}</button>`;
                     } else if (user.status === 'disabled' || user.status === 'rejected') {
                         actionHtml = `<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}', 'approved')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;
                     }
