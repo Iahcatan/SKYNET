@@ -353,8 +353,8 @@
             window.SKYNET_FIREBASE_CONFIG = window.SKYNET_FIREBASE_CONFIG || {};
 
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
-        const firebaseConfig = Object.assign({
-            apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqVAFuWby094",
+        const firebaseConfig = {
+            apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqvAFuWby094",
             authDomain: "skynet-3ad44.firebaseapp.com",
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app",
             projectId: "skynet-3ad44",
@@ -362,7 +362,7 @@
             messagingSenderId: "7120270934",
             appId: "1:7120270934:web:5e3db3f5dae6542352adf7",
             measurementId: "G-N8QER5X9BN"
-        }, window.SKYNET_FIREBASE_CONFIG || {});
+        };
 
         // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
         const firebaseConfigMissing = !firebaseConfig.apiKey || !firebaseConfig.authDomain || !firebaseConfig.appId;
@@ -958,63 +958,101 @@
             }
         });
 
-        document.getElementById('loginForm').addEventListener('submit',async(e)=>{
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const username=document.getElementById('loginUser').value.trim();
-            const password=document.getElementById('loginPass').value;
-            const rememberMe=document.getElementById('rememberMe').checked;
-            const submitBtn=e.currentTarget.querySelector('button[type=submit]');
-            const oldBtnText=submitBtn ? submitBtn.innerHTML : '';
-            if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
-            if(submitBtn){submitBtn.disabled=true;submitBtn.innerHTML='⏳ กำลังเข้าสู่ระบบ...';}
-            const loginDebug=document.getElementById('loginDebug');
-            const setLoginDebug=(t)=>{ if(loginDebug) loginDebug.textContent=t; console.log('[SKYNET LOGIN]',t); };
-            setLoginDebug('1/4 กำลังตรวจสอบบัญชี Firebase Authentication...');
-            try{
-                const authEmail = username.includes('@')
-                    ? username.trim().toLowerCase()
-                    : usernameToAuthEmail(username);
-                console.log('[SKYNET] Login attempt:', { username, authEmail });
-                const cred=await withTimeout(auth.signInWithEmailAndPassword(authEmail,password), 15000, 'AUTH_LOGIN_TIMEOUT');
-                console.log('[SKYNET] Firebase Authentication success:', cred.user.uid);
-                setLoginDebug('2/4 Firebase Authentication ผ่าน — UID: ' + cred.user.uid);
-                const snap=await withTimeout(usersRef.child(cred.user.uid).once('value'), 10000, 'USER_READ_TIMEOUT');
-                if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
-                const userData=snap.val();
-                setLoginDebug('3/4 ตรวจสอบสิทธิ์ผู้ใช้: ' + (userData.role || 'user') + ' / ' + (userData.status || 'unknown'));
-                if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
-                if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
-                if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
-                if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
-                // Do not make successful Authentication wait for session writes.
-                // Authentication and authorization are complete here. Show the dashboard immediately.
-                setLoginDebug('4/4 กำลังเปิด Dashboard...');
-                const shown = await checkAuthSession(cred.user);
-                if (!shown) throw new Error('DASHBOARD_SHOW_FAILED');
-                setLoginDebug('✅ เข้าสู่ระบบสำเร็จ');
-                // Session bookkeeping is non-critical and must never block Login.
-                createUserSession(cred.user.uid,userData).catch(err => console.warn('[SKYNET] Session sync skipped after login:', err));
-            }catch(err){
-                console.error('Firebase Authentication login error:',err);
-                let msg = TRANSLATIONS[currentLang].errLoginFailed;
-                if (err && err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชีนี้ใน Firebase Authentication';
-                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
-                else if (err && err.code === 'auth/invalid-credential') msg = 'ข้อมูลเข้าสู่ระบบไม่ถูกต้อง (Firebase: auth/invalid-credential)';
-                else if (err && err.code === 'auth/operation-not-allowed') msg = 'Firebase Authentication ยังไม่ได้เปิด Email/Password';
-                else if (err && err.code === 'auth/invalid-api-key') msg = 'Firebase Web API Key ไม่ถูกต้อง';
-                else if (err && err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ กรุณาตรวจ Web config';
-                else if (err && (err.code === 'PERMISSION_DENIED' || err.code === 'database/permission-denied')) msg = 'Firebase Rules ปฏิเสธการอ่าน/บันทึก users';
-                else if (err && err.code === 'AUTH_LOGIN_TIMEOUT') msg = 'Firebase Authentication ไม่ตอบสนองภายใน 15 วินาที — ตรวจ Network/Authorized Domains';
-                else if (err && err.code === 'USER_READ_TIMEOUT') msg = 'Login สำเร็จ แต่ Firebase Database อ่าน users/<UID> ไม่ตอบสนองภายใน 10 วินาที';
-                else if (err && err.code === 'ADMIN_SELF_READ_TIMEOUT') msg = 'เข้าสู่ระบบสำเร็จ แต่ตรวจสอบสิทธิ์ Admin ใช้เวลานานเกิน 8 วินาที';
-                else if (err && err.code === 'ADMIN_USERS_READ_TIMEOUT') msg = 'เข้าสู่ระบบสำเร็จ แต่รายการผู้ใช้ Admin ใช้เวลานานเกิน 8 วินาที';
-                else if (err && err.code === 'ADMIN_SESSIONS_READ_TIMEOUT') msg = 'เข้าสู่ระบบสำเร็จ แต่รายการ Session ใช้เวลานานเกิน 8 วินาที';
-                else if (err && err.message === 'DASHBOARD_SHOW_FAILED') msg = 'Firebase Login ผ่านแล้ว แต่ไม่สามารถเปิด Dashboard ได้';
-                else if (err && err.code === 'SKYNET_TIMEOUT') msg = 'Firebase ใช้เวลานานเกินกำหนด: ' + (err.message || 'timeout');
-                else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่า';
-                alert(msg + '\n\nบัญชีที่ระบบกำลังใช้: ' + authEmail);
-            } finally {
-                if(submitBtn){submitBtn.disabled=false;submitBtn.innerHTML=oldBtnText || '🔑 เข้าสู่ระบบ';}
+            e.stopPropagation();
+            const username = document.getElementById('loginUser').value.trim();
+            const password = document.getElementById('loginPass').value;
+            const rememberMe = document.getElementById('rememberMe').checked;
+            const submitBtn = e.currentTarget.querySelector('button[type=submit]');
+            const debug = document.getElementById('loginDebug');
+            const show = (msg) => {
+                if (debug) { debug.textContent = msg; debug.style.display = 'block'; }
+                console.log('[SKYNET LOGIN]', msg);
+            };
+            const fail = (msg) => {
+                show('❌ ' + msg);
+                alert(msg);
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '🔑 เข้าสู่ระบบ'; }
+            };
+            if (!username || !password) { fail('กรุณากรอกชื่อผู้ใช้และรหัสผ่าน'); return; }
+            if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '⏳ กำลังเข้าสู่ระบบ...'; }
+            let authEmail = username.includes('@') ? username.toLowerCase() : usernameToAuthEmail(username);
+            if (makeUserKey(username) === 'admin') authEmail = ADMIN_AUTH_EMAIL;
+            show('1/4 กำลังเชื่อมต่อ Firebase Authentication: ' + authEmail);
+
+            try {
+                // Verify that the Firebase Auth SDK is actually ready before sending credentials.
+                if (!window.firebase || !firebase.auth) throw new Error('Firebase Authentication SDK โหลดไม่สำเร็จ');
+                if (!firebase.apps || !firebase.apps.length) throw new Error('Firebase App ยังไม่ได้ initialize');
+
+                // Important: use a real timer race. This prevents a browser/network hang from leaving the button stuck.
+                const loginPromise = auth.signInWithEmailAndPassword(authEmail, password);
+                const cred = await Promise.race([
+                    loginPromise,
+                    new Promise((_, reject) => setTimeout(() => {
+                        const er = new Error('Firebase Auth request timeout'); er.code = 'AUTH_TIMEOUT'; reject(er);
+                    }, 8000))
+                ]);
+
+                show('2/4 Firebase Authentication สำเร็จ — UID: ' + cred.user.uid);
+                const snap = await Promise.race([
+                    usersRef.child(cred.user.uid).once('value'),
+                    new Promise((_, reject) => setTimeout(() => {
+                        const er = new Error('Database user read timeout'); er.code = 'DB_TIMEOUT'; reject(er);
+                    }, 8000))
+                ]);
+                if (!snap.exists()) {
+                    await auth.signOut().catch(() => {});
+                    fail('ล็อกอิน Firebase สำเร็จ แต่ไม่พบ users/' + cred.user.uid + ' ใน Realtime Database');
+                    return;
+                }
+                const userData = snap.val() || {};
+                show('3/4 ตรวจสอบสิทธิ์: username=' + (userData.username || '-') + ' | role=' + (userData.role || '-') + ' | status=' + (userData.status || '-'));
+                if (userData.status !== 'approved') {
+                    await auth.signOut().catch(() => {});
+                    fail('บัญชีนี้ยังไม่ได้รับอนุมัติ (status=' + (userData.status || 'ไม่มี') + ')');
+                    return;
+                }
+                if (userData.role !== 'admin' && makeUserKey(username) === 'admin') {
+                    await auth.signOut().catch(() => {});
+                    fail('บัญชี Firebase นี้ไม่ใช่ Admin (role=' + (userData.role || 'ไม่มี') + ')');
+                    return;
+                }
+                if (rememberMe) localStorage.setItem('saved_username', username); else localStorage.removeItem('saved_username');
+                currentUserData = userData;
+                currentUserKey = cred.user.uid;
+                localStorage.setItem('logged_user', userData.username || username);
+                localStorage.setItem('logged_user_key', cred.user.uid);
+                localStorage.setItem('logged_role', userData.role || 'user');
+                show('4/4 เข้าสู่ Dashboard สำเร็จ');
+                document.getElementById('authContainer').style.display = 'none';
+                document.getElementById('mainDashboard').style.display = 'block';
+                document.getElementById('userBadge').innerText = `👤 ${userData.username || cred.user.email}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
+                const adminPanel = document.getElementById('adminPanel');
+                const adminMenu = document.getElementById('adminPanelMenuBtn');
+                if (userData.role === 'admin') {
+                    if (adminPanel) adminPanel.style.display = 'block';
+                    document.querySelectorAll('[data-admin-only]').forEach(el => el.style.display = '');
+                    if (adminMenu) adminMenu.style.display = 'inline-block';
+                    loadAdminUsers().catch(err => console.warn('[SKYNET] admin list:', err));
+                }
+                createUserSession(cred.user.uid, userData).catch(err => console.warn('[SKYNET] session sync:', err));
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '🔑 เข้าสู่ระบบ'; }
+            } catch (err) {
+                console.error('[SKYNET] Login error', err);
+                let msg = 'เข้าสู่ระบบไม่สำเร็จ';
+                if (err.code === 'auth/invalid-credential') msg = 'Email หรือรหัสผ่านไม่ถูกต้อง (Firebase: auth/invalid-credential)';
+                else if (err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
+                else if (err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชี ' + authEmail + ' ใน Firebase Authentication';
+                else if (err.code === 'auth/too-many-requests') msg = 'Firebase ล็อกการลอง Login ชั่วคราว เพราะลองหลายครั้งเกินไป';
+                else if (err.code === 'auth/operation-not-allowed') msg = 'Firebase ยังไม่ได้เปิด Email/Password Authentication';
+                else if (err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ';
+                else if (err.code === 'auth/requests-from-referer-https://iahcatan.github.io-are-blocked') msg = 'Firebase API Key ยังบล็อก iahcatan.github.io';
+                else if (err.code === 'AUTH_TIMEOUT') msg = 'Firebase Authentication ไม่ตอบภายใน 8 วินาที — ปัญหาอยู่ที่การเชื่อมต่อ/API Key ไม่ใช่ฐานข้อมูล';
+                else if (err.code === 'DB_TIMEOUT') msg = 'Authentication ผ่านแล้ว แต่ Realtime Database ไม่ตอบภายใน 8 วินาที';
+                else if (err.message) msg += ': ' + err.message;
+                fail(msg + '\n\nบัญชีที่ใช้: ' + authEmail);
             }
         });
 
