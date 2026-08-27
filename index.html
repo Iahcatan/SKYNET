@@ -11,8 +11,6 @@
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <!-- Firebase Web config is injected by SKYNET Render. This keeps the same dashboard usable from GitHub Pages. -->
-    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
 
     <style>
         body {
@@ -349,25 +347,9 @@
     <script>
         // GitHub Pages is a static host, so it cannot read Render Environment Variables directly.
         // Load the public Firebase Web config from the Render service first.
-        (async function bootstrapSkynetDashboard() {
-            // Firebase config is public web configuration. Do not block the entire UI on Render.
-            // The previous version waited indefinitely for the Render endpoint before registering
-            // the Login event handler, which made the Login button appear to do nothing when the
-            // free Render instance was asleep/unreachable.
-            try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 8000);
-                const cfgResponse = await fetch('https://bosstimer-ry18.onrender.com/api/firebase-config.js', {
-                    cache: 'no-store', signal: controller.signal
-                });
-                clearTimeout(timeoutId);
-                if (!cfgResponse.ok) throw new Error(`HTTP ${cfgResponse.status}`);
-                const cfgSource = await cfgResponse.text();
-                new Function(cfgSource)();
-            } catch (e) {
-                console.warn('SKYNET Firebase config bootstrap failed; using embedded public config:', e);
-                window.SKYNET_FIREBASE_CONFIG = {};
-            }
+        (function bootstrapSkynetDashboard() {
+            // V5: do not depend on Render for startup. GitHub Pages uses the public Firebase Web config below.
+            window.SKYNET_FIREBASE_CONFIG = window.SKYNET_FIREBASE_CONFIG || {};
 
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = Object.assign({
@@ -396,6 +378,19 @@
         const settingsRef = db.ref('app_settings');
         const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
         const sessionsRef = db.ref('dashboard_sessions');
+
+        // V5: bounded Firebase operations so the Login button can never remain stuck on loading.
+        function withTimeout(promise, ms, label) {
+            let timer;
+            const timeout = new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                    const err = new Error(label || 'TIMEOUT');
+                    err.code = 'SKYNET_TIMEOUT';
+                    reject(err);
+                }, ms);
+            });
+            return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+        }
 
         // 🔐 Admin account
         // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด
@@ -838,13 +833,13 @@
             currentUserData = userData;
             const now = new Date().toISOString();
 
-            await sessionsRef.child(currentSessionId).set({
+            await withTimeout(sessionsRef.child(currentSessionId).set({
                 userKey, username:userData.username, loginAt:now, lastSeenAt:now, active:true
-            });
-            await usersRef.child(userKey).update({
+            }), 8000, 'SESSION_WRITE_TIMEOUT');
+            await withTimeout(usersRef.child(userKey).update({
                 lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null,
                 loginCount:(Number(userData.loginCount)||0)+1
-            });
+            }), 8000, 'USER_WRITE_TIMEOUT');
             localStorage.setItem('logged_user', userData.username);
             localStorage.setItem('logged_user_key', userKey);
             localStorage.setItem('logged_session_id', currentSessionId);
@@ -887,7 +882,7 @@
             const firebaseUser=firebaseUserOverride || auth.currentUser;
             if(firebaseUser){
                 try{
-                    const snap=await usersRef.child(firebaseUser.uid).once('value');
+                    const snap=await withTimeout(usersRef.child(firebaseUser.uid).once('value'), 10000, 'USER_READ_TIMEOUT');
                     if(!snap.exists()) throw new Error('USER_NOT_FOUND');
                     const userData=snap.val();
                     if(userData.status!=='approved'){
@@ -913,8 +908,9 @@
                         adminOnlyButtons.forEach(el=>el.style.display='none');
                         if(adminMenu) adminMenu.style.display='none';
                     }
-                    if(!currentSessionId) await createUserSession(firebaseUser.uid,userData);
-                    else startSessionHeartbeat();
+                    if(!currentSessionId) {
+                        createUserSession(firebaseUser.uid,userData).catch(err => console.warn('[SKYNET] Session sync skipped:', err));
+                    } else startSessionHeartbeat();
                     return true;
                 }catch(err){
                     if(err.message==='ACCOUNT_PENDING') alert(TRANSLATIONS[currentLang].errPendingApproval);
@@ -974,16 +970,18 @@
                     ? username.trim().toLowerCase()
                     : usernameToAuthEmail(username);
                 console.log('[SKYNET] Login attempt:', { username, authEmail });
-                const cred=await auth.signInWithEmailAndPassword(authEmail,password);
-                const snap=await usersRef.child(cred.user.uid).once('value');
+                const cred=await withTimeout(auth.signInWithEmailAndPassword(authEmail,password), 15000, 'AUTH_LOGIN_TIMEOUT');
+                console.log('[SKYNET] Firebase Authentication success:', cred.user.uid);
+                const snap=await withTimeout(usersRef.child(cred.user.uid).once('value'), 10000, 'USER_READ_TIMEOUT');
                 if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
                 const userData=snap.val();
                 if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
                 if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
                 if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
                 if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
-                await createUserSession(cred.user.uid,userData);
+                // Do not make successful Authentication wait for session writes.
                 await checkAuthSession(cred.user);
+                createUserSession(cred.user.uid,userData).catch(err => console.warn('[SKYNET] Session sync skipped after login:', err));
             }catch(err){
                 console.error('Firebase Authentication login error:',err);
                 let msg = TRANSLATIONS[currentLang].errLoginFailed;
@@ -994,6 +992,9 @@
                 else if (err && err.code === 'auth/invalid-api-key') msg = 'Firebase Web API Key ไม่ถูกต้อง';
                 else if (err && err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ กรุณาตรวจ Web config';
                 else if (err && (err.code === 'PERMISSION_DENIED' || err.code === 'database/permission-denied')) msg = 'Firebase Rules ปฏิเสธการอ่าน/บันทึก users';
+                else if (err && err.code === 'AUTH_LOGIN_TIMEOUT') msg = 'Firebase Authentication ไม่ตอบสนองภายใน 15 วินาที — ตรวจ Network/Authorized Domains';
+                else if (err && err.code === 'USER_READ_TIMEOUT') msg = 'Login สำเร็จ แต่ Firebase Database อ่าน users/<UID> ไม่ตอบสนองภายใน 10 วินาที';
+                else if (err && err.code === 'SKYNET_TIMEOUT') msg = 'Firebase ใช้เวลานานเกินกำหนด: ' + (err.message || 'timeout');
                 else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่า';
                 alert(msg + '\n\nบัญชีที่ระบบกำลังใช้: ' + authEmail);
             } finally {
