@@ -118,10 +118,6 @@
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
-                        <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
-                            🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
-                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
-                        </div>
                     </form>
                 </div>
 
@@ -345,32 +341,39 @@
     </div>
 
     <script>
-        // --- 1. ตั้งค่า FIREBASE CONFIG ---
-        const firebaseConfig = {
-            // IMPORTANT: Firebase Authentication ต้องใช้ Web App config ครบชุด
-            // ให้นำค่าจาก Firebase Console > Project settings > Your apps > Web app มาใส่
-            apiKey: "PASTE_YOUR_FIREBASE_API_KEY_HERE",
-            authDomain: "PASTE_YOUR_FIREBASE_AUTH_DOMAIN_HERE",
-            projectId: "PASTE_YOUR_FIREBASE_PROJECT_ID_HERE",
-            storageBucket: "PASTE_YOUR_FIREBASE_STORAGE_BUCKET_HERE",
-            messagingSenderId: "PASTE_YOUR_FIREBASE_MESSAGING_SENDER_ID_HERE",
-            appId: "PASTE_YOUR_FIREBASE_APP_ID_HERE",
-            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
-        };
+    (async function bootstrapSkynetDashboard() {
+        // --- 1. FIREBASE CONFIG ---
+        // Load the live Web App config from Render. This keeps the working API key
+        // out of the GitHub Pages source and uses the same config as the bot/backend.
+        const FIREBASE_CONFIG_URL = 'https://bosstimer-ry18.onrender.com/api/firebase-config.js';
 
-        // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
-        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
-            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
+        async function loadFirebaseConfig() {
+            if (window.SKYNET_FIREBASE_CONFIG && window.SKYNET_FIREBASE_CONFIG.apiKey) {
+                return window.SKYNET_FIREBASE_CONFIG;
+            }
+            await new Promise((resolve, reject) => {
+                const tag = document.createElement('script');
+                tag.src = FIREBASE_CONFIG_URL + '?v=' + Date.now();
+                tag.async = false;
+                tag.onload = resolve;
+                tag.onerror = () => reject(new Error('โหลด Firebase Config จาก Render ไม่สำเร็จ'));
+                document.head.appendChild(tag);
+            });
+            const cfg = window.SKYNET_FIREBASE_CONFIG;
+            if (!cfg || !cfg.apiKey || !cfg.authDomain || !cfg.projectId || !cfg.appId) {
+                throw new Error('Firebase Config จาก Render ไม่ครบ');
+            }
+            return cfg;
         }
 
-        // Initialize Firebase
+        const firebaseConfig = await loadFirebaseConfig();
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
         const bossRef = db.ref('boss_schedule');
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
-        const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
+        const botSettingsRef = db.ref('bot_settings');
         const sessionsRef = db.ref('dashboard_sessions');
 
         // 🔐 Admin account
@@ -487,7 +490,7 @@
                 errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",
                 errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
                 regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
-                errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
+                errLoginFailed: "เข้าสู่ระบบไม่สำเร็จ",
                 codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",
                 spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
                 spawnNotifyBody: "บอส {boss} ได้เกิดแล้วในขณะนี้",
@@ -585,7 +588,7 @@
                 errRegCodeInvalid: "Invalid Registration Code!",
                 errUserExists: "Username already exists!",
                 regSuccess: "Registration successful! Please login.",
-                errLoginFailed: "Invalid username or password!",
+                errLoginFailed: "Login failed",
                 codeChangedSuccess: "Registration code updated successfully!",
                 spawnNotifyTitle: "⚔️ {boss} Spawned!",
                 spawnNotifyBody: "Boss {boss} has spawned!",
@@ -683,7 +686,7 @@
                 errRegCodeInvalid: "가입 코드가 올바르지 않습니다!",
                 errUserExists: "이미 존재하는 사용자 이름입니다!",
                 regSuccess: "회원가입 성공! 로그인해주세요.",
-                errLoginFailed: "사용자 이름 หรือ 비밀번호가 올바르지 않습니다!",
+                errLoginFailed: "로그인에 실패했습니다",
                 codeChangedSuccess: "가입 코드가 성공적으로 변경되었습니다!",
                 spawnNotifyTitle: "⚔️ {boss} 젠 완료!",
                 spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",
@@ -788,7 +791,11 @@
         }
 
         function usernameToAuthEmail(username) {
-            return `${makeUserKey(username)}${AUTH_EMAIL_DOMAIN}`;
+            const value = String(username || '').trim();
+            // If the user enters a real Firebase Auth email (e.g. m4ge999@gmail.com),
+            // use it directly. Otherwise preserve the existing username->Auth-email mapping.
+            if (value.includes('@')) return value;
+            return `${makeUserKey(value)}${AUTH_EMAIL_DOMAIN}`;
         }
 
         function formatAdminDate(value) {
@@ -1501,12 +1508,8 @@
             }, 30000);
         }
 
-        // ================================================================
-        // V9 FIX: Expose UI functions to the global window scope.
-        // The dashboard uses inline HTML handlers (onclick/onchange) for
-        // several controls. Explicitly publishing them prevents controls
-        // from becoming unresponsive after script/scope changes.
-        // ================================================================
+        // Global UI bindings: the HTML uses inline onclick/onchange handlers.
+        // Keep these functions on window so every button works reliably.
         Object.assign(window, {
             openBotSettingsModal,
             scrollToAdminPanel,
@@ -1522,8 +1525,7 @@
             requireAdmin
         });
 
-        // Make delete failures visible instead of silently failing.
-        const _deleteBoss = window.deleteBoss;
+        // Show a useful error if a delete is rejected instead of failing silently.
         window.deleteBoss = async function (bossName) {
             try {
                 if (!await requireApprovedUser()) return;
@@ -1546,7 +1548,21 @@
             }
         });
 
-        window.addEventListener('DOMContentLoaded', initApp);
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initApp, { once: true });
+        } else {
+            initApp();
+        }
+    })().catch(err => {
+        console.error('SKYNET bootstrap failed:', err);
+        const authContainer = document.getElementById('authContainer');
+        if (authContainer) {
+            const box = document.createElement('div');
+            box.className = 'alert alert-danger mt-3';
+            box.textContent = 'ระบบเชื่อมต่อ Firebase ไม่สำเร็จ กรุณารีเฟรชหน้าเว็บ';
+            authContainer.appendChild(box);
+        }
+    });
     </script>
 </body>
 </html>
