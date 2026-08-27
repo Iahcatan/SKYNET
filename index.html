@@ -194,6 +194,7 @@
                 <div>
                     <h4 class="card-title text-danger mb-1" data-i18n="adminPanelTitle">🛡️ Admin • จัดการผู้ใช้งาน</h4>
                     <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติอยู่ในตารางด้านล่าง</small>
+                    <div id="adminDataStatus" class="small text-white-50 mt-1">กำลังตรวจสอบข้อมูลผู้ใช้งาน...</div>
                 </div>
                 <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
             </div>
@@ -915,7 +916,7 @@
                         adminOnlyButtons.forEach(el=>el.style.display='');
                         if(adminMenu) adminMenu.style.display='inline-block';
                         // Never block login on the admin list. It is non-critical UI data.
-                        loadAdminUsers().catch(err => console.warn('[SKYNET] Admin list load skipped:', err));
+                        loadAdminUsers().catch(err => { console.error('[SKYNET] Admin list load failed:', err); const el=document.getElementById('adminDataStatus'); if(el){el.className='small text-danger mt-1';el.textContent=`❌ ${err.code || err.message || err}`;} });
                     }else{
                         adminPanel.style.display='none';
                         adminOnlyButtons.forEach(el=>el.style.display='none');
@@ -1113,6 +1114,11 @@
             const users = usersSnap.val() || {};
             const sessions = sessionsSnap.val() || {};
             const nowMs = Date.now();
+            const statusEl = document.getElementById('adminDataStatus');
+            if (statusEl) {
+                statusEl.className = 'small text-success mt-1';
+                statusEl.textContent = `🟢 Firebase Users: ${Object.keys(users).length} | Sessions: ${Object.keys(sessions).length} | อัปเดต ${new Date().toLocaleTimeString('th-TH')}`;
+            }
 
             const userRows = Object.entries(users).map(([key, user]) => {
                 const userSessions = Object.values(sessions).filter(s => s && s.userKey === key);
@@ -1120,11 +1126,15 @@
                     new Date(b.lastSeenAt || b.loginAt || 0) - new Date(a.lastSeenAt || a.loginAt || 0)
                 )[0];
                 const lastSeen = user.lastSeenAt || (latestSession && latestSession.lastSeenAt);
-                const active = userSessions.some(session => {
+                const userOnline = user.online === true || user.online === 'true';
+                const userSeenMs = new Date(user.lastSeenAt || 0).getTime();
+                const userHeartbeatActive = userOnline && Number.isFinite(userSeenMs) && (nowMs - userSeenMs) >= 0 && (nowMs - userSeenMs) <= ACTIVE_SESSION_TIMEOUT_MS;
+                const sessionActive = userSessions.some(session => {
                     if (!session || session.active === false || !session.lastSeenAt) return false;
                     const seenMs = new Date(session.lastSeenAt).getTime();
                     return Number.isFinite(seenMs) && (nowMs - seenMs) >= 0 && (nowMs - seenMs) <= ACTIVE_SESSION_TIMEOUT_MS;
                 });
+                const active = userHeartbeatActive || sessionActive;
                 return {key, user, active, lastSeen};
             });
 
@@ -1168,7 +1178,11 @@
             if(adminUsersListenerAttached || adminSessionsListenerAttached) return;
             const refresh=()=>{
                 if(currentUserData && currentUserData.role==='admin' && auth.currentUser){
-                    loadAdminUsers().catch(err=>console.warn('[SKYNET] Admin realtime refresh:',err));
+                    loadAdminUsers().catch(err=>{
+                        console.error('[SKYNET] Admin realtime refresh:',err);
+                        const el=document.getElementById('adminDataStatus');
+                        if(el){el.className='small text-danger mt-1';el.textContent=`❌ อ่านข้อมูลผู้ใช้ไม่สำเร็จ: ${err.code || err.message || err}`;}
+                    });
                 }
             };
             usersRef.on('value', refresh);
@@ -1598,7 +1612,7 @@
 
             setInterval(updateCountdowns, 1000);
             setInterval(() => {
-                if (currentUserData && currentUserData.role === 'admin') loadAdminUsers();
+                if (currentUserData && currentUserData.role === 'admin') loadAdminUsers().catch(err => console.warn('[SKYNET] admin interval:', err));
             }, 30000);
         }
 
