@@ -120,7 +120,6 @@
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
-                        <button type="button" id="resetAdminPasswordBtn" class="btn btn-outline-light btn-sm w-100 mt-2">📧 ส่งลิงก์ตั้งรหัสผ่านใหม่ให้ Admin</button>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
                             🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
                             <span class="text-white-50 d-block">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
@@ -796,7 +795,8 @@
 
         // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---
         const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";
-        // Admin Firebase Authentication account (must match the Admin UID in users/<UID>)
+        // Real Firebase Authentication email for the existing Admin account
+        // UID: cplvow7Vr6TAd62hREJYuX2w5e73
         const ADMIN_AUTH_EMAIL = "m4ge999@gmail.com";
         settingsRef.child('register_code').on('value', (snap) => {
             if (snap.exists() && snap.val()) currentRegCode = snap.val();
@@ -808,7 +808,9 @@
         }
 
         function usernameToAuthEmail(username) {
-            return `${makeUserKey(username)}${AUTH_EMAIL_DOMAIN}`;
+            const key = makeUserKey(username);
+            if (key === makeUserKey(ADMIN_DEFAULT_USERNAME)) return ADMIN_AUTH_EMAIL;
+            return `${key}${AUTH_EMAIL_DOMAIN}`;
         }
 
         function formatAdminDate(value) {
@@ -951,16 +953,6 @@
             }
         });
 
-        document.getElementById('resetAdminPasswordBtn')?.addEventListener('click', async () => {
-            try {
-                await auth.sendPasswordResetEmail(ADMIN_AUTH_EMAIL);
-                alert('ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่ ' + ADMIN_AUTH_EMAIL + ' แล้ว กรุณาตรวจ Inbox/Spam');
-            } catch (err) {
-                console.error('Password reset error:', err);
-                alert('ส่งลิงก์รีเซ็ตรหัสผ่านไม่สำเร็จ: ' + (err.code || err.message));
-            }
-        });
-
         document.getElementById('loginForm').addEventListener('submit',async(e)=>{
             e.preventDefault();
             const username=document.getElementById('loginUser').value.trim();
@@ -968,11 +960,9 @@
             const rememberMe=document.getElementById('rememberMe').checked;
             if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
             try{
-                // Admin is a real Firebase Authentication account using the email
-                // created in Firebase Console. The visible username remains "admin".
-                const authEmail = makeUserKey(username) === makeUserKey(ADMIN_DEFAULT_USERNAME)
-                    ? ADMIN_AUTH_EMAIL
-                    : (username.includes('@') ? username.trim().toLowerCase() : usernameToAuthEmail(username));
+                const authEmail = username.includes('@')
+                    ? username.trim().toLowerCase()
+                    : usernameToAuthEmail(username);
                 const cred=await auth.signInWithEmailAndPassword(authEmail,password);
                 const snap=await usersRef.child(cred.user.uid).once('value');
                 if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
@@ -987,16 +977,14 @@
                 console.error('Firebase Authentication login error:',err);
                 let msg = TRANSLATIONS[currentLang].errLoginFailed;
                 if (err && err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชีนี้ใน Firebase Authentication';
-                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านของ m4ge999@gmail.com ไม่ถูกต้อง';
-                else if (err && err.code === 'auth/invalid-email') msg = 'รูปแบบ Email สำหรับ Firebase Authentication ไม่ถูกต้อง';
-                else if (err && err.code === 'auth/too-many-requests') msg = 'ลองเข้าสู่ระบบหลายครั้งเกินไป กรุณารอสักครู่หรือกดรีเซ็ตรหัสผ่าน';
-                else if (err && err.code === 'auth/invalid-credential') msg = 'Username/Password ไม่ถูกต้อง หรือบัญชีนี้ยังไม่มีใน Firebase Authentication';
+                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
+                else if (err && err.code === 'auth/invalid-credential') msg = 'ข้อมูลเข้าสู่ระบบไม่ถูกต้อง (Firebase: auth/invalid-credential)';
                 else if (err && err.code === 'auth/operation-not-allowed') msg = 'Firebase Authentication ยังไม่ได้เปิด Email/Password';
                 else if (err && err.code === 'auth/invalid-api-key') msg = 'Firebase Web API Key ไม่ถูกต้อง';
                 else if (err && err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ กรุณาตรวจ Web config';
-                else if (err && (err.code === 'PERMISSION_DENIED' || err.code === 'database/permission-denied')) msg = 'Firebase Rules ปฏิเสธการอ่าน/บันทึก users — ให้ใช้ firebase_database_rules.json ชุดใหม่';
-                else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่าใน Render';
-                alert(msg);
+                else if (err && (err.code === 'PERMISSION_DENIED' || err.code === 'database/permission-denied')) msg = 'Firebase Rules ปฏิเสธการอ่าน/บันทึก users';
+                else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่า';
+                alert(msg + '\n\nบัญชีที่ระบบกำลังใช้: ' + authEmail);
             }
         });
 
