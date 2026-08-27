@@ -120,6 +120,7 @@
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
+                        <button type="button" id="resetAdminPasswordBtn" class="btn btn-outline-light btn-sm w-100 mt-2">📧 ส่งลิงก์ตั้งรหัสผ่านใหม่ให้ Admin</button>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
                             🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
                             <span class="text-white-50 d-block">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
@@ -950,6 +951,16 @@
             }
         });
 
+        document.getElementById('resetAdminPasswordBtn')?.addEventListener('click', async () => {
+            try {
+                await auth.sendPasswordResetEmail(ADMIN_AUTH_EMAIL);
+                alert('ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่ ' + ADMIN_AUTH_EMAIL + ' แล้ว กรุณาตรวจ Inbox/Spam');
+            } catch (err) {
+                console.error('Password reset error:', err);
+                alert('ส่งลิงก์รีเซ็ตรหัสผ่านไม่สำเร็จ: ' + (err.code || err.message));
+            }
+        });
+
         document.getElementById('loginForm').addEventListener('submit',async(e)=>{
             e.preventDefault();
             const username=document.getElementById('loginUser').value.trim();
@@ -959,11 +970,9 @@
             try{
                 // Admin is a real Firebase Authentication account using the email
                 // created in Firebase Console. The visible username remains "admin".
-                const authEmail = username.includes('@')
-                    ? username.trim().toLowerCase()
-                    : (makeUserKey(username) === makeUserKey(ADMIN_DEFAULT_USERNAME)
-                        ? ADMIN_AUTH_EMAIL
-                        : usernameToAuthEmail(username));
+                const authEmail = makeUserKey(username) === makeUserKey(ADMIN_DEFAULT_USERNAME)
+                    ? ADMIN_AUTH_EMAIL
+                    : (username.includes('@') ? username.trim().toLowerCase() : usernameToAuthEmail(username));
                 const cred=await auth.signInWithEmailAndPassword(authEmail,password);
                 const snap=await usersRef.child(cred.user.uid).once('value');
                 if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
@@ -978,7 +987,9 @@
                 console.error('Firebase Authentication login error:',err);
                 let msg = TRANSLATIONS[currentLang].errLoginFailed;
                 if (err && err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชีนี้ใน Firebase Authentication';
-                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
+                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านของ m4ge999@gmail.com ไม่ถูกต้อง';
+                else if (err && err.code === 'auth/invalid-email') msg = 'รูปแบบ Email สำหรับ Firebase Authentication ไม่ถูกต้อง';
+                else if (err && err.code === 'auth/too-many-requests') msg = 'ลองเข้าสู่ระบบหลายครั้งเกินไป กรุณารอสักครู่หรือกดรีเซ็ตรหัสผ่าน';
                 else if (err && err.code === 'auth/invalid-credential') msg = 'Username/Password ไม่ถูกต้อง หรือบัญชีนี้ยังไม่มีใน Firebase Authentication';
                 else if (err && err.code === 'auth/operation-not-allowed') msg = 'Firebase Authentication ยังไม่ได้เปิด Email/Password';
                 else if (err && err.code === 'auth/invalid-api-key') msg = 'Firebase Web API Key ไม่ถูกต้อง';
