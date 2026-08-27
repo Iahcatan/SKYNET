@@ -118,6 +118,7 @@
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
+                        <div id="loginDebug" class="small text-info mt-2" style="min-height:1.2em"></div>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
                             🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
                             <span class="text-white-50 d-block">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
@@ -902,7 +903,8 @@
                         adminPanel.style.display='block';
                         adminOnlyButtons.forEach(el=>el.style.display='');
                         if(adminMenu) adminMenu.style.display='inline-block';
-                        await loadAdminUsers();
+                        // Never block login on the admin list. It is non-critical UI data.
+                        loadAdminUsers().catch(err => console.warn('[SKYNET] Admin list load skipped:', err));
                     }else{
                         adminPanel.style.display='none';
                         adminOnlyButtons.forEach(el=>el.style.display='none');
@@ -965,6 +967,9 @@
             const oldBtnText=submitBtn ? submitBtn.innerHTML : '';
             if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
             if(submitBtn){submitBtn.disabled=true;submitBtn.innerHTML='⏳ กำลังเข้าสู่ระบบ...';}
+            const loginDebug=document.getElementById('loginDebug');
+            const setLoginDebug=(t)=>{ if(loginDebug) loginDebug.textContent=t; console.log('[SKYNET LOGIN]',t); };
+            setLoginDebug('1/4 กำลังตรวจสอบบัญชี Firebase Authentication...');
             try{
                 const authEmail = username.includes('@')
                     ? username.trim().toLowerCase()
@@ -972,15 +977,22 @@
                 console.log('[SKYNET] Login attempt:', { username, authEmail });
                 const cred=await withTimeout(auth.signInWithEmailAndPassword(authEmail,password), 15000, 'AUTH_LOGIN_TIMEOUT');
                 console.log('[SKYNET] Firebase Authentication success:', cred.user.uid);
+                setLoginDebug('2/4 Firebase Authentication ผ่าน — UID: ' + cred.user.uid);
                 const snap=await withTimeout(usersRef.child(cred.user.uid).once('value'), 10000, 'USER_READ_TIMEOUT');
                 if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
                 const userData=snap.val();
+                setLoginDebug('3/4 ตรวจสอบสิทธิ์ผู้ใช้: ' + (userData.role || 'user') + ' / ' + (userData.status || 'unknown'));
                 if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
                 if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
                 if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
                 if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
                 // Do not make successful Authentication wait for session writes.
-                await checkAuthSession(cred.user);
+                // Authentication and authorization are complete here. Show the dashboard immediately.
+                setLoginDebug('4/4 กำลังเปิด Dashboard...');
+                const shown = await checkAuthSession(cred.user);
+                if (!shown) throw new Error('DASHBOARD_SHOW_FAILED');
+                setLoginDebug('✅ เข้าสู่ระบบสำเร็จ');
+                // Session bookkeeping is non-critical and must never block Login.
                 createUserSession(cred.user.uid,userData).catch(err => console.warn('[SKYNET] Session sync skipped after login:', err));
             }catch(err){
                 console.error('Firebase Authentication login error:',err);
@@ -994,6 +1006,10 @@
                 else if (err && (err.code === 'PERMISSION_DENIED' || err.code === 'database/permission-denied')) msg = 'Firebase Rules ปฏิเสธการอ่าน/บันทึก users';
                 else if (err && err.code === 'AUTH_LOGIN_TIMEOUT') msg = 'Firebase Authentication ไม่ตอบสนองภายใน 15 วินาที — ตรวจ Network/Authorized Domains';
                 else if (err && err.code === 'USER_READ_TIMEOUT') msg = 'Login สำเร็จ แต่ Firebase Database อ่าน users/<UID> ไม่ตอบสนองภายใน 10 วินาที';
+                else if (err && err.code === 'ADMIN_SELF_READ_TIMEOUT') msg = 'เข้าสู่ระบบสำเร็จ แต่ตรวจสอบสิทธิ์ Admin ใช้เวลานานเกิน 8 วินาที';
+                else if (err && err.code === 'ADMIN_USERS_READ_TIMEOUT') msg = 'เข้าสู่ระบบสำเร็จ แต่รายการผู้ใช้ Admin ใช้เวลานานเกิน 8 วินาที';
+                else if (err && err.code === 'ADMIN_SESSIONS_READ_TIMEOUT') msg = 'เข้าสู่ระบบสำเร็จ แต่รายการ Session ใช้เวลานานเกิน 8 วินาที';
+                else if (err && err.message === 'DASHBOARD_SHOW_FAILED') msg = 'Firebase Login ผ่านแล้ว แต่ไม่สามารถเปิด Dashboard ได้';
                 else if (err && err.code === 'SKYNET_TIMEOUT') msg = 'Firebase ใช้เวลานานเกินกำหนด: ' + (err.message || 'timeout');
                 else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่า';
                 alert(msg + '\n\nบัญชีที่ระบบกำลังใช้: ' + authEmail);
@@ -1030,7 +1046,7 @@
             if (!currentUserKey) currentUserKey = localStorage.getItem('logged_user_key');
             if (!currentUserKey) return;
 
-            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminSnap = await withTimeout(usersRef.child(currentUserKey).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
             const adminData = adminSnap.val();
 
             if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
@@ -1040,9 +1056,9 @@
 
             currentUserData = adminData;
 
-            const usersSnap = await usersRef.once('value');
+            const usersSnap = await withTimeout(usersRef.once('value'), 8000, 'ADMIN_USERS_READ_TIMEOUT');
             const users = usersSnap.val() || {};
-            const sessionsSnap = await sessionsRef.once('value');
+            const sessionsSnap = await withTimeout(sessionsRef.once('value'), 8000, 'ADMIN_SESSIONS_READ_TIMEOUT');
             const sessions = sessionsSnap.val() || {};
             const nowMs = Date.now();
 
@@ -1134,7 +1150,7 @@
         async function setUserStatus(userKey, newStatus) {
             if (!currentUserKey) return;
 
-            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminSnap = await withTimeout(usersRef.child(currentUserKey).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
             const adminData = adminSnap.val();
             if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
                 alert(TRANSLATIONS[currentLang].adminOnly);
