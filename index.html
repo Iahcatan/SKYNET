@@ -345,32 +345,35 @@
         </div>
     </div>
 
+    <!-- V8: GitHub Pages loads the authoritative Firebase Web config from Render.
+         Render reads FIREBASE_WEB_CONFIG_JSON, including the real apiKey.
+         The script tag is intentionally before Firebase initialization so the config
+         is available before signInWithEmailAndPassword() can ever run. -->
+    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
     <script>
-        // GitHub Pages is a static host, so it cannot read Render Environment Variables directly.
-        // Load the public Firebase Web config from the Render service first.
         (function bootstrapSkynetDashboard() {
-            // V5: do not depend on Render for startup. GitHub Pages uses the public Firebase Web config below.
-            window.SKYNET_FIREBASE_CONFIG = window.SKYNET_FIREBASE_CONFIG || {};
-
-        // --- 1. ตั้งค่า FIREBASE CONFIG ---
-        const firebaseConfig = {
-            apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqvAFuWby094",
-            authDomain: "skynet-3ad44.firebaseapp.com",
-            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app",
-            projectId: "skynet-3ad44",
-            storageBucket: "skynet-3ad44.firebasestorage.app",
-            messagingSenderId: "7120270934",
-            appId: "1:7120270934:web:5e3db3f5dae6542352adf7",
-            measurementId: "G-N8QER5X9BN"
-        };
-
-        // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
-        const firebaseConfigMissing = !firebaseConfig.apiKey || !firebaseConfig.authDomain || !firebaseConfig.appId;
-        if (firebaseConfigMissing) {
-            console.error('SKYNET Firebase Web config missing. Check FIREBASE_WEB_CONFIG_JSON on Render.');
+        // --- V8: FIREBASE CONFIG FROM RENDER ---
+        // Do NOT hard-code an API key in GitHub Pages. Render is the source of truth.
+        const firebaseConfig = window.SKYNET_FIREBASE_CONFIG || {};
+        const requiredFirebaseFields = ['apiKey','authDomain','databaseURL','projectId','storageBucket','messagingSenderId','appId'];
+        const missingFirebaseFields = requiredFirebaseFields.filter(k => !firebaseConfig[k]);
+        if (missingFirebaseFields.length) {
+            console.error('[SKYNET V8] Missing Firebase Web config:', missingFirebaseFields);
+            const bootError = document.getElementById('loginDebug');
+            if (bootError) {
+                bootError.style.display = 'block';
+                bootError.textContent = '❌ Firebase Config จาก Render ไม่ครบ: ' + missingFirebaseFields.join(', ') +
+                    '\n\nตรวจ Render Environment Variable: FIREBASE_WEB_CONFIG_JSON';
+            }
+            throw new Error('FIREBASE_WEB_CONFIG_MISSING:' + missingFirebaseFields.join(','));
         }
 
-        // Initialize Firebase
+        if (firebaseConfig.projectId !== 'skynet-3ad44') {
+            console.error('[SKYNET V8] Wrong Firebase project:', firebaseConfig.projectId);
+            throw new Error('FIREBASE_WRONG_PROJECT:' + firebaseConfig.projectId);
+        }
+
+        // Initialize Firebase only after the authoritative Render config is loaded.
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
@@ -979,7 +982,7 @@
             if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '⏳ กำลังเข้าสู่ระบบ...'; }
             let authEmail = username.includes('@') ? username.toLowerCase() : usernameToAuthEmail(username);
             if (makeUserKey(username) === 'admin') authEmail = ADMIN_AUTH_EMAIL;
-            show('1/4 กำลังเชื่อมต่อ Firebase Authentication: ' + authEmail);
+            show('1/4 Firebase Config จาก Render พร้อม — กำลังเชื่อมต่อ Authentication: ' + authEmail);
 
             try {
                 // Verify that the Firebase Auth SDK is actually ready before sending credentials.
@@ -1048,6 +1051,7 @@
                 else if (err.code === 'auth/too-many-requests') msg = 'Firebase ล็อกการลอง Login ชั่วคราว เพราะลองหลายครั้งเกินไป';
                 else if (err.code === 'auth/operation-not-allowed') msg = 'Firebase ยังไม่ได้เปิด Email/Password Authentication';
                 else if (err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ';
+                else if (err.code === 'auth/api-key-not-valid' || /api-key-not-valid/i.test(err.message || '')) msg = 'Firebase API Key จาก Render ไม่ถูกต้อง — ตรวจ FIREBASE_WEB_CONFIG_JSON บน Render';
                 else if (err.code === 'auth/requests-from-referer-https://iahcatan.github.io-are-blocked') msg = 'Firebase API Key ยังบล็อก iahcatan.github.io';
                 else if (err.code === 'AUTH_TIMEOUT') msg = 'Firebase Authentication ไม่ตอบภายใน 8 วินาที — ปัญหาอยู่ที่การเชื่อมต่อ/API Key ไม่ใช่ฐานข้อมูล';
                 else if (err.code === 'DB_TIMEOUT') msg = 'Authentication ผ่านแล้ว แต่ Realtime Database ไม่ตอบภายใน 8 วินาที';
