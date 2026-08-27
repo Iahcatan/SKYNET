@@ -795,6 +795,8 @@
 
         // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---
         const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";
+        // Admin Firebase Authentication account (must match the Admin UID in users/<UID>)
+        const ADMIN_AUTH_EMAIL = "m4ge999@gmail.com";
         settingsRef.child('register_code').on('value', (snap) => {
             if (snap.exists() && snap.val()) currentRegCode = snap.val();
             else settingsRef.child('register_code').set("1234");
@@ -955,9 +957,13 @@
             const rememberMe=document.getElementById('rememberMe').checked;
             if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
             try{
+                // Admin is a real Firebase Authentication account using the email
+                // created in Firebase Console. The visible username remains "admin".
                 const authEmail = username.includes('@')
                     ? username.trim().toLowerCase()
-                    : usernameToAuthEmail(username);
+                    : (makeUserKey(username) === makeUserKey(ADMIN_DEFAULT_USERNAME)
+                        ? ADMIN_AUTH_EMAIL
+                        : usernameToAuthEmail(username));
                 const cred=await auth.signInWithEmailAndPassword(authEmail,password);
                 const snap=await usersRef.child(cred.user.uid).once('value');
                 if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
