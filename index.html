@@ -118,10 +118,9 @@
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
-                        <div id="loginDebug" class="small text-info mt-2" style="min-height:1.2em"></div>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
                             🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
-                            <span class="text-white-50 d-block">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
+                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
                         </div>
                     </form>
                 </div>
@@ -345,35 +344,26 @@
         </div>
     </div>
 
-    <!-- V8: GitHub Pages loads the authoritative Firebase Web config from Render.
-         Render reads FIREBASE_WEB_CONFIG_JSON, including the real apiKey.
-         The script tag is intentionally before Firebase initialization so the config
-         is available before signInWithEmailAndPassword() can ever run. -->
-    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
     <script>
-        (function bootstrapSkynetDashboard() {
-        // --- V8: FIREBASE CONFIG FROM RENDER ---
-        // Do NOT hard-code an API key in GitHub Pages. Render is the source of truth.
-        const firebaseConfig = window.SKYNET_FIREBASE_CONFIG || {};
-        const requiredFirebaseFields = ['apiKey','authDomain','databaseURL','projectId','storageBucket','messagingSenderId','appId'];
-        const missingFirebaseFields = requiredFirebaseFields.filter(k => !firebaseConfig[k]);
-        if (missingFirebaseFields.length) {
-            console.error('[SKYNET V8] Missing Firebase Web config:', missingFirebaseFields);
-            const bootError = document.getElementById('loginDebug');
-            if (bootError) {
-                bootError.style.display = 'block';
-                bootError.textContent = '❌ Firebase Config จาก Render ไม่ครบ: ' + missingFirebaseFields.join(', ') +
-                    '\n\nตรวจ Render Environment Variable: FIREBASE_WEB_CONFIG_JSON';
-            }
-            throw new Error('FIREBASE_WEB_CONFIG_MISSING:' + missingFirebaseFields.join(','));
+        // --- 1. ตั้งค่า FIREBASE CONFIG ---
+        const firebaseConfig = {
+            // IMPORTANT: Firebase Authentication ต้องใช้ Web App config ครบชุด
+            // ให้นำค่าจาก Firebase Console > Project settings > Your apps > Web app มาใส่
+            apiKey: "PASTE_YOUR_FIREBASE_API_KEY_HERE",
+            authDomain: "PASTE_YOUR_FIREBASE_AUTH_DOMAIN_HERE",
+            projectId: "PASTE_YOUR_FIREBASE_PROJECT_ID_HERE",
+            storageBucket: "PASTE_YOUR_FIREBASE_STORAGE_BUCKET_HERE",
+            messagingSenderId: "PASTE_YOUR_FIREBASE_MESSAGING_SENDER_ID_HERE",
+            appId: "PASTE_YOUR_FIREBASE_APP_ID_HERE",
+            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
+        };
+
+        // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
+        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
+            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
         }
 
-        if (firebaseConfig.projectId !== 'skynet-3ad44') {
-            console.error('[SKYNET V8] Wrong Firebase project:', firebaseConfig.projectId);
-            throw new Error('FIREBASE_WRONG_PROJECT:' + firebaseConfig.projectId);
-        }
-
-        // Initialize Firebase only after the authoritative Render config is loaded.
+        // Initialize Firebase
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
@@ -382,19 +372,6 @@
         const settingsRef = db.ref('app_settings');
         const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
         const sessionsRef = db.ref('dashboard_sessions');
-
-        // V5: bounded Firebase operations so the Login button can never remain stuck on loading.
-        function withTimeout(promise, ms, label) {
-            let timer;
-            const timeout = new Promise((_, reject) => {
-                timer = setTimeout(() => {
-                    const err = new Error(label || 'TIMEOUT');
-                    err.code = 'SKYNET_TIMEOUT';
-                    reject(err);
-                }, ms);
-            });
-            return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
-        }
 
         // 🔐 Admin account
         // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด
@@ -801,9 +778,6 @@
 
         // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---
         const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";
-        // Real Firebase Authentication email for the existing Admin account
-        // UID: cplvow7Vr6TAd62hREJYuX2w5e73
-        const ADMIN_AUTH_EMAIL = "m4ge999@gmail.com";
         settingsRef.child('register_code').on('value', (snap) => {
             if (snap.exists() && snap.val()) currentRegCode = snap.val();
             else settingsRef.child('register_code').set("1234");
@@ -814,9 +788,7 @@
         }
 
         function usernameToAuthEmail(username) {
-            const key = makeUserKey(username);
-            if (key === makeUserKey(ADMIN_DEFAULT_USERNAME)) return ADMIN_AUTH_EMAIL;
-            return `${key}${AUTH_EMAIL_DOMAIN}`;
+            return `${makeUserKey(username)}${AUTH_EMAIL_DOMAIN}`;
         }
 
         function formatAdminDate(value) {
@@ -837,13 +809,13 @@
             currentUserData = userData;
             const now = new Date().toISOString();
 
-            await withTimeout(sessionsRef.child(currentSessionId).set({
+            await sessionsRef.child(currentSessionId).set({
                 userKey, username:userData.username, loginAt:now, lastSeenAt:now, active:true
-            }), 8000, 'SESSION_WRITE_TIMEOUT');
-            await withTimeout(usersRef.child(userKey).update({
+            });
+            await usersRef.child(userKey).update({
                 lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null,
                 loginCount:(Number(userData.loginCount)||0)+1
-            }), 8000, 'USER_WRITE_TIMEOUT');
+            });
             localStorage.setItem('logged_user', userData.username);
             localStorage.setItem('logged_user_key', userKey);
             localStorage.setItem('logged_session_id', currentSessionId);
@@ -886,7 +858,7 @@
             const firebaseUser=firebaseUserOverride || auth.currentUser;
             if(firebaseUser){
                 try{
-                    const snap=await withTimeout(usersRef.child(firebaseUser.uid).once('value'), 10000, 'USER_READ_TIMEOUT');
+                    const snap=await usersRef.child(firebaseUser.uid).once('value');
                     if(!snap.exists()) throw new Error('USER_NOT_FOUND');
                     const userData=snap.val();
                     if(userData.status!=='approved'){
@@ -906,16 +878,14 @@
                         adminPanel.style.display='block';
                         adminOnlyButtons.forEach(el=>el.style.display='');
                         if(adminMenu) adminMenu.style.display='inline-block';
-                        // Never block login on the admin list. It is non-critical UI data.
-                        loadAdminUsers().catch(err => console.warn('[SKYNET] Admin list load skipped:', err));
+                        await loadAdminUsers();
                     }else{
                         adminPanel.style.display='none';
                         adminOnlyButtons.forEach(el=>el.style.display='none');
                         if(adminMenu) adminMenu.style.display='none';
                     }
-                    if(!currentSessionId) {
-                        createUserSession(firebaseUser.uid,userData).catch(err => console.warn('[SKYNET] Session sync skipped:', err));
-                    } else startSessionHeartbeat();
+                    if(!currentSessionId) await createUserSession(firebaseUser.uid,userData);
+                    else startSessionHeartbeat();
                     return true;
                 }catch(err){
                     if(err.message==='ACCOUNT_PENDING') alert(TRANSLATIONS[currentLang].errPendingApproval);
@@ -961,102 +931,26 @@
             }
         });
 
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        document.getElementById('loginForm').addEventListener('submit',async(e)=>{
             e.preventDefault();
-            e.stopPropagation();
-            const username = document.getElementById('loginUser').value.trim();
-            const password = document.getElementById('loginPass').value;
-            const rememberMe = document.getElementById('rememberMe').checked;
-            const submitBtn = e.currentTarget.querySelector('button[type=submit]');
-            const debug = document.getElementById('loginDebug');
-            const show = (msg) => {
-                if (debug) { debug.textContent = msg; debug.style.display = 'block'; }
-                console.log('[SKYNET LOGIN]', msg);
-            };
-            const fail = (msg) => {
-                show('❌ ' + msg);
-                alert(msg);
-                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '🔑 เข้าสู่ระบบ'; }
-            };
-            if (!username || !password) { fail('กรุณากรอกชื่อผู้ใช้และรหัสผ่าน'); return; }
-            if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '⏳ กำลังเข้าสู่ระบบ...'; }
-            let authEmail = username.includes('@') ? username.toLowerCase() : usernameToAuthEmail(username);
-            if (makeUserKey(username) === 'admin') authEmail = ADMIN_AUTH_EMAIL;
-            show('1/4 Firebase Config จาก Render พร้อม — กำลังเชื่อมต่อ Authentication: ' + authEmail);
-
-            try {
-                // Verify that the Firebase Auth SDK is actually ready before sending credentials.
-                if (!window.firebase || !firebase.auth) throw new Error('Firebase Authentication SDK โหลดไม่สำเร็จ');
-                if (!firebase.apps || !firebase.apps.length) throw new Error('Firebase App ยังไม่ได้ initialize');
-
-                // Important: use a real timer race. This prevents a browser/network hang from leaving the button stuck.
-                const loginPromise = auth.signInWithEmailAndPassword(authEmail, password);
-                const cred = await Promise.race([
-                    loginPromise,
-                    new Promise((_, reject) => setTimeout(() => {
-                        const er = new Error('Firebase Auth request timeout'); er.code = 'AUTH_TIMEOUT'; reject(er);
-                    }, 8000))
-                ]);
-
-                show('2/4 Firebase Authentication สำเร็จ — UID: ' + cred.user.uid);
-                const snap = await Promise.race([
-                    usersRef.child(cred.user.uid).once('value'),
-                    new Promise((_, reject) => setTimeout(() => {
-                        const er = new Error('Database user read timeout'); er.code = 'DB_TIMEOUT'; reject(er);
-                    }, 8000))
-                ]);
-                if (!snap.exists()) {
-                    await auth.signOut().catch(() => {});
-                    fail('ล็อกอิน Firebase สำเร็จ แต่ไม่พบ users/' + cred.user.uid + ' ใน Realtime Database');
-                    return;
-                }
-                const userData = snap.val() || {};
-                show('3/4 ตรวจสอบสิทธิ์: username=' + (userData.username || '-') + ' | role=' + (userData.role || '-') + ' | status=' + (userData.status || '-'));
-                if (userData.status !== 'approved') {
-                    await auth.signOut().catch(() => {});
-                    fail('บัญชีนี้ยังไม่ได้รับอนุมัติ (status=' + (userData.status || 'ไม่มี') + ')');
-                    return;
-                }
-                if (userData.role !== 'admin' && makeUserKey(username) === 'admin') {
-                    await auth.signOut().catch(() => {});
-                    fail('บัญชี Firebase นี้ไม่ใช่ Admin (role=' + (userData.role || 'ไม่มี') + ')');
-                    return;
-                }
-                if (rememberMe) localStorage.setItem('saved_username', username); else localStorage.removeItem('saved_username');
-                currentUserData = userData;
-                currentUserKey = cred.user.uid;
-                localStorage.setItem('logged_user', userData.username || username);
-                localStorage.setItem('logged_user_key', cred.user.uid);
-                localStorage.setItem('logged_role', userData.role || 'user');
-                show('4/4 เข้าสู่ Dashboard สำเร็จ');
-                document.getElementById('authContainer').style.display = 'none';
-                document.getElementById('mainDashboard').style.display = 'block';
-                document.getElementById('userBadge').innerText = `👤 ${userData.username || cred.user.email}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
-                const adminPanel = document.getElementById('adminPanel');
-                const adminMenu = document.getElementById('adminPanelMenuBtn');
-                if (userData.role === 'admin') {
-                    if (adminPanel) adminPanel.style.display = 'block';
-                    document.querySelectorAll('[data-admin-only]').forEach(el => el.style.display = '');
-                    if (adminMenu) adminMenu.style.display = 'inline-block';
-                    loadAdminUsers().catch(err => console.warn('[SKYNET] admin list:', err));
-                }
-                createUserSession(cred.user.uid, userData).catch(err => console.warn('[SKYNET] session sync:', err));
-                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '🔑 เข้าสู่ระบบ'; }
-            } catch (err) {
-                console.error('[SKYNET] Login error', err);
-                let msg = 'เข้าสู่ระบบไม่สำเร็จ';
-                if (err.code === 'auth/invalid-credential') msg = 'Email หรือรหัสผ่านไม่ถูกต้อง (Firebase: auth/invalid-credential)';
-                else if (err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
-                else if (err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชี ' + authEmail + ' ใน Firebase Authentication';
-                else if (err.code === 'auth/too-many-requests') msg = 'Firebase ล็อกการลอง Login ชั่วคราว เพราะลองหลายครั้งเกินไป';
-                else if (err.code === 'auth/operation-not-allowed') msg = 'Firebase ยังไม่ได้เปิด Email/Password Authentication';
-                else if (err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ';
-                else if (err.code === 'auth/api-key-not-valid' || /api-key-not-valid/i.test(err.message || '')) msg = 'Firebase API Key จาก Render ไม่ถูกต้อง — ตรวจ FIREBASE_WEB_CONFIG_JSON บน Render';
-                else if (err.code === 'auth/requests-from-referer-https://iahcatan.github.io-are-blocked') msg = 'Firebase API Key ยังบล็อก iahcatan.github.io';
-                else if (err.code === 'AUTH_TIMEOUT') msg = 'Firebase Authentication ไม่ตอบภายใน 8 วินาที — ปัญหาอยู่ที่การเชื่อมต่อ/API Key ไม่ใช่ฐานข้อมูล';
-                else if (err.code === 'DB_TIMEOUT') msg = 'Authentication ผ่านแล้ว แต่ Realtime Database ไม่ตอบภายใน 8 วินาที';
-                else if (err.message) msg += ': ' + err.message;
-                fail(msg + '\n\nบัญชีที่ใช้: ' + authEmail);
+            const username=document.getElementById('loginUser').value.trim();
+            const password=document.getElementById('loginPass').value;
+            const rememberMe=document.getElementById('rememberMe').checked;
+            if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
+            try{
+                const cred=await auth.signInWithEmailAndPassword(usernameToAuthEmail(username),password);
+                const snap=await usersRef.child(cred.user.uid).once('value');
+                if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
+                const userData=snap.val();
+                if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
+                if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
+                if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
+                if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
+                await createUserSession(cred.user.uid,userData);
+                await checkAuthSession(cred.user);
+            }catch(err){
+                console.error('Firebase Authentication login error:',err);
+                alert(TRANSLATIONS[currentLang].errLoginFailed);
             }
         });
 
@@ -1088,7 +982,7 @@
             if (!currentUserKey) currentUserKey = localStorage.getItem('logged_user_key');
             if (!currentUserKey) return;
 
-            const adminSnap = await withTimeout(usersRef.child(currentUserKey).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
+            const adminSnap = await usersRef.child(currentUserKey).once('value');
             const adminData = adminSnap.val();
 
             if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
@@ -1098,9 +992,9 @@
 
             currentUserData = adminData;
 
-            const usersSnap = await withTimeout(usersRef.once('value'), 8000, 'ADMIN_USERS_READ_TIMEOUT');
+            const usersSnap = await usersRef.once('value');
             const users = usersSnap.val() || {};
-            const sessionsSnap = await withTimeout(sessionsRef.once('value'), 8000, 'ADMIN_SESSIONS_READ_TIMEOUT');
+            const sessionsSnap = await sessionsRef.once('value');
             const sessions = sessionsSnap.val() || {};
             const nowMs = Date.now();
 
@@ -1192,7 +1086,7 @@
         async function setUserStatus(userKey, newStatus) {
             if (!currentUserKey) return;
 
-            const adminSnap = await withTimeout(usersRef.child(currentUserKey).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
+            const adminSnap = await usersRef.child(currentUserKey).once('value');
             const adminData = adminSnap.val();
             if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
                 alert(TRANSLATIONS[currentLang].adminOnly);
@@ -1607,6 +1501,40 @@
             }, 30000);
         }
 
+        // ================================================================
+        // V9 FIX: Expose UI functions to the global window scope.
+        // The dashboard uses inline HTML handlers (onclick/onchange) for
+        // several controls. Explicitly publishing them prevents controls
+        // from becoming unresponsive after script/scope changes.
+        // ================================================================
+        Object.assign(window, {
+            openBotSettingsModal,
+            scrollToAdminPanel,
+            logout,
+            openChangeCodeModal,
+            loadAdminUsers,
+            setUserStatus,
+            changeLanguage,
+            changeTimezone,
+            toggleNotifications,
+            deleteBoss,
+            requireApprovedUser,
+            requireAdmin
+        });
+
+        // Make delete failures visible instead of silently failing.
+        const _deleteBoss = window.deleteBoss;
+        window.deleteBoss = async function (bossName) {
+            try {
+                if (!await requireApprovedUser()) return;
+                if (!bossName) throw new Error('ไม่พบชื่อบอสที่ต้องการลบ');
+                await bossRef.child(bossName).remove();
+            } catch (err) {
+                console.error('Delete boss failed:', err);
+                alert('ลบบอสไม่สำเร็จ: ' + (err?.message || err));
+            }
+        };
+
         window.addEventListener('beforeunload', () => {
             const sessionId = localStorage.getItem('logged_session_id');
             if (sessionId) {
@@ -1619,7 +1547,6 @@
         });
 
         window.addEventListener('DOMContentLoaded', initApp);
-        })();
     </script>
 </body>
 </html>
