@@ -347,6 +347,21 @@
     </div>
 
     <script>
+        // GitHub Pages is a static host, so it cannot read Render Environment Variables directly.
+        // Load the public Firebase Web config from the Render service first.
+        (async function bootstrapSkynetDashboard() {
+            try {
+                const cfgResponse = await fetch('https://bosstimer-ry18.onrender.com/api/firebase-config.js', { cache: 'no-store' });
+                if (!cfgResponse.ok) throw new Error(`HTTP ${cfgResponse.status}`);
+                const cfgSource = await cfgResponse.text();
+                // The endpoint only returns window.SKYNET_FIREBASE_CONFIG = {...};
+                new Function(cfgSource)();
+            } catch (e) {
+                console.error('SKYNET Firebase config bootstrap failed:', e);
+                window.SKYNET_FIREBASE_CONFIG = {};
+                alert('ไม่สามารถโหลด Firebase Web Config จาก Render ได้ กรุณาตรวจ FIREBASE_WEB_CONFIG_JSON และ /api/firebase-config.js');
+            }
+
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = Object.assign({
             projectId: "skynet-3ad44",
@@ -1521,6 +1536,7 @@
         });
 
         window.addEventListener('DOMContentLoaded', initApp);
+        })();
     </script>
 </body>
 </html>
