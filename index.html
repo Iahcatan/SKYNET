@@ -350,16 +350,23 @@
         // GitHub Pages is a static host, so it cannot read Render Environment Variables directly.
         // Load the public Firebase Web config from the Render service first.
         (async function bootstrapSkynetDashboard() {
+            // Firebase config is public web configuration. Do not block the entire UI on Render.
+            // The previous version waited indefinitely for the Render endpoint before registering
+            // the Login event handler, which made the Login button appear to do nothing when the
+            // free Render instance was asleep/unreachable.
             try {
-                const cfgResponse = await fetch('https://bosstimer-ry18.onrender.com/api/firebase-config.js', { cache: 'no-store' });
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 8000);
+                const cfgResponse = await fetch('https://bosstimer-ry18.onrender.com/api/firebase-config.js', {
+                    cache: 'no-store', signal: controller.signal
+                });
+                clearTimeout(timeoutId);
                 if (!cfgResponse.ok) throw new Error(`HTTP ${cfgResponse.status}`);
                 const cfgSource = await cfgResponse.text();
-                // The endpoint only returns window.SKYNET_FIREBASE_CONFIG = {...};
                 new Function(cfgSource)();
             } catch (e) {
-                console.error('SKYNET Firebase config bootstrap failed:', e);
+                console.warn('SKYNET Firebase config bootstrap failed; using embedded public config:', e);
                 window.SKYNET_FIREBASE_CONFIG = {};
-                alert('ไม่สามารถโหลด Firebase Web Config จาก Render ได้ กรุณาตรวจ FIREBASE_WEB_CONFIG_JSON และ /api/firebase-config.js');
             }
 
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
@@ -958,11 +965,15 @@
             const username=document.getElementById('loginUser').value.trim();
             const password=document.getElementById('loginPass').value;
             const rememberMe=document.getElementById('rememberMe').checked;
+            const submitBtn=e.currentTarget.querySelector('button[type=submit]');
+            const oldBtnText=submitBtn ? submitBtn.innerHTML : '';
             if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
+            if(submitBtn){submitBtn.disabled=true;submitBtn.innerHTML='⏳ กำลังเข้าสู่ระบบ...';}
             try{
                 const authEmail = username.includes('@')
                     ? username.trim().toLowerCase()
                     : usernameToAuthEmail(username);
+                console.log('[SKYNET] Login attempt:', { username, authEmail });
                 const cred=await auth.signInWithEmailAndPassword(authEmail,password);
                 const snap=await usersRef.child(cred.user.uid).once('value');
                 if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
@@ -985,6 +996,8 @@
                 else if (err && (err.code === 'PERMISSION_DENIED' || err.code === 'database/permission-denied')) msg = 'Firebase Rules ปฏิเสธการอ่าน/บันทึก users';
                 else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่า';
                 alert(msg + '\n\nบัญชีที่ระบบกำลังใช้: ' + authEmail);
+            } finally {
+                if(submitBtn){submitBtn.disabled=false;submitBtn.innerHTML=oldBtnText || '🔑 เข้าสู่ระบบ';}
             }
         });
 
