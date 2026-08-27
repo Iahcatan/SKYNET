@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Boss Timer Eternal Dashboard</title>
+    <title>Boss Timer Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -11,6 +11,8 @@
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Firebase Web config is injected by SKYNET Render. This keeps the same dashboard usable from GitHub Pages. -->
+    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
 
     <style>
         body {
@@ -78,10 +80,6 @@
             font-weight: 600;
         }
     </style>
-<style>
-.skynet-logo{width:52px;height:52px;object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,.25);box-shadow:0 4px 16px rgba(0,0,0,.35)}
-@media(max-width:576px){.skynet-logo{width:42px;height:42px}}
-</style>
 </head>
 <body>
     <div id="authContainer" class="container py-5" style="max-width: 450px;">
@@ -124,7 +122,7 @@
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
                         <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
                             🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
-                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
+                            <span class="text-white-50 d-block">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
                         </div>
                     </form>
                 </div>
@@ -152,10 +150,7 @@
 
     <div id="mainDashboard" class="container py-4" style="display: none;">
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-            <h2 data-i18n="title" class="d-flex align-items-center gap-2">
-                <img src="https://img2.pic.in.th/85cf3cd7-b2ad-4a9d-a2a2-d94ec53dd4c3.jpeg" alt="SKYNET Logo" class="skynet-logo" onerror="this.style.display='none'">
-                <span>Boss Timer Dashboard</span>
-            </h2>
+            <h2 data-i18n="title">⚔️ Boss Timer Dashboard</h2>
             <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
                 <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
@@ -203,7 +198,7 @@
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                 <div>
                     <h4 class="card-title text-danger mb-1" data-i18n="adminPanelTitle">🛡️ Admin • จัดการผู้ใช้งาน</h4>
-                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติ / Ban / Unban อยู่ในตารางด้านล่าง</small>
+                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติอยู่ในตารางด้านล่าง</small>
                 </div>
                 <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
             </div>
@@ -353,21 +348,16 @@
 
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
-        const firebaseConfig = {
-            // IMPORTANT: Firebase Authentication ต้องใช้ Web App config ครบชุด
-            // ให้นำค่าจาก Firebase Console > Project settings > Your apps > Web app มาใส่
-            apiKey: "PASTE_YOUR_FIREBASE_API_KEY_HERE",
-            authDomain: "PASTE_YOUR_FIREBASE_AUTH_DOMAIN_HERE",
-            projectId: "PASTE_YOUR_FIREBASE_PROJECT_ID_HERE",
-            storageBucket: "PASTE_YOUR_FIREBASE_STORAGE_BUCKET_HERE",
-            messagingSenderId: "PASTE_YOUR_FIREBASE_MESSAGING_SENDER_ID_HERE",
-            appId: "PASTE_YOUR_FIREBASE_APP_ID_HERE",
+        const firebaseConfig = Object.assign({
+            projectId: "skynet-3ad44",
+            authDomain: "skynet-3ad44.firebaseapp.com",
             databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
-        };
+        }, window.SKYNET_FIREBASE_CONFIG || {});
 
         // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
-        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
-            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
+        const firebaseConfigMissing = !firebaseConfig.apiKey || !firebaseConfig.authDomain || !firebaseConfig.appId;
+        if (firebaseConfigMissing) {
+            console.error('SKYNET Firebase Web config missing. Check FIREBASE_WEB_CONFIG_JSON on Render.');
         }
 
         // Initialize Firebase
@@ -507,7 +497,7 @@
                 errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",
                 errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",
                 adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",
-                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติ / Ban / Unban อยู่ในตารางด้านล่าง",
+                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติอยู่ในตารางด้านล่าง",
                 adminRefresh: "🔄 รีเฟรช",
                 adminPending: "รออนุมัติ",
                 adminActive: "กำลังใช้งาน",
@@ -523,8 +513,6 @@
                 adminReject: "ปฏิเสธ",
                 adminDisable: "ปิดใช้งาน",
                 adminActivate: "เปิดใช้งาน",
-                adminBan: "แบน",
-                adminUnban: "ปลดแบน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
                 adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
                 adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
@@ -607,7 +595,7 @@
                 errWeakAccount: "Username must be at least 3 characters and password at least 6 characters.",
                 errAdminUsername: "The admin username is reserved.",
                 adminPanelTitle: "🛡️ Admin • User Management",
-                adminPanelSubtitle: "Approve registrations, review history, and see active users. Approve / Ban / Unban buttons are in the table below.",
+                adminPanelSubtitle: "Approve registrations, review history, and see active users. Approval buttons are in the table below.",
                 adminRefresh: "🔄 Refresh",
                 adminPending: "Pending",
                 adminActive: "Active Now",
@@ -623,8 +611,6 @@
                 adminReject: "Reject",
                 adminDisable: "Disable",
                 adminActivate: "Activate",
-                adminBan: "Ban",
-                adminUnban: "Unban",
                 adminNoUsers: "No users found.",
                 adminOnly: "Admin only.",
                 adminCannotChangeAdmin: "The Admin account cannot be changed."
@@ -723,8 +709,6 @@
                 adminReject: "ปฏิเสธ",
                 adminDisable: "ปิดใช้งาน",
                 adminActivate: "เปิดใช้งาน",
-                adminBan: "แบน",
-                adminUnban: "ปลดแบน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
                 adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
                 adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
@@ -733,7 +717,6 @@
 
         let currentLang = localStorage.getItem('app_lang') || 'th';
         let currentTz = localStorage.getItem('app_tz') || 'auto';
-        const browserNotified = new Set();
         let isNotifyEnabled = localStorage.getItem('notify_enabled') === 'true';
         let activeBosses = {};
 
@@ -952,7 +935,10 @@
             const rememberMe=document.getElementById('rememberMe').checked;
             if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
             try{
-                const cred=await auth.signInWithEmailAndPassword(usernameToAuthEmail(username),password);
+                const authEmail = username.includes('@')
+                    ? username.trim().toLowerCase()
+                    : usernameToAuthEmail(username);
+                const cred=await auth.signInWithEmailAndPassword(authEmail,password);
                 const snap=await usersRef.child(cred.user.uid).once('value');
                 if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
                 const userData=snap.val();
@@ -964,7 +950,15 @@
                 await checkAuthSession(cred.user);
             }catch(err){
                 console.error('Firebase Authentication login error:',err);
-                alert(TRANSLATIONS[currentLang].errLoginFailed);
+                let msg = TRANSLATIONS[currentLang].errLoginFailed;
+                if (err && err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชีนี้ใน Firebase Authentication';
+                else if (err && err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
+                else if (err && err.code === 'auth/invalid-credential') msg = 'Username/Password ไม่ถูกต้อง หรือบัญชีนี้ยังไม่มีใน Firebase Authentication';
+                else if (err && err.code === 'auth/operation-not-allowed') msg = 'Firebase Authentication ยังไม่ได้เปิด Email/Password';
+                else if (err && err.code === 'auth/invalid-api-key') msg = 'Firebase Web API Key ไม่ถูกต้อง';
+                else if (err && err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ กรุณาตรวจ Web config';
+                else if (firebaseConfigMissing) msg = 'Firebase Web config ยังไม่ถูกตั้งค่าใน Render';
+                alert(msg);
             }
         });
 
@@ -1053,7 +1047,7 @@
                             ? `<span class="badge ${active ? 'bg-success' : 'bg-primary'}">${active ? '🟢 Active' : '✅ Approved'}</span>`
                             : user.status === 'rejected'
                                 ? '<span class="badge bg-danger">❌ Rejected</span>'
-                                : '<span class="badge bg-secondary">⛔ Banned</span>';
+                                : '<span class="badge bg-secondary">⛔ Disabled</span>';
 
                 let actionHtml = '-';
                 if (user.role !== 'admin') {
@@ -1064,9 +1058,9 @@
                                 <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'rejected')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
                             </div>`;
                     } else if (user.status === 'approved') {
-                        actionHtml = `<button class="btn btn-sm btn-outline-danger" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminBan || 'Ban'}</button>`;
+                        actionHtml = `<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;
                     } else if (user.status === 'disabled' || user.status === 'rejected') {
-                        actionHtml = `<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}', 'approved')">♻️ ${TRANSLATIONS[currentLang].adminUnban || 'Unban'}</button>`;
+                        actionHtml = `<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}', 'approved')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;
                     }
                 }
 
@@ -1464,12 +1458,12 @@
 
                 if (diffMs <= 0) {
                     cdCell.innerHTML = `<span class="text-success">${TRANSLATIONS[currentLang].spawned}</span>`;
-                    if (!browserNotified.has(`${bossName}|${data.spawnTimeMs}|spawn`)) {
+                    if (!data.notifiedSpawn) {
                         playAlertSound('spawn');
                         const title = (TRANSLATIONS[currentLang].spawnNotifyTitle || "⚔️ {boss} Spawned!").replace('{boss}', bossName);
                         const body = (TRANSLATIONS[currentLang].spawnNotifyBody || "Boss {boss} has spawned!").replace('{boss}', bossName);
                         sendBrowserNotification(title, body);
-                        browserNotified.add(`${bossName}|${data.spawnTimeMs}|spawn`);
+                        bossRef.child(bossName).update({ notifiedSpawn: true });
                     }
                 } else {
                     const totalSec = Math.floor(diffMs / 1000);
@@ -1480,12 +1474,12 @@
                     cdCell.innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
                     
                     const noticeMs = data.noticeMinutes * 60 * 1000;
-                    if (diffMs <= noticeMs && diffMs > noticeMs - 5000 && !browserNotified.has(`${bossName}|${data.spawnTimeMs}|notice`)) {
+                    if (diffMs <= noticeMs && diffMs > noticeMs - 5000 && !data.notifiedNotice) {
                          playAlertSound('notice');
                          const title = (TRANSLATIONS[currentLang].noticeNotifyTitle || "⏳ {boss} Spawning Soon!").replace('{boss}', bossName);
                          const body = (TRANSLATIONS[currentLang].noticeNotifyBody || "Boss {boss} will spawn in {min} mins").replace('{boss}', bossName).replace('{min}', data.noticeMinutes);
                          sendBrowserNotification(title, body);
-                         browserNotified.add(`${bossName}|${data.spawnTimeMs}|notice`);
+                         bossRef.child(bossName).update({ notifiedNotice: true });
                     }
                 }
             });
