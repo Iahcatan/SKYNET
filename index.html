@@ -826,21 +826,32 @@
         let currentUserKey = null;
         let currentUserData = null;
         let heartbeatTimer = null;
+        let adminUsersListenerAttached = false;
+        let adminSessionsListenerAttached = false;
+        let adminRefreshTimer = null;
 
         async function createUserSession(userKey, userData) {
-            currentSessionId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`);
             currentUserKey = userKey;
             currentUserData = userData;
             const now = new Date().toISOString();
-
-            await withTimeout(sessionsRef.child(currentSessionId).set({
-                userKey, username:userData.username, loginAt:now, lastSeenAt:now, active:true
-            }), 8000, 'SESSION_WRITE_TIMEOUT');
+            // Use a Firebase push id instead of crypto.randomUUID so every browser is supported.
+            const sessionRef = sessionsRef.push();
+            currentSessionId = sessionRef.key;
+            const sessionData = {
+                userKey, username:userData.username || '', loginAt:now, lastSeenAt:now, active:true
+            };
+            await withTimeout(sessionRef.set(sessionData), 8000, 'SESSION_WRITE_TIMEOUT');
+            // Let Firebase mark this session inactive if the browser disconnects unexpectedly.
+            try {
+                sessionRef.onDisconnect().update({
+                    lastSeenAt: new Date().toISOString(), active:false, logoutAt:new Date().toISOString()
+                });
+            } catch (e) { console.warn('[SKYNET] onDisconnect setup failed:', e); }
             await withTimeout(usersRef.child(userKey).update({
-                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null,
+                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null, online:true,
                 loginCount:(Number(userData.loginCount)||0)+1
             }), 8000, 'USER_WRITE_TIMEOUT');
-            localStorage.setItem('logged_user', userData.username);
+            localStorage.setItem('logged_user', userData.username || '');
             localStorage.setItem('logged_user_key', userKey);
             localStorage.setItem('logged_session_id', currentSessionId);
             localStorage.setItem('logged_role', userData.role || 'user');
@@ -856,7 +867,7 @@
                 const now=new Date().toISOString();
                 try {
                     await sessionsRef.child(sessionId).update({lastSeenAt:now,active:true});
-                    await usersRef.child(userKey).update({lastSeenAt:now});
+                    await usersRef.child(userKey).update({lastSeenAt:now,online:true});
                 } catch(err) { console.warn('Session heartbeat error:',err); }
             },30000);
         }
@@ -868,7 +879,7 @@
             if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer=null; }
             try {
                 if (sessionId) await sessionsRef.child(sessionId).update({lastSeenAt:now,logoutAt:now,active:false});
-                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now});
+                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now,online:false});
             } catch(err) { console.warn('Session logout update error:',err); }
             if (signOutAuth) { try { await auth.signOut(); } catch(err) {} }
             ['logged_user','logged_user_key','logged_session_id','logged_role'].forEach(k=>localStorage.removeItem(k));
@@ -900,6 +911,7 @@
                     const adminMenu=document.getElementById('adminPanelMenuBtn');
                     if(userData.role==='admin'){
                         adminPanel.style.display='block';
+                        startAdminRealtimeListeners();
                         adminOnlyButtons.forEach(el=>el.style.display='');
                         if(adminMenu) adminMenu.style.display='inline-block';
                         // Never block login on the admin list. It is non-critical UI data.
@@ -1032,6 +1044,7 @@
                 const adminMenu = document.getElementById('adminPanelMenuBtn');
                 if (userData.role === 'admin') {
                     if (adminPanel) adminPanel.style.display = 'block';
+                    startAdminRealtimeListeners();
                     document.querySelectorAll('[data-admin-only]').forEach(el => el.style.display = '');
                     if (adminMenu) adminMenu.style.display = 'inline-block';
                     loadAdminUsers().catch(err => console.warn('[SKYNET] admin list:', err));
@@ -1081,58 +1094,54 @@
         }
 
         async function loadAdminUsers() {
-            if (!currentUserKey) currentUserKey = localStorage.getItem('logged_user_key');
-            if (!currentUserKey) return;
+            const uid = auth.currentUser && auth.currentUser.uid;
+            if (!uid) return;
+            currentUserKey = uid;
 
-            const adminSnap = await withTimeout(usersRef.child(currentUserKey).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
+            const adminSnap = await withTimeout(usersRef.child(uid).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
             const adminData = adminSnap.val();
-
             if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
-                document.getElementById('adminPanel').style.display = 'none';
+                const panel=document.getElementById('adminPanel'); if(panel) panel.style.display='none';
                 return;
             }
-
             currentUserData = adminData;
 
-            const usersSnap = await withTimeout(usersRef.once('value'), 8000, 'ADMIN_USERS_READ_TIMEOUT');
+            const [usersSnap, sessionsSnap] = await Promise.all([
+                withTimeout(usersRef.once('value'), 8000, 'ADMIN_USERS_READ_TIMEOUT'),
+                withTimeout(sessionsRef.once('value'), 8000, 'ADMIN_SESSIONS_READ_TIMEOUT')
+            ]);
             const users = usersSnap.val() || {};
-            const sessionsSnap = await withTimeout(sessionsRef.once('value'), 8000, 'ADMIN_SESSIONS_READ_TIMEOUT');
             const sessions = sessionsSnap.val() || {};
             const nowMs = Date.now();
 
             const userRows = Object.entries(users).map(([key, user]) => {
                 const userSessions = Object.values(sessions).filter(s => s && s.userKey === key);
-                const latestSession = userSessions.sort((a, b) =>
+                const latestSession = userSessions.slice().sort((a,b) =>
                     new Date(b.lastSeenAt || b.loginAt || 0) - new Date(a.lastSeenAt || a.loginAt || 0)
                 )[0];
-
                 const lastSeen = user.lastSeenAt || (latestSession && latestSession.lastSeenAt);
                 const active = userSessions.some(session => {
                     if (!session || session.active === false || !session.lastSeenAt) return false;
-                    const age = nowMs - new Date(session.lastSeenAt).getTime();
-                    return age >= 0 && age <= ACTIVE_SESSION_TIMEOUT_MS;
+                    const seenMs = new Date(session.lastSeenAt).getTime();
+                    return Number.isFinite(seenMs) && (nowMs - seenMs) >= 0 && (nowMs - seenMs) <= ACTIVE_SESSION_TIMEOUT_MS;
                 });
-
-                return { key, user, active };
+                return {key, user, active, lastSeen};
             });
 
             const pendingCount = userRows.filter(x => x.user.status === 'pending').length;
             const activeCount = userRows.filter(x => x.active && x.user.status === 'approved').length;
-
             document.getElementById('adminPendingCount').innerText = pendingCount;
             document.getElementById('adminActiveCount').innerText = activeCount;
             document.getElementById('adminTotalCount').innerText = userRows.length;
 
             const tbody = document.getElementById('adminUsersBody');
             tbody.innerHTML = '';
-
-            userRows.sort((a, b) => {
-                const order = { pending: 0, approved: 1, rejected: 2, disabled: 3 };
-                return (order[a.user.status] ?? 9) - (order[b.user.status] ?? 9) ||
-                       (new Date(b.user.createdAt || 0) - new Date(a.user.createdAt || 0));
+            userRows.sort((a,b) => {
+                const order={pending:0,approved:1,rejected:2,disabled:3};
+                return (order[a.user.status] ?? 9)-(order[b.user.status] ?? 9) ||
+                    (new Date(b.lastSeen || b.user.createdAt || 0)-new Date(a.lastSeen || a.user.createdAt || 0));
             });
-
-            userRows.forEach(({ key, user, active }) => {
+            userRows.forEach(({key,user,active,lastSeen}) => {
                 const statusBadge = user.role === 'admin'
                     ? '<span class="badge bg-danger">🛡️ ADMIN</span>'
                     : user.status === 'pending'
@@ -1142,41 +1151,32 @@
                             : user.status === 'rejected'
                                 ? '<span class="badge bg-danger">❌ Rejected</span>'
                                 : '<span class="badge bg-secondary">⛔ Disabled</span>';
-
-                let actionHtml = '-';
-                if (user.role !== 'admin') {
-                    if (user.status === 'pending') {
-                        actionHtml = `
-                            <div class="d-flex gap-1 flex-wrap">
-                                <button class="btn btn-sm btn-success" onclick="setUserStatus('${key}', 'approved')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button>
-                                <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'rejected')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
-                            </div>`;
-                    } else if (user.status === 'approved') {
-                        actionHtml = `<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;
-                    } else if (user.status === 'disabled' || user.status === 'rejected') {
-                        actionHtml = `<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}', 'approved')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;
-                    }
+                let actionHtml='-';
+                if(user.role!=='admin'){
+                    if(user.status==='pending') actionHtml=`<div class="d-flex gap-1 flex-wrap"><button class="btn btn-sm btn-success" onclick="setUserStatus('${key}','approved')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button><button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}','rejected')">❌ ${TRANSLATIONS[currentLang].adminReject}</button></div>`;
+                    else if(user.status==='approved') actionHtml=`<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}','disabled')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;
+                    else actionHtml=`<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}','approved')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;
                 }
-
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td>
-                        <div class="fw-bold text-info">${escapeHtml(user.username || key)}</div>
-                        <small class="text-white-50">${user.role === 'admin' ? 'Admin' : 'User'}</small>
-                    </td>
-                    <td>${statusBadge}</td>
-                    <td><small>${formatAdminDate(user.createdAt)}</small></td>
-                    <td><small>${formatAdminDate(user.lastLoginAt)}</small></td>
-                    <td><small>${formatAdminDate(user.lastSeenAt)}</small></td>
-                    <td>${Number(user.loginCount) || 0}</td>
-                    <td>${actionHtml}</td>
-                `;
+                const tr=document.createElement('tr');
+                tr.innerHTML=`<td><div class="fw-bold text-info">${escapeHtml(user.username||key)}</div><small class="text-white-50">${user.role==='admin'?'Admin':'User'}</small></td><td>${statusBadge}</td><td><small>${formatAdminDate(user.createdAt)}</small></td><td><small>${formatAdminDate(user.lastLoginAt)}</small></td><td><small>${formatAdminDate(lastSeen)}</small></td><td>${Number(user.loginCount)||0}</td><td>${actionHtml}</td>`;
                 tbody.appendChild(tr);
             });
+            if(!userRows.length) tbody.innerHTML=`<tr><td colspan="7" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
+        }
 
-            if (!userRows.length) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
-            }
+        function startAdminRealtimeListeners(){
+            if(adminUsersListenerAttached || adminSessionsListenerAttached) return;
+            const refresh=()=>{
+                if(currentUserData && currentUserData.role==='admin' && auth.currentUser){
+                    loadAdminUsers().catch(err=>console.warn('[SKYNET] Admin realtime refresh:',err));
+                }
+            };
+            usersRef.on('value', refresh);
+            sessionsRef.on('value', refresh);
+            adminUsersListenerAttached=true;
+            adminSessionsListenerAttached=true;
+            if(adminRefreshTimer) clearInterval(adminRefreshTimer);
+            adminRefreshTimer=setInterval(refresh,15000);
         }
 
         function escapeHtml(value) {
@@ -1594,7 +1594,6 @@
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
-            auth.onAuthStateChanged(() => checkAuthSession());
             checkAuthSession();
 
             setInterval(updateCountdowns, 1000);
@@ -1611,6 +1610,7 @@
             openChangeCodeModal,
             logout,
             loadAdminUsers,
+            startAdminRealtimeListeners,
             setUserStatus,
             changeLanguage,
             changeTimezone,
