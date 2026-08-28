@@ -414,9 +414,9 @@
         botSettingsRef.on('value', (snap) => {
             const data = snap.val() || {};
             // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
-            document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
-            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
-            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
+            document.getElementById('ttsThToggle').checked = data.tts_th_enabled === true;
+            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled === true;
+            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled === true;
         });
 
         // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
@@ -426,9 +426,20 @@
                     e.target.checked = !e.target.checked;
                     return;
                 }
-                const key = id === 'ttsThToggle' ? 'tts_th_enabled' : 
+                const key = id === 'ttsThToggle' ? 'tts_th_enabled' :
                             id === 'ttsEnToggle' ? 'tts_en_enabled' : 'tts_ko_enabled';
-                await botSettingsRef.child(key).set(e.target.checked);
+                try {
+                    await withTimeout(botSettingsRef.update({[key]: !!e.target.checked}), 5000, 'TTS_SETTING_SAVE_TIMEOUT');
+                } catch (err) {
+                    console.error('[SKYNET] Failed to save TTS setting:', err);
+                    try {
+                        const snap = await withTimeout(botSettingsRef.once('value'), 5000, 'TTS_SETTING_READ_TIMEOUT');
+                        const data = snap.val() || {};
+                        document.getElementById('ttsThToggle').checked = data.tts_th_enabled === true;
+                        document.getElementById('ttsEnToggle').checked = data.tts_en_enabled === true;
+                        document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled === true;
+                    } catch (_) {}
+                }
             });
         });
 
@@ -1291,7 +1302,7 @@
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: item.recordedBy || item.recorded_by || 'ไม่ระบุ'
+                    recordedBy: item.recordedBy || 'ไม่ระบุ'
                 };
             });
             renderTable();
@@ -1493,7 +1504,7 @@
 
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
-            const currentUser = (currentUserData && currentUserData.username) || localStorage.getItem('logged_user') || (auth.currentUser && (auth.currentUser.displayName || auth.currentUser.email)) || 'ไม่ระบุ';
+            const currentUser = localStorage.getItem('logged_user') || 'Unknown';
 
             await bossRef.child(bossInput).set({
                 killTimeMs: killDate.getTime(),
@@ -1543,7 +1554,7 @@
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
-                    <td><span class="badge bg-secondary">${String(data.recordedBy || 'ไม่ระบุ').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]))}</span></td>
+                    <td><span class="badge bg-secondary">${data.recordedBy}</span></td>
                     <td>
                         <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
                     </td>
