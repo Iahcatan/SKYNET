@@ -1291,7 +1291,7 @@
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: item.recordedBy || 'ไม่ระบุ'
+                    recordedBy: item.recordedBy || item.recorded_by || 'ไม่ระบุ'
                 };
             });
             renderTable();
@@ -1493,7 +1493,7 @@
 
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
-            const currentUser = localStorage.getItem('logged_user') || 'Unknown';
+            const currentUser = (currentUserData && currentUserData.username) || localStorage.getItem('logged_user') || (auth.currentUser && (auth.currentUser.displayName || auth.currentUser.email)) || 'ไม่ระบุ';
 
             await bossRef.child(bossInput).set({
                 killTimeMs: killDate.getTime(),
@@ -1543,7 +1543,7 @@
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
-                    <td><span class="badge bg-secondary">${data.recordedBy}</span></td>
+                    <td><span class="badge bg-secondary">${String(data.recordedBy || 'ไม่ระบุ').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]))}</span></td>
                     <td>
                         <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
                     </td>
