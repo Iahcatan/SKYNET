@@ -196,9 +196,13 @@
                     <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติอยู่ในตารางด้านล่าง</small>
                     <div id="adminDataStatus" class="small text-white-50 mt-1">กำลังตรวจสอบข้อมูลผู้ใช้งาน...</div>
                 </div>
-                <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
+                    <button id="adminCollapseBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleAdminPanel()">▼ เปิด</button>
+                </div>
             </div>
 
+            <div id="adminPanelContent" style="display:none;">
             <div class="row g-3 mb-3">
                 <div class="col-md-4">
                     <div class="card p-3 h-100">
@@ -235,6 +239,7 @@
                     </thead>
                     <tbody id="adminUsersBody"></tbody>
                 </table>
+            </div>
             </div>
         </div>
 
@@ -413,10 +418,10 @@
         // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน
         botSettingsRef.on('value', (snap) => {
             const data = snap.val() || {};
-            // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
-            document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
-            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
-            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
+            // Firebase is authoritative. Missing values remain OFF until explicitly enabled.
+            document.getElementById('ttsThToggle').checked = data.tts_th_enabled === true;
+            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled === true;
+            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled === true;
         });
 
         // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
@@ -1272,6 +1277,15 @@
 
         // --- 4. ระบบ Real-time Sync จาก Firebase ---
 
+        let userNameCache = {};
+        usersRef.on('value', (snapshot) => {
+            const users = snapshot.val() || {};
+            userNameCache = {};
+            Object.entries(users).forEach(([uid, u]) => {
+                if (u && typeof u === 'object') userNameCache[uid] = u.username || u.email || uid;
+            });
+        });
+
         bossRef.on('value', (snapshot) => {
             const rawData = snapshot.val() || {};
             activeBosses = {};
@@ -1291,7 +1305,7 @@
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: item.recordedBy || 'ไม่ระบุ'
+                    recordedBy: (item.recordedBy && item.recordedBy !== 'Unknown' ? item.recordedBy : (item.recordedByUserId && userNameCache[item.recordedByUserId]) || item.recorded_by || item.recordedBy || 'ไม่ระบุ')
                 };
             });
             renderTable();
@@ -1595,10 +1609,22 @@
 
         function initApp() {
             const dataList = document.getElementById('bossOptions');
+            const allNames = new Set();
             Object.keys(BOSS_DATABASE).sort().forEach(boss => {
+                allNames.add(boss);
                 const option = document.createElement('option');
                 option.value = boss;
                 dataList.appendChild(option);
+            });
+            db.ref('custom_bosses').on('value', (snap) => {
+                const custom = snap.val() || {};
+                Object.keys(custom).sort().forEach(boss => {
+                    if (allNames.has(boss)) return;
+                    allNames.add(boss);
+                    const option = document.createElement('option');
+                    option.value = boss;
+                    dataList.appendChild(option);
+                });
             });
 
             document.getElementById('langSelect').value = currentLang;
@@ -1616,6 +1642,17 @@
             }, 30000);
         }
 
+        function toggleAdminPanel(forceOpen=null) {
+            const content=document.getElementById('adminPanelContent');
+            const btn=document.getElementById('adminCollapseBtn');
+            if(!content) return;
+            const shouldOpen = forceOpen === null ? content.style.display !== 'block' : !!forceOpen;
+            content.style.display = shouldOpen ? 'block' : 'none';
+            if(btn) btn.innerText = shouldOpen ? '▲ ปิด' : '▼ เปิด';
+            localStorage.setItem('admin_panel_open', shouldOpen ? '1' : '0');
+            if(shouldOpen) loadAdminUsers().catch(()=>{});
+        }
+
         // V8 FIX: HTML uses inline onclick handlers, while the dashboard is wrapped in an IIFE.
         // Publish the UI functions explicitly so every button remains callable.
         Object.assign(window, {
@@ -1631,7 +1668,8 @@
             toggleNotifications,
             deleteBoss,
             requireApprovedUser,
-            requireAdmin
+            requireAdmin,
+            toggleAdminPanel
         });
 
         // Keep delete failures visible to the user.
