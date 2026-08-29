@@ -251,15 +251,15 @@
                     <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." data-i18n-ph="phBoss" required autocomplete="off">
                     <datalist id="bossOptions"></datalist>
                 </div>
-                <div class="col-md-2">
-                    <label class="form-label" data-i18n="labelKillDate">วันที่บอสตาย</label>
-                    <input type="text" id="killDate" class="form-control" placeholder="เช่น 29/08/2026" data-i18n-ph="phKillDate" inputmode="numeric" maxlength="10" autocomplete="off">
-                    <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่างไว้ = วันนี้</small>
+                <div class="col-md-3">
+                    <label class="form-label">วันที่บอสตาย (วัน/เดือน/ปี)</label>
+                    <input type="text" id="killDate" class="form-control" placeholder="เช่น 29/08/2026 (เว้นว่าง = วันนี้)" maxlength="10" autocomplete="off">
+                    <small class="text-white-50">รูปแบบ DD/MM/YYYY • เว้นว่างไว้ = วันนี้</small>
                 </div>
-                <div class="col-md-2">
+                <div class="col-md-3">
                     <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>
                     <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">
-                    <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้ = เวลาปัจจุบัน</small>
+                    <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
                 </div>
                 <div class="col-md-2">
                     <label class="form-label" data-i18n="labelSpTime">เพิ่มเวลาพิเศษ (นาที)</label>
@@ -286,7 +286,7 @@
                     <thead>
                         <tr>
                             <th data-i18n="thBoss">ชื่อบอส</th>
-                            <th data-i18n="thKillDate">วันที่ตาย</th>
+                            <th>วันที่ตาย</th>
                             <th data-i18n="thKillTime">เวลาตาย (24 ชม.)</th>
                             <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>
                             <th data-i18n="thCountdown">นับถอยหลัง</th>
@@ -490,9 +490,7 @@
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
                 labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
                 phKillTime: "เช่น 17:30 หรือ 1730",
-                phKillDate: "เช่น 29/08/2026",
                 hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",
-                hintKillDate: "*รูปแบบ วัน/เดือน/ปี เช่น 29/08/2026 • เว้นว่างไว้ = วันนี้",
                 labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",
                 btnSave: "⚔️ บันทึกเวลา",
                 tableTitle: "📜 ตารางเวลาบอสล่าสุด",
@@ -590,9 +588,7 @@
                 labelKillTime: "Kill Time (24h Format)",
                 labelSpTime: "Special Time (mins)",
                 phKillTime: "e.g. 17:30 or 1730",
-                 phKillDate: "e.g. 29/08/2026",
                 hintKillTime: "*Leave blank to use current time",
-                 hintKillDate: "*Format DD/MM/YYYY • Leave blank = today",
                 labelNotice: "Advance Notice (Mins)",
                 btnSave: "⚔️ Save Time",
                 tableTitle: "📜 Boss Schedule Table",
@@ -690,9 +686,7 @@
                 labelKillTime: "처치 시간 (24시간 형식)",
                 labelSpTime: "추가 시간 (분)",
                 phKillTime: "예: 17:30 또는 1730",
-                 phKillDate: "예: 29/08/2026",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
-                 hintKillDate: "*형식 DD/MM/YYYY • 비워두면 오늘",
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
                 tableTitle: "📜 최근 보스 시간표",
@@ -1188,7 +1182,7 @@
                 tr.innerHTML=`<td><div class="fw-bold text-info">${escapeHtml(user.username||key)}</div><small class="text-white-50">${user.role==='admin'?'Admin':'User'}</small></td><td>${statusBadge}</td><td><small>${formatAdminDate(user.createdAt)}</small></td><td><small>${formatAdminDate(user.lastLoginAt)}</small></td><td><small>${formatAdminDate(lastSeen)}</small></td><td>${Number(user.loginCount)||0}</td><td>${actionHtml}</td>`;
                 tbody.appendChild(tr);
             });
-            if(!userRows.length) tbody.innerHTML=`<tr><td colspan="7" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
+            if(!userRows.length) tbody.innerHTML=`<tr><td colspan="8" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
         }
 
         function startAdminRealtimeListeners(){
@@ -1314,11 +1308,11 @@
                 activeBosses[bossName] = {
                     spawnTimeMs: spawnMs,
                     killTimeMs: killMs,
-                    killDate: item.killDate || (killMs ? formatDateInputValue(new Date(killMs)) : ''),
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: (item.recordedBy && item.recordedBy !== 'Unknown' ? item.recordedBy : (item.recordedByUserId && userNameCache[item.recordedByUserId]) || item.recorded_by || item.recordedBy || 'ไม่ระบุ')
+                    killDate: item.killDate || (item.killTimeMs ? new Date(item.killTimeMs).toLocaleDateString('th-TH') : ''),
+                    recordedBy: (item.recordedBy && item.recordedBy !== 'Unknown' ? item.recordedBy : (item.recordedByUserId && userNameCache[item.recordedByUserId]) || item.recorded_by || item.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ')
                 };
             });
             renderTable();
@@ -1474,93 +1468,89 @@
             return `${h}:${m}:${s}`;
         }
 
-        function parseKillDateTime(dateStr, timeStr) {
-            const now = new Date();
-            const rawDate = (dateStr || '').trim();
-            const dateValue = rawDate || formatDateInputValue(now);
-            let year, month, day;
-            if (rawDate) {
-                if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDate)) return null;
-                [day, month, year] = rawDate.split('/').map(v => parseInt(v, 10));
+        function parseInputTime(timeStr) {
+            if (!timeStr) return new Date();
+            let h, m;
+            if (timeStr.includes(':')) {
+                const parts = timeStr.split(':');
+                h = parseInt(parts[0], 10);
+                m = parseInt(parts[1], 10);
+            } else if (timeStr.length === 3) {
+                h = parseInt(timeStr.substring(0, 1), 10);
+                m = parseInt(timeStr.substring(1, 3), 10);
+            } else if (timeStr.length === 4) {
+                h = parseInt(timeStr.substring(0, 2), 10);
+                m = parseInt(timeStr.substring(2, 4), 10);
             } else {
-                year = now.getFullYear();
-                month = now.getMonth() + 1;
-                day = now.getDate();
+                return null;
             }
 
-            let h = now.getHours(), m = now.getMinutes();
-            const rawTime = (timeStr || '').trim();
-            if (rawTime) {
-                const time = rawTime.replace(':', '');
-                if (rawTime.includes(':')) {
-                    const tp = rawTime.split(':');
-                    if (tp.length !== 2) return null;
-                    h = parseInt(tp[0], 10);
-                    m = parseInt(tp[1], 10);
-                } else if (/^\d{3,4}$/.test(time)) {
-                    if (time.length === 3) { h = parseInt(time[0], 10); m = parseInt(time.slice(1), 10); }
-                    else { h = parseInt(time.slice(0, 2), 10); m = parseInt(time.slice(2), 10); }
-                } else {
-                    return null;
-                }
-            }
-            if ([h,m].some(Number.isNaN) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+            if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
 
-            const d = new Date(year, month - 1, day, h, m, 0, 0);
-            if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
+            const now = new Date();
+            let d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
+            
+            if (d.getTime() > now.getTime() + 60000) {
+                d.setDate(d.getDate() - 1);
+            }
             return d;
         }
 
-        function formatDateInputValue(dateObj) {
-            if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return '';
-            const y = dateObj.getFullYear();
-            const m = String(dateObj.getMonth() + 1).padStart(2, '0');
-            const d = String(dateObj.getDate()).padStart(2, '0');
-            return `${y}-${m}-${d}`;
-        }
-
-        function formatDateDisplay(value) {
-            if (!value) return '-';
-            const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
-            if (!match) return String(value);
-            return `${match[3]}/${match[2]}/${match[1]}`;
+        function parseInputDate(dateStr) {
+            const raw = (dateStr || '').trim();
+            const now = new Date();
+            if (!raw) return { year: now.getFullYear(), month: now.getMonth()+1, day: now.getDate() };
+            const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (!m) return null;
+            const day = parseInt(m[1],10), month = parseInt(m[2],10), year = parseInt(m[3],10);
+            const test = new Date(year, month-1, day);
+            if (test.getFullYear() !== year || test.getMonth() !== month-1 || test.getDate() !== day) return null;
+            return { year, month, day };
         }
 
         document.getElementById('bossForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             if (!await requireApprovedUser()) return;
             const bossInput = document.getElementById('bossSelect').value.trim();
-            const dateInput = document.getElementById('killDate').value.trim();
             const timeInput = document.getElementById('killTime').value.trim();
+            const dateInput = document.getElementById('killDate').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
             const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
-
             if (!bossInput) return;
+            const parsedDate = parseInputDate(dateInput);
+            if (!parsedDate) { alert('❌ วันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ DD/MM/YYYY เช่น 29/08/2026'); return; }
+            if (timeInput && !parseInputTime(timeInput)) { alert(TRANSLATIONS[currentLang].invalidTimeAlert); return; }
 
-            const killDateTime = parseKillDateTime(dateInput, timeInput);
-            if (!killDateTime) {
-                alert(TRANSLATIONS[currentLang].invalidTimeAlert);
-                return;
+            try {
+                const idToken = await auth.currentUser.getIdToken(true);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/record-boss`, {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json','Authorization':`Bearer ${idToken}`},
+                    body: JSON.stringify({ bossName: bossInput, killTime: timeInput, killDate: dateInput, noticeMinutes: noticeMin, spTimeMinutes: spTimeMin })
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
+                document.getElementById('bossForm').reset();
+                document.getElementById('noticeMinutes').value = 5;
+                if (result.bossName) {
+                    activeBosses[result.bossName] = {
+                        spawnTimeMs: Number(result.spawnTimeMs), killTimeMs: Number(result.killTimeMs),
+                        killDate: result.killDate || `${parsedDate.year}-${String(parsedDate.month).padStart(2,'0')}-${String(parsedDate.day).padStart(2,'0')}`,
+                        noticeMinutes: noticeMin,
+                        notifiedNotice: !!result.alreadyPassed, notifiedSpawn: !!result.alreadyPassed,
+                        recordedBy: result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ',
+                        recordedByDisplayName: result.recordedByDisplayName || result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ',
+                        recordedByUserId: result.recordedByUserId || auth.currentUser?.uid || ''
+                    };
+                    renderTable();
+                }
+                console.log(`✅ Dashboard boss recorded: ${result.bossName} | by ${result.recordedBy} | confirmation=${result.confirmationRequestId} | voice=${result.confirmationSuccess}`);
+                if (result.confirmationSuccess === false) alert('⚠️ บันทึกบอสสำเร็จ แต่ Bot ยังยืนยัน Voice ไม่สำเร็จ กรุณาตรวจห้อง /setvoice และ Render Log');
+            } catch (err) {
+                console.error('Dashboard boss record failed:', err);
+                alert(`❌ บันทึกเวลาบอสไม่สำเร็จ\n${err.message || err}`);
             }
-
-            const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
-            const spawnTimeMs = killDateTime.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000);
-            const currentUser = localStorage.getItem('logged_user') || 'Unknown';
-            const resolvedKillDate = formatDateInputValue(killDateTime);
-
-            await bossRef.child(bossInput).set({
-                killTimeMs: killDateTime.getTime(),
-                killDate: resolvedKillDate,
-                spawnTimeMs: spawnTimeMs,
-                noticeMinutes: noticeMin,
-                recordedBy: currentUser,
-                notifiedNotice: false,
-                notifiedSpawn: false
-            });
-
-            document.getElementById('bossForm').reset();
-            document.getElementById('killDate').value = '';
-            document.getElementById('noticeMinutes').value = 5;
         });
 
         async function deleteBoss(bossName) {
@@ -1594,7 +1584,7 @@
                 
                 tr.innerHTML = `
                     <td class="fw-bold text-warning">${bossName}</td>
-                    <td>${formatDateDisplay(data.killDate || formatDateInputValue(new Date(data.killTimeMs)))}</td>
+                    <td>${(data.killDate || new Date(data.killTimeMs).toLocaleDateString('th-TH')).replace(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, '$1/$2/$3')}</td>
                     <td>${killTimeStr}</td>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
