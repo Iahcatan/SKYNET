@@ -253,7 +253,7 @@
                 </div>
                 <div class="col-md-2">
                     <label class="form-label" data-i18n="labelKillDate">วันที่บอสตาย</label>
-                    <input type="date" id="killDate" class="form-control" autocomplete="off">
+                    <input type="text" id="killDate" class="form-control" placeholder="เช่น 29/08/2026" data-i18n-ph="phKillDate" inputmode="numeric" maxlength="10" autocomplete="off">
                     <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่างไว้ = วันนี้</small>
                 </div>
                 <div class="col-md-2">
@@ -490,7 +490,9 @@
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
                 labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
                 phKillTime: "เช่น 17:30 หรือ 1730",
+                phKillDate: "เช่น 29/08/2026",
                 hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",
+                hintKillDate: "*รูปแบบ วัน/เดือน/ปี เช่น 29/08/2026 • เว้นว่างไว้ = วันนี้",
                 labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",
                 btnSave: "⚔️ บันทึกเวลา",
                 tableTitle: "📜 ตารางเวลาบอสล่าสุด",
@@ -588,7 +590,9 @@
                 labelKillTime: "Kill Time (24h Format)",
                 labelSpTime: "Special Time (mins)",
                 phKillTime: "e.g. 17:30 or 1730",
+                 phKillDate: "e.g. 29/08/2026",
                 hintKillTime: "*Leave blank to use current time",
+                 hintKillDate: "*Format DD/MM/YYYY • Leave blank = today",
                 labelNotice: "Advance Notice (Mins)",
                 btnSave: "⚔️ Save Time",
                 tableTitle: "📜 Boss Schedule Table",
@@ -686,7 +690,9 @@
                 labelKillTime: "처치 시간 (24시간 형식)",
                 labelSpTime: "추가 시간 (분)",
                 phKillTime: "예: 17:30 또는 1730",
+                 phKillDate: "예: 29/08/2026",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
+                 hintKillDate: "*형식 DD/MM/YYYY • 비워두면 오늘",
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
                 tableTitle: "📜 최근 보스 시간표",
@@ -1470,18 +1476,16 @@
 
         function parseKillDateTime(dateStr, timeStr) {
             const now = new Date();
-            const dateValue = (dateStr || '').trim() || formatDateInputValue(now);
-            const normalized = String(dateValue).replace(/\//g, '-');
-            const parts = normalized.split('-').map(v => parseInt(v, 10));
-            if (parts.length !== 3 || parts.some(Number.isNaN)) return null;
-
+            const rawDate = (dateStr || '').trim();
+            const dateValue = rawDate || formatDateInputValue(now);
             let year, month, day;
-            if (normalized.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
-                [year, month, day] = parts;
-            } else if (normalized.match(/^\d{1,2}-\d{1,2}-\d{4}$/)) {
-                [day, month, year] = parts;
+            if (rawDate) {
+                if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDate)) return null;
+                [day, month, year] = rawDate.split('/').map(v => parseInt(v, 10));
             } else {
-                return null;
+                year = now.getFullYear();
+                month = now.getMonth() + 1;
+                day = now.getDate();
             }
 
             let h = now.getHours(), m = now.getMinutes();
