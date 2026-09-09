@@ -1340,6 +1340,17 @@
         });
 
         // --- UI & Control Functions ---
+        function applyKillDateLanguage() {
+            const langData = TRANSLATIONS[currentLang];
+            if (!langData) return;
+            const label = document.querySelector('label[data-i18n="labelKillDate"]');
+            const input = document.getElementById('killDate');
+            const hint = document.querySelector('[data-i18n="hintKillDate"]');
+            if (label && langData.labelKillDate) label.textContent = langData.labelKillDate;
+            if (input && langData.phKillDate) input.placeholder = langData.phKillDate;
+            if (hint && langData.hintKillDate) hint.textContent = langData.hintKillDate;
+        }
+
         function applyLanguage() {
             const langData = TRANSLATIONS[currentLang];
             document.querySelectorAll('[data-i18n]').forEach(el => {
@@ -1352,6 +1363,7 @@
             });
             
             updateNotifyButtonUI();
+            applyKillDateLanguage();
             renderTable();
         }
 
