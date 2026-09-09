@@ -312,9 +312,12 @@
                     <h4 class="card-title text-warning mb-1" data-i18n="attendanceTitle">⚔️ Boss Raid Attendance</h4>
                     <small class="text-white-50" data-i18n="attendanceSubtitle">เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord</small>
                 </div>
-                <span class="badge bg-success status-badge" id="attendanceRealtimeStatus" data-i18n="attendanceRealtime">🟢 Realtime</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-success status-badge" id="attendanceRealtimeStatus" data-i18n="attendanceRealtime">🟢 Realtime</span>
+                    <button id="attendanceCollapseBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendancePanel()">▼ เปิด</button>
+                </div>
             </div>
-
+            <div id="attendancePanelContent" style="display:none;">
             <div class="row g-3 mb-3">
                 <div class="col-md-4">
                     <div class="card p-3 attendance-stat h-100">
@@ -377,6 +380,7 @@
                     </tr></thead>
                     <tbody id="attendanceMonthlyBody"><tr><td colspan="4" class="text-center text-muted">-</td></tr></tbody>
                 </table>
+            </div>
             </div>
         </div>
 
@@ -632,7 +636,7 @@
                 attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน",
                 attendanceBoss: "บอส", attendanceDate: "วันที่", attendanceAttackTime: "เวลาโจมตี", attendanceOpenClose: "เปิด–ปิด",
                 attendanceCount: "ผู้เข้าร่วม", attendanceCreatedBy: "สร้างโดย", attendanceStatus: "สถานะ", attendanceMonth: "เดือน",
-                attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ",
+                attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ", attendanceCollapseOpen: "▼ เปิด", attendanceCollapseClose: "▲ ปิด",
                 adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",
                 adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติอยู่ในตารางด้านล่าง",
                 adminRefresh: "🔄 รีเฟรช",
@@ -742,7 +746,7 @@
                 attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports",
                 attendanceBoss: "Boss", attendanceDate: "Date", attendanceAttackTime: "Attack Time", attendanceOpenClose: "Open–Close",
                 attendanceCount: "Participants", attendanceCreatedBy: "Created By", attendanceStatus: "Status", attendanceMonth: "Month",
-                attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins",
+                attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins", attendanceCollapseOpen: "▼ Open", attendanceCollapseClose: "▲ Close",
                 adminPanelTitle: "🛡️ Admin • User Management",
                 adminPanelSubtitle: "Approve registrations, review history, and see active users. Approval buttons are in the table below.",
                 adminRefresh: "🔄 Refresh",
@@ -852,7 +856,7 @@
                 attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서",
                 attendanceBoss: "보스", attendanceDate: "날짜", attendanceAttackTime: "공격 시간", attendanceOpenClose: "시작–마감",
                 attendanceCount: "참여자", attendanceCreatedBy: "생성자", attendanceStatus: "상태", attendanceMonth: "월",
-                attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석",
+                attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석", attendanceCollapseOpen: "▼ 열기", attendanceCollapseClose: "▲ 닫기",
                 adminPanelTitle: "🛡️ Admin • 사용자 관리",
                 adminPanelSubtitle: "가입 승인, 이용 기록 및 현재 접속 사용자를 확인합니다.",
                 adminRefresh: "🔄 새로고침",
@@ -1045,6 +1049,7 @@
                     document.getElementById('authContainer').style.display='none';
                     document.getElementById('mainDashboard').style.display='block';
                     document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
+                    startAttendanceRealtimeListener();
                     const adminPanel=document.getElementById('adminPanel');
                     const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
                     const adminMenu=document.getElementById('adminPanelMenuBtn');
@@ -1411,6 +1416,7 @@
         // --- 4. ระบบ Real-time Sync จาก Firebase ---
 
         let userNameCache = {};
+        let attendanceRealtimeListenerAttached = false;
         usersRef.on('value', (snapshot) => {
             const users = snapshot.val() || {};
             userNameCache = {};
@@ -1513,11 +1519,39 @@
         }
 
         function startAttendanceRealtimeListener(){
-            raidAttendanceRef.on('value', snap => renderAttendanceDashboard(snap.val() || {}));
-            monthlyReportsRef.on('value', snap => {
-                // Server-generated monthly reports remain in Firebase; the live activity table is the primary dashboard view.
-                window.__SKYNET_MONTHLY_REPORTS__ = snap.val() || {};
+            if (attendanceRealtimeListenerAttached || !auth.currentUser) return;
+            attendanceRealtimeListenerAttached = true;
+            raidAttendanceRef.on('value', snap => {
+                renderAttendanceDashboard(snap.val() || {});
+                const status = document.getElementById('attendanceRealtimeStatus');
+                if (status) {
+                    status.className = 'badge bg-success status-badge';
+                    status.textContent = TRANSLATIONS[currentLang].attendanceRealtime || '🟢 Realtime';
+                }
+            }, err => {
+                console.error('[SKYNET] Attendance realtime listener:', err);
+                const status = document.getElementById('attendanceRealtimeStatus');
+                if (status) {
+                    status.className = 'badge bg-danger status-badge';
+                    status.textContent = '🔴 Attendance Sync Error';
+                }
             });
+            monthlyReportsRef.on('value', snap => {
+                window.__SKYNET_MONTHLY_REPORTS__ = snap.val() || {};
+            }, err => console.warn('[SKYNET] Monthly report listener:', err));
+        }
+
+        function toggleAttendancePanel(forceOpen=null) {
+            const content = document.getElementById('attendancePanelContent');
+            const btn = document.getElementById('attendanceCollapseBtn');
+            if (!content) return;
+            const shouldOpen = forceOpen === null ? content.style.display !== 'block' : !!forceOpen;
+            content.style.display = shouldOpen ? 'block' : 'none';
+            if (btn) {
+                const key = shouldOpen ? 'attendanceCollapseClose' : 'attendanceCollapseOpen';
+                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? '▲ ปิด' : '▼ เปิด');
+            }
+            localStorage.setItem('attendance_panel_open', shouldOpen ? '1' : '0');
         }
 
         function applyLanguage() {
@@ -1757,7 +1791,16 @@
 
         async function deleteBoss(bossName) {
             if (!await requireApprovedUser()) return;
-            await bossRef.child(bossName).remove();
+            if (!bossName) throw new Error('ไม่พบชื่อบอสที่ต้องการลบ');
+            const idToken = await auth.currentUser.getIdToken(true);
+            const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+            const response = await fetch(`${apiOrigin}/api/delete-boss`, {
+                method: 'POST',
+                headers: {'Content-Type':'application/json','Authorization':`Bearer ${idToken}`},
+                body: JSON.stringify({ bossName })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
         }
 
         document.getElementById('clearAllBtn').addEventListener('click', async () => {
@@ -1868,7 +1911,7 @@
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
-            startAttendanceRealtimeListener();
+            toggleAttendancePanel(localStorage.getItem('attendance_panel_open') === '1');
             checkAuthSession();
 
             setInterval(updateCountdowns, 1000);
@@ -1904,15 +1947,14 @@
             deleteBoss,
             requireApprovedUser,
             requireAdmin,
-            toggleAdminPanel
+            toggleAdminPanel,
+            toggleAttendancePanel
         });
 
         // Keep delete failures visible to the user.
         window.deleteBoss = async function (bossName) {
             try {
-                if (!await requireApprovedUser()) return;
-                if (!bossName) throw new Error('ไม่พบชื่อบอสที่ต้องการลบ');
-                await bossRef.child(bossName).remove();
+                await deleteBoss(bossName);
             } catch (err) {
                 console.error('[SKYNET] Delete boss failed:', err);
                 alert('ลบบอสไม่สำเร็จ: ' + (err && err.message ? err.message : err));
