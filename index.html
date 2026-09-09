@@ -1793,7 +1793,7 @@
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
                     <td><span class="badge bg-secondary">${data.recordedBy}</span></td>
                     <td>
-                        <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
+                        <button class="btn btn-sm btn-danger" onclick='deleteBoss(${JSON.stringify(bossName)})'>${langData.btnDelete}</button>
                     </td>
                 `;
                 tbody.appendChild(tr);
