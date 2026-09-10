@@ -1566,6 +1566,7 @@
         let userNameCache = {};
         let attendanceRealtimeListenerAttached = false;
         let attendanceRealtimeTimer = null;
+        let attendanceRealtimeAbortController = null;
         let attendanceRealtimeBusy = false;
         let attendanceRealtimeUnauthorized = false;
         usersRef.on('value', (snapshot) => {
@@ -1783,19 +1784,130 @@
 
         function stopAttendanceRealtimeListener(){
             if (attendanceRealtimeTimer) {
-                clearInterval(attendanceRealtimeTimer);
+                clearTimeout(attendanceRealtimeTimer);
                 attendanceRealtimeTimer = null;
+            }
+            if (attendanceRealtimeAbortController) {
+                attendanceRealtimeAbortController.abort();
+                attendanceRealtimeAbortController = null;
             }
             attendanceRealtimeListenerAttached = false;
             attendanceRealtimeBusy = false;
+        }
+
+        function applyAttendanceServerResult(result){
+            window.__SKYNET_ATTENDANCE_ROOT__ = result.raid_attendance || {};
+            if (result.individual_members && typeof result.individual_members === 'object') {
+                window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ = result.individual_members;
+            }
+            window.__SKYNET_MONTHLY_REPORTS__ = result.monthly_reports || {};
+            renderAttendanceDashboard(window.__SKYNET_ATTENDANCE_ROOT__);
+            if (result.individual_members && typeof result.individual_members === 'object') {
+                refreshAttendanceIndividualSelectors();
+                renderAttendanceIndividual();
+            }
+            const status = document.getElementById('attendanceRealtimeStatus');
+            if (status) {
+                status.className = 'badge bg-success status-badge';
+                status.textContent = TRANSLATIONS[currentLang].attendanceRealtime || '🟢 Real-time';
+                status.title = `Event sync v${result.attendance_version || 0}`;
+            }
+        }
+
+        async function fetchAttendanceServerSnapshot(){
+            if (!auth.currentUser || attendanceRealtimeUnauthorized || attendanceRealtimeBusy) return null;
+            attendanceRealtimeBusy = true;
+            try {
+                const idToken = await auth.currentUser.getIdToken(false);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/attendance-data`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${idToken}` },
+                    cache: 'no-store'
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.success) {
+                    const err = new Error(result.error || `HTTP ${response.status}`);
+                    err.status = response.status;
+                    throw err;
+                }
+                applyAttendanceServerResult(result);
+                attendanceRealtimeUnauthorized = false;
+                return result;
+            } catch (err) {
+                console.error('[SKYNET] Attendance initial sync:', err);
+                const status = document.getElementById('attendanceRealtimeStatus');
+                if (status) {
+                    status.className = 'badge bg-danger status-badge';
+                    status.textContent = err.status === 401 || err.status === 403 ? '🔐 Attendance Auth Error' : '🔴 Attendance Sync Error';
+                }
+                if (err.status === 401 || err.status === 403) attendanceRealtimeUnauthorized = true;
+                return null;
+            } finally {
+                attendanceRealtimeBusy = false;
+            }
+        }
+
+        async function startAttendanceRealtimeStream(){
+            if (!auth.currentUser || attendanceRealtimeUnauthorized) return;
+            attendanceRealtimeAbortController = new AbortController();
+            try {
+                const idToken = await auth.currentUser.getIdToken(false);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/attendance-stream`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${idToken}`, 'Accept': 'text/event-stream' },
+                    cache: 'no-store',
+                    signal: attendanceRealtimeAbortController.signal
+                });
+                if (!response.ok || !response.body) {
+                    const err = new Error(`Attendance stream HTTP ${response.status}`);
+                    err.status = response.status;
+                    throw err;
+                }
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                while (true) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, {stream:true});
+                    const frames = buffer.split('\n\n');
+                    buffer = frames.pop() || '';
+                    for (const frame of frames) {
+                        const dataLine = frame.split('\n').find(line => line.startsWith('data: '));
+                        if (!dataLine) continue;
+                        try {
+                            const result = JSON.parse(dataLine.slice(6));
+                            if (result && result.success) applyAttendanceServerResult(result);
+                        } catch (parseErr) {
+                            console.warn('[SKYNET] Attendance stream parse:', parseErr);
+                        }
+                    }
+                }
+            } catch (err) {
+                if (err && err.name === 'AbortError') return;
+                console.error('[SKYNET] Attendance event stream:', err);
+                const status = document.getElementById('attendanceRealtimeStatus');
+                if (status) {
+                    status.className = 'badge bg-danger status-badge';
+                    status.textContent = err.status === 401 || err.status === 403 ? '🔐 Attendance Auth Error' : '🔴 Attendance Stream Error';
+                }
+                if (auth.currentUser && !attendanceRealtimeUnauthorized && attendanceRealtimeListenerAttached) {
+                    attendanceRealtimeTimer = setTimeout(() => startAttendanceRealtimeStream(), 5000);
+                }
+            } finally {
+                attendanceRealtimeAbortController = null;
+            }
         }
 
         function startAttendanceRealtimeListener(){
             if (attendanceRealtimeListenerAttached || !auth.currentUser) return;
             attendanceRealtimeListenerAttached = true;
             attendanceRealtimeUnauthorized = false;
-            fetchAttendanceServerSnapshot();
-            attendanceRealtimeTimer = setInterval(fetchAttendanceServerSnapshot, 2000);
+            fetchAttendanceServerSnapshot().then(() => {
+                if (attendanceRealtimeListenerAttached && !attendanceRealtimeUnauthorized) startAttendanceRealtimeStream();
+            });
         }
 
         function toggleAttendancePanel(forceOpen=null) {
