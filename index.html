@@ -1437,6 +1437,7 @@
             const uid = memberSelect ? String(memberSelect.value || '') : '';
             const month = monthSelect ? String(monthSelect.value || 'all') : 'all';
             const member = uid ? members[uid] : null;
+            if (uid) console.debug('[SKYNET] Attendance individual lookup', {uid: uid, found: !!member, entries: member ? (member.entries || []).length : 0, month: month});
             if (!member) {
                 nameEl.textContent = '-'; checksEl.textContent='0'; raidsEl.textContent='0'; lastEl.textContent='-';
                 body.innerHTML='<tr><td colspan="5" class="text-center text-muted">-</td></tr>';
@@ -1747,7 +1748,14 @@
                     throw err;
                 }
                 window.__SKYNET_ATTENDANCE_ROOT__ = result.raid_attendance || {};
+                if (result.individual_members && typeof result.individual_members === 'object') {
+                    window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ = result.individual_members;
+                }
                 renderAttendanceDashboard(window.__SKYNET_ATTENDANCE_ROOT__);
+                if (result.individual_members && typeof result.individual_members === 'object') {
+                    refreshAttendanceIndividualSelectors();
+                    renderAttendanceIndividual();
+                }
                 window.__SKYNET_MONTHLY_REPORTS__ = result.monthly_reports || {};
                 const status = document.getElementById('attendanceRealtimeStatus');
                 if (status) {
