@@ -78,6 +78,8 @@
             font-weight: 600;
         }
         .attendance-stat { min-height: 120px; }
+        .attendance-stat .attendance-stat-value { color: #ffffff !important; }
+        .attendance-stat .fs-3, .attendance-stat .fs-4, .attendance-stat .fs-5 { color: #ffffff !important; }
         .attendance-status-open { color: #22c55e; }
         .attendance-status-scheduled { color: #f59e0b; }
         .attendance-status-closed { color: #94a3b8; }
@@ -322,19 +324,19 @@
                 <div class="col-md-4">
                     <div class="card p-3 attendance-stat h-100">
                         <div class="text-info small" data-i18n="attendanceTotalRaids">กิจกรรมทั้งหมด</div>
-                        <div class="fs-3 fw-bold" id="attendanceTotalRaidsCount">0</div>
+                        <div class="fs-3 fw-bold" id="attendanceTotalRaidsCount" class="attendance-stat-value fs-3 fw-bold">0</div>
                     </div>
                 </div>
                 <div class="col-md-4">
                     <div class="card p-3 attendance-stat h-100">
                         <div class="text-success small" data-i18n="attendanceUniqueMembers">สมาชิกที่เข้าร่วม</div>
-                        <div class="fs-3 fw-bold" id="attendanceUniqueMembersCount">0</div>
+                        <div class="fs-3 fw-bold" id="attendanceUniqueMembersCount" class="attendance-stat-value fs-3 fw-bold">0</div>
                     </div>
                 </div>
                 <div class="col-md-4">
                     <div class="card p-3 attendance-stat h-100">
                         <div class="text-warning small" data-i18n="attendanceTotalCheckins">เช็คชื่อรวม</div>
-                        <div class="fs-3 fw-bold" id="attendanceTotalCheckinsCount">0</div>
+                        <div class="fs-3 fw-bold" id="attendanceTotalCheckinsCount" class="attendance-stat-value fs-3 fw-bold">0</div>
                     </div>
                 </div>
             </div>
@@ -354,7 +356,11 @@
                 </table>
             </div>
 
-            <h5 class="text-info" data-i18n="attendanceHistory">ประวัติย้อนหลัง</h5>
+            <div class="d-flex align-items-center justify-content-between gap-2 mt-3 mb-2">
+                <h5 class="text-info mb-0" data-i18n="attendanceHistory">ประวัติย้อนหลัง</h5>
+                <button id="attendanceHistoryCollapseBtn" type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendanceHistoryPanel()">▼ เปิด</button>
+            </div>
+            <div id="attendanceHistoryPanelContent" style="display:none;">
             <div class="table-responsive mb-4">
                 <table class="table table-dark table-hover align-middle attendance-table mb-0">
                     <thead><tr>
@@ -367,6 +373,8 @@
                     </tr></thead>
                     <tbody id="attendanceHistoryBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>
                 </table>
+            </div>
+
             </div>
 
             <h5 class="text-warning" data-i18n="attendanceMonthly">📊 รายงานประจำเดือน</h5>
@@ -403,6 +411,42 @@
                     <tbody id="attendanceMemberMonthlyBody"><tr><td colspan="5" class="text-center text-muted">-</td></tr></tbody>
                 </table>
             </div>
+            </div>
+
+            <!-- 👤 Individual Attendance Detail -->
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-4 mb-2">
+                <div class="d-flex align-items-center gap-2">
+                    <h5 class="text-info mb-0" data-i18n="attendanceIndividual">👤 ข้อมูลการเข้าร่วมรายบุคคล</h5>
+                    <button id="attendanceIndividualCollapseBtn" type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendanceIndividualPanel()">▼ เปิด</button>
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    <select id="attendanceIndividualMemberSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:220px;">
+                        <option value="" data-i18n="attendanceSelectMember">เลือกสมาชิก</option>
+                    </select>
+                    <select id="attendanceIndividualMonthSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:160px;">
+                        <option value="all" data-i18n="attendanceAllMonths">ทุกเดือน</option>
+                    </select>
+                </div>
+            </div>
+            <div id="attendanceIndividualPanelContent" style="display:none;">
+                <div class="row g-3 mb-3">
+                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualName">สมาชิก</div><div class="fw-bold text-white" id="attendanceIndividualNameValue">-</div></div></div>
+                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualCheckins">เช็คชื่อ</div><div class="attendance-stat-value fs-4 fw-bold" id="attendanceIndividualCheckinsValue">0</div></div></div>
+                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualRaids">กิจกรรม</div><div class="attendance-stat-value fs-4 fw-bold" id="attendanceIndividualRaidsValue">0</div></div></div>
+                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualLast">เช็คชื่อล่าสุด</div><div class="fw-bold text-white" id="attendanceIndividualLastValue">-</div></div></div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-dark table-hover align-middle attendance-table mb-0">
+                        <thead><tr>
+                            <th data-i18n="attendanceIndividualDate">วันที่</th>
+                            <th data-i18n="attendanceIndividualBoss">บอส</th>
+                            <th data-i18n="attendanceIndividualAttack">เวลาโจมตี</th>
+                            <th data-i18n="attendanceIndividualCheckedAt">เวลาที่เช็คชื่อ</th>
+                            <th data-i18n="attendanceIndividualStatus">สถานะ</th>
+                        </tr></thead>
+                        <tbody id="attendanceIndividualBody"><tr><td colspan="5" class="text-center text-muted">-</td></tr></tbody>
+                    </table>
+                </div>
             </div>
             </div>
         </div>
@@ -656,7 +700,7 @@
                 attendanceSubtitle: "เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord",
                 attendanceRealtime: "🟢 Real-time",
                 attendanceTotalRaids: "กิจกรรมทั้งหมด", attendanceUniqueMembers: "สมาชิกที่เข้าร่วม", attendanceTotalCheckins: "เช็คชื่อรวม",
-                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน", attendanceMemberMonthly: "👤 สรุปรายสมาชิกสะสมรายเดือน", attendanceAllMonths: "ทุกเดือน", attendanceMemberName: "สมาชิก", attendanceMemberCount: "จำนวนเข้าร่วม", attendanceMemberRaids: "จำนวนกิจกรรม", attendanceLastCheckin: "เช็คชื่อล่าสุด",
+                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน", attendanceMemberMonthly: "👤 สรุปรายสมาชิกสะสมรายเดือน", attendanceAllMonths: "ทุกเดือน", attendanceMemberName: "สมาชิก", attendanceMemberCount: "จำนวนเข้าร่วม", attendanceMemberRaids: "จำนวนกิจกรรม", attendanceLastCheckin: "เช็คชื่อล่าสุด", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ",
                 attendanceBoss: "บอส", attendanceDate: "วันที่", attendanceAttackTime: "เวลาโจมตี", attendanceOpenClose: "เปิด–ปิด",
                 attendanceCount: "ผู้เข้าร่วม", attendanceCreatedBy: "สร้างโดย", attendanceStatus: "สถานะ", attendanceMonth: "เดือน",
                 attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ", attendanceCollapseOpen: "▼ เปิด", attendanceCollapseClose: "▲ ปิด",
@@ -766,7 +810,7 @@
                 attendanceSubtitle: "Real-time boss raid check-in from Discord",
                 attendanceRealtime: "🟢 Realtime",
                 attendanceTotalRaids: "Total Raids", attendanceUniqueMembers: "Unique Members", attendanceTotalCheckins: "Total Check-ins",
-                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports", attendanceMemberMonthly: "👤 Monthly Member Totals", attendanceAllMonths: "All months", attendanceMemberName: "Member", attendanceMemberCount: "Check-ins", attendanceMemberRaids: "Raids", attendanceLastCheckin: "Last Check-in",
+                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports", attendanceMemberMonthly: "👤 Monthly Member Totals", attendanceAllMonths: "All months", attendanceMemberName: "Member", attendanceMemberCount: "Check-ins", attendanceMemberRaids: "Raids", attendanceLastCheckin: "Last Check-in", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ",
                 attendanceBoss: "Boss", attendanceDate: "Date", attendanceAttackTime: "Attack Time", attendanceOpenClose: "Open–Close",
                 attendanceCount: "Participants", attendanceCreatedBy: "Created By", attendanceStatus: "Status", attendanceMonth: "Month",
                 attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins", attendanceCollapseOpen: "▼ Open", attendanceCollapseClose: "▲ Close",
@@ -876,7 +920,7 @@
                 attendanceSubtitle: "Discord에서 실시간 보스 레이드 출석 확인",
                 attendanceRealtime: "🟢 실시간",
                 attendanceTotalRaids: "전체 활동", attendanceUniqueMembers: "참여 회원", attendanceTotalCheckins: "총 출석",
-                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서", attendanceMemberMonthly: "👤 월별 회원 누적", attendanceAllMonths: "전체 월", attendanceMemberName: "회원", attendanceMemberCount: "참여 횟수", attendanceMemberRaids: "활동 수", attendanceLastCheckin: "최근 출석",
+                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서", attendanceMemberMonthly: "👤 월별 회원 누적", attendanceAllMonths: "전체 월", attendanceMemberName: "회원", attendanceMemberCount: "참여 횟수", attendanceMemberRaids: "활동 수", attendanceLastCheckin: "최근 출석", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ",
                 attendanceBoss: "보스", attendanceDate: "날짜", attendanceAttackTime: "공격 시간", attendanceOpenClose: "시작–마감",
                 attendanceCount: "참여자", attendanceCreatedBy: "생성자", attendanceStatus: "상태", attendanceMonth: "월",
                 attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석", attendanceCollapseOpen: "▼ 열기", attendanceCollapseClose: "▲ 닫기",
@@ -1360,6 +1404,85 @@
             adminRefreshTimer=setInterval(refresh,15000);
         }
 
+        function refreshAttendanceIndividualSelectors() {
+            const members = window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ || {};
+            const memberSelect = document.getElementById('attendanceIndividualMemberSelect');
+            const monthSelect = document.getElementById('attendanceIndividualMonthSelect');
+            if (memberSelect) {
+                const oldMember = memberSelect.value || '';
+                const rows = Object.values(members).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+                memberSelect.innerHTML = `<option value="">${escapeHtml(TRANSLATIONS[currentLang].attendanceSelectMember || 'Select member')}</option>` + rows.map(r => `<option value="${escapeHtml(r.uid)}">${escapeHtml(r.name)}</option>`).join('');
+                if (oldMember && members[oldMember]) memberSelect.value = oldMember;
+            }
+            if (monthSelect) {
+                const oldMonth = monthSelect.value || 'all';
+                const months = new Set(['all']);
+                Object.values(members).forEach(m => (m.entries || []).forEach(e => { if (e.monthKey) months.add(e.monthKey); }));
+                const sorted = Array.from(months).filter(x=>x!=='all').sort().reverse();
+                monthSelect.innerHTML = `<option value="all">${escapeHtml(TRANSLATIONS[currentLang].attendanceAllMonths || 'All months')}</option>` + sorted.map(m => `<option value="${m}">${m}</option>`).join('');
+                monthSelect.value = (oldMonth === 'all' || sorted.includes(oldMonth)) ? oldMonth : 'all';
+            }
+        }
+
+        function renderAttendanceIndividual() {
+            const members = window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ || {};
+            const memberSelect = document.getElementById('attendanceIndividualMemberSelect');
+            const monthSelect = document.getElementById('attendanceIndividualMonthSelect');
+            const body = document.getElementById('attendanceIndividualBody');
+            const nameEl = document.getElementById('attendanceIndividualNameValue');
+            const checksEl = document.getElementById('attendanceIndividualCheckinsValue');
+            const raidsEl = document.getElementById('attendanceIndividualRaidsValue');
+            const lastEl = document.getElementById('attendanceIndividualLastValue');
+            if (!body || !nameEl || !checksEl || !raidsEl || !lastEl) return;
+            const uid = memberSelect ? String(memberSelect.value || '') : '';
+            const month = monthSelect ? String(monthSelect.value || 'all') : 'all';
+            const member = uid ? members[uid] : null;
+            if (!member) {
+                nameEl.textContent = '-'; checksEl.textContent='0'; raidsEl.textContent='0'; lastEl.textContent='-';
+                body.innerHTML='<tr><td colspan="5" class="text-center text-muted">-</td></tr>';
+                return;
+            }
+            const entries = (member.entries || []).filter(e => month === 'all' || e.monthKey === month).slice().sort((a,b)=>String(b.checkedAt).localeCompare(String(a.checkedAt)));
+            nameEl.textContent = member.name || uid;
+            checksEl.textContent = String(entries.length);
+            raidsEl.textContent = String(new Set(entries.map(e=>e.activityId || `${e.activityDate}|${e.bossName}|${e.attackTime}`)).size);
+            lastEl.textContent = entries[0] && entries[0].checkedAt ? new Date(entries[0].checkedAt).toLocaleString('th-TH',{hour12:false}) : '-';
+            body.innerHTML = entries.length ? entries.map(e => {
+                const checkedAt = e.checkedAt ? new Date(e.checkedAt).toLocaleString('th-TH',{hour12:false}) : '-';
+                const status = e.status === 'checked_in' ? (currentLang==='en'?'Checked in':currentLang==='ko'?'출석':'เช็คชื่อแล้ว') : escapeHtml(e.status || '-');
+                return `<tr><td>${escapeHtml(e.activityDate)}</td><td class="fw-bold text-warning">${escapeHtml(e.bossName)}</td><td>${escapeHtml(e.attackTime)}</td><td>${escapeHtml(checkedAt)}</td><td>${status}</td></tr>`;
+            }).join('') : '<tr><td colspan="5" class="text-center text-muted">-</td></tr>';
+        }
+
+        document.getElementById('attendanceIndividualMemberSelect')?.addEventListener('change', renderAttendanceIndividual);
+        document.getElementById('attendanceIndividualMonthSelect')?.addEventListener('change', renderAttendanceIndividual);
+
+        function toggleAttendanceHistoryPanel(forceOpen=null) {
+            const content = document.getElementById('attendanceHistoryPanelContent');
+            const btn = document.getElementById('attendanceHistoryCollapseBtn');
+            if (!content) return;
+            const shouldOpen = forceOpen === null ? content.style.display !== 'block' : !!forceOpen;
+            content.style.display = shouldOpen ? 'block' : 'none';
+            if (btn) {
+                const key = shouldOpen ? 'attendanceCollapseClose' : 'attendanceCollapseOpen';
+                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? '▲ ปิด' : '▼ เปิด');
+            }
+            localStorage.setItem('attendance_history_open', shouldOpen ? '1' : '0');
+        }
+
+        function toggleAttendanceIndividualPanel(forceOpen=null) {
+            const content = document.getElementById('attendanceIndividualPanelContent');
+            const btn = document.getElementById('attendanceIndividualCollapseBtn');
+            if (!content) return;
+            const shouldOpen = forceOpen === null ? content.style.display !== 'block' : !!forceOpen;
+            content.style.display = shouldOpen ? 'block' : 'none';
+            if (btn) {
+                const key = shouldOpen ? 'attendanceCollapseClose' : 'attendanceCollapseOpen';
+                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? '▲ ปิด' : '▼ เปิด');
+            }
+            localStorage.setItem('attendance_individual_open', shouldOpen ? '1' : '0');
+        }
+
         function escapeHtml(value) {
             return String(value ?? '').replace(/[&<>"']/g, ch => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
@@ -1476,6 +1599,10 @@
                 };
             });
             renderTable();
+            toggleAttendancePanel(localStorage.getItem('attendance_panel_open') === '1');
+            toggleAttendanceHistoryPanel(localStorage.getItem('attendance_history_open') === '1');
+            toggleAttendanceMemberMonthlyPanel(localStorage.getItem('attendance_member_monthly_open') === '1');
+            toggleAttendanceIndividualPanel(localStorage.getItem('attendance_individual_open') === '1');
         });
 
         // --- UI & Control Functions ---
@@ -1494,6 +1621,7 @@
             try {
                 const all = [];
                 const monthlyMembers = {};
+                const individualMembers = {};
                 const nowMs = Date.now();
                 const unique = new Set();
                 let totalCheckins = 0;
@@ -1517,6 +1645,17 @@
                             row.raids += 1;
                             const checkedAt=String(p.checked_in_at||'');
                             if(checkedAt && (!row.lastCheckin || checkedAt > row.lastCheckin)) row.lastCheckin=checkedAt;
+
+                            const individual = individualMembers[uid] || (individualMembers[uid]={uid, name:p.display_name||p.username||uid, entries:[]});
+                            individual.entries.push({
+                                monthKey,
+                                bossName:String(a.boss_name||'-'),
+                                activityDate:String(a.activity_date||'-'),
+                                attackTime:String(a.attack_time||'-'),
+                                checkedAt,
+                                status:String(p.status||'-'),
+                                activityId:String(activityId||'')
+                            });
                         });
                     });
                 });
@@ -1554,8 +1693,13 @@
                     monthSelect.value = (oldValue === 'all' || months.includes(oldValue)) ? oldValue : 'all';
                 }
                 window.__SKYNET_ATTENDANCE_MONTHLY_MEMBERS__ = monthlyMembers;
+                window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ = individualMembers;
                 renderAttendanceMemberMonthly(monthSelect ? monthSelect.value : 'all');
+                refreshAttendanceIndividualSelectors();
+                renderAttendanceIndividual();
                 toggleAttendanceMemberMonthlyPanel(localStorage.getItem('attendance_member_monthly_open') === '1');
+                toggleAttendanceHistoryPanel(localStorage.getItem('attendance_history_open') === '1');
+                toggleAttendanceIndividualPanel(localStorage.getItem('attendance_individual_open') === '1');
             } catch (e) { console.warn('[SKYNET] attendance dashboard render:', e); }
         }
 
