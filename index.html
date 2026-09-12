@@ -10,6 +10,7 @@
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-messaging-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
     <style>
@@ -951,6 +952,10 @@
         let currentLang = localStorage.getItem('app_lang') || 'th';
         let currentTz = localStorage.getItem('app_tz') || 'auto';
         let isNotifyEnabled = localStorage.getItem('notify_enabled') === 'true';
+        let webPushEnabled = localStorage.getItem('web_push_enabled') === 'true';
+        let webPushMessaging = null;
+        let webPushRegistration = null;
+        let webPushToken = localStorage.getItem('web_push_token') || '';
         let activeBosses = {};
 
         const BOSS_DATABASE = {
@@ -1119,6 +1124,7 @@
                     document.getElementById('mainDashboard').style.display='block';
                     document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
                     startAttendanceRealtimeListener();
+                    syncExistingWebPushSubscription().catch(() => {});
                     const adminPanel=document.getElementById('adminPanel');
                     const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
                     const adminMenu=document.getElementById('adminPanelMenuBtn');
@@ -1252,6 +1258,7 @@
                 show('4/4 เข้าสู่ Dashboard สำเร็จ');
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('mainDashboard').style.display = 'block';
+                syncExistingWebPushSubscription().catch(() => {});
                 document.getElementById('userBadge').innerText = `👤 ${userData.username || cred.user.email}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
                 const adminPanel = document.getElementById('adminPanel');
                 const adminMenu = document.getElementById('adminPanelMenuBtn');
@@ -2030,44 +2037,158 @@
             }
         }
 
-        function toggleNotifications() {
+        function getPushApiOrigin() {
+            return window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+        }
+
+        async function ensureWebPushSubscription() {
+            if (!auth.currentUser) throw new Error('กรุณาเข้าสู่ระบบก่อนเปิด Push Notification');
+            if (!('serviceWorker' in navigator) || !('Notification' in window)) {
+                throw new Error('Browser นี้ไม่รองรับ Web Push Notification');
+            }
+            if (!firebase.messaging) throw new Error('Firebase Messaging SDK ยังไม่พร้อม');
+
+            const apiOrigin = getPushApiOrigin();
+            const keyResponse = await fetch(`${apiOrigin}/api/push/public-key`, { cache: 'no-store' });
+            const keyPayload = await keyResponse.json().catch(() => ({}));
+            if (!keyResponse.ok || !keyPayload.publicKey) {
+                throw new Error(keyPayload.error || 'ยังไม่ได้ตั้งค่า VAPID public key บน Render');
+            }
+
+            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js', window.location.origin).toString();
+            webPushRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/SKYNET/' });
+            await navigator.serviceWorker.ready;
+
+            webPushMessaging = webPushMessaging || firebase.messaging();
+            const token = await webPushMessaging.getToken({
+                vapidKey: keyPayload.publicKey,
+                serviceWorkerRegistration: webPushRegistration
+            });
+            if (!token) throw new Error('FCM ไม่คืน registration token');
+
+            const idToken = await auth.currentUser.getIdToken(true);
+            const response = await fetch(`${apiOrigin}/api/push/subscribe`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${idToken}`
+                },
+                body: JSON.stringify({ token })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || `Push registration HTTP ${response.status}`);
+            webPushToken = token;
+            webPushEnabled = true;
+            localStorage.setItem('web_push_token', token);
+            localStorage.setItem('web_push_enabled', 'true');
+            return token;
+        }
+
+        async function disableWebPushSubscription() {
+            try {
+                if (!auth.currentUser) return;
+                const token = webPushToken || localStorage.getItem('web_push_token') || '';
+                if (!token) return;
+                const idToken = await auth.currentUser.getIdToken(false);
+                await fetch(`${getPushApiOrigin()}/api/push/unsubscribe`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${idToken}`
+                    },
+                    body: JSON.stringify({ token })
+                });
+            } catch (err) {
+                console.warn('[SKYNET] Push unsubscribe failed:', err);
+            }
+            webPushToken = '';
+            webPushEnabled = false;
+            localStorage.removeItem('web_push_token');
+            localStorage.setItem('web_push_enabled', 'false');
+        }
+
+        async function syncExistingWebPushSubscription() {
+            if (!auth.currentUser || Notification.permission !== 'granted') return;
+            try {
+                await ensureWebPushSubscription();
+            } catch (err) {
+                console.warn('[SKYNET] Existing Web Push sync skipped:', err);
+            }
+        }
+
+        async function toggleNotifications() {
             const langData = TRANSLATIONS[currentLang];
-            
             if (isNotifyEnabled) {
                 isNotifyEnabled = false;
                 localStorage.setItem('notify_enabled', 'false');
                 updateNotifyButtonUI();
+                await disableWebPushSubscription();
                 return;
             }
 
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (audioCtx.state === 'suspended') {
-                audioCtx.resume();
-            }
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') await audioCtx.resume();
+                if (!('Notification' in window)) throw new Error(langData.noNotifySupport || 'Notifications are not supported');
 
-            if ("Notification" in window) {
-                Notification.requestPermission().then(permission => {
-                    if (permission === "granted") {
-                        isNotifyEnabled = true;
-                        localStorage.setItem('notify_enabled', 'true');
-                        updateNotifyButtonUI();
-                        playAlertSound('notice');
-                        new Notification(langData.notifyReadyTitle, { body: langData.notifyReadyBody });
-                    } else {
-                        alert(langData.grantNotifyPrompt);
-                    }
-                });
-            } else {
-                alert(langData.noNotifySupport);
+                const permission = Notification.permission === 'granted'
+                    ? 'granted'
+                    : await Notification.requestPermission();
+                if (permission !== 'granted') {
+                    alert(langData.grantNotifyPrompt);
+                    return;
+                }
+
+                isNotifyEnabled = true;
+                localStorage.setItem('notify_enabled', 'true');
+                updateNotifyButtonUI();
+                playAlertSound('notice');
+
+                try {
+                    await ensureWebPushSubscription();
+                } catch (pushErr) {
+                    webPushEnabled = false;
+                    localStorage.setItem('web_push_enabled', 'false');
+                    console.error('[SKYNET] Web Push registration failed:', pushErr);
+                    alert(`เปิดแจ้งเตือนหน้าเว็บแล้ว แต่ Push เบื้องหลังยังไม่พร้อม: ${pushErr.message || pushErr}`);
+                }
+
+                if (webPushRegistration && 'showNotification' in webPushRegistration) {
+                    await webPushRegistration.showNotification(langData.notifyReadyTitle, {
+                        body: webPushEnabled
+                            ? `${langData.notifyReadyBody} • Push พร้อมใช้งานแม้ปิด Chrome`
+                            : langData.notifyReadyBody,
+                        tag: 'skynet-notify-ready',
+                        data: { url: 'https://iahcatan.github.io/SKYNET/' }
+                    });
+                } else {
+                    new Notification(langData.notifyReadyTitle, { body: langData.notifyReadyBody });
+                }
+            } catch (err) {
+                console.error('[SKYNET] Notification setup failed:', err);
+                alert(err.message || err);
             }
         }
 
-        function sendBrowserNotification(title, body) {
+        async function sendBrowserNotification(title, body) {
             if (!isNotifyEnabled) return;
-            if ("Notification" in window && Notification.permission === "granted") {
-                new Notification(title, { body: body, requireInteraction: true });
+            try {
+                if (Notification.permission !== 'granted') return;
+                if (!webPushRegistration && 'serviceWorker' in navigator) {
+                    webPushRegistration = await navigator.serviceWorker.getRegistration('/SKYNET/');
+                }
+                if (webPushRegistration && 'showNotification' in webPushRegistration) {
+                    await webPushRegistration.showNotification(title, {
+                        body,
+                        requireInteraction: true,
+                        tag: `skynet-${Date.now()}`,
+                        data: { url: 'https://iahcatan.github.io/SKYNET/' }
+                    });
+                } else {
+                    new Notification(title, { body, requireInteraction: true });
+                }
+            } catch (err) {
+                console.warn('[SKYNET] Browser notification failed:', err);
             }
         }
 
