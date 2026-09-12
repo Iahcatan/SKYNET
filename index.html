@@ -2049,14 +2049,24 @@
             if (!firebase.messaging) throw new Error('Firebase Messaging SDK ยังไม่พร้อม');
 
             const apiOrigin = getPushApiOrigin();
-            const keyResponse = await fetch(`${apiOrigin}/api/push/public-key`, { cache: 'no-store' });
+            const [keyResponse, diagResponse] = await Promise.all([
+                fetch(`${apiOrigin}/api/push/public-key`, { cache: 'no-store' }),
+                fetch(`${apiOrigin}/api/push/diagnostics`, { cache: 'no-store' }).catch(() => null)
+            ]);
             const keyPayload = await keyResponse.json().catch(() => ({}));
+            const diagPayload = diagResponse ? await diagResponse.json().catch(() => ({})) : {};
             if (!keyResponse.ok || !keyPayload.publicKey) {
-                throw new Error(keyPayload.error || 'ยังไม่ได้ตั้งค่า VAPID public key บน Render');
+                const reason = diagPayload.vapidConfigured === false
+                    ? 'Render ยังไม่ได้ตั้งค่า WEB_PUSH_VAPID_PUBLIC_KEY'
+                    : (keyPayload.error || `โหลด VAPID public key ไม่สำเร็จ (HTTP ${keyResponse.status})`);
+                throw new Error(reason);
+            }
+            if (diagPayload.vapidLength && (diagPayload.vapidLength < 80 || diagPayload.vapidLength > 120)) {
+                throw new Error(`VAPID public key มีความยาวผิดปกติ (${diagPayload.vapidLength} ตัวอักษร) — ให้ใช้ Web Push public key จาก Firebase Cloud Messaging เท่านั้น`);
             }
 
-            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js', window.location.origin).toString();
-            webPushRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/SKYNET/' });
+            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js?v=v102', window.location.origin).toString();
+            webPushRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/SKYNET/', updateViaCache: 'none' });
             await navigator.serviceWorker.ready;
 
             webPushMessaging = webPushMessaging || firebase.messaging();
@@ -2064,7 +2074,7 @@
                 vapidKey: keyPayload.publicKey,
                 serviceWorkerRegistration: webPushRegistration
             });
-            if (!token) throw new Error('FCM ไม่คืน registration token');
+            if (!token) throw new Error('FCM ไม่คืน registration token — ตรวจ Notification permission, FCM Registration API และ service worker');
 
             const idToken = await auth.currentUser.getIdToken(true);
             const response = await fetch(`${apiOrigin}/api/push/subscribe`, {
@@ -2150,7 +2160,8 @@
                     webPushEnabled = false;
                     localStorage.setItem('web_push_enabled', 'false');
                     console.error('[SKYNET] Web Push registration failed:', pushErr);
-                    alert(`เปิดแจ้งเตือนหน้าเว็บแล้ว แต่ Push เบื้องหลังยังไม่พร้อม: ${pushErr.message || pushErr}`);
+                    const detail = pushErr && pushErr.message ? pushErr.message : String(pushErr);
+                    alert(`เปิดแจ้งเตือนหน้าเว็บแล้ว แต่ Push เบื้องหลังยังไม่พร้อม\n\n${detail}\n\nให้ตรวจ WEB_PUSH_VAPID_PUBLIC_KEY และ Firebase Cloud Messaging > Web Push certificates บน Firebase ก่อนลองใหม่`);
                 }
 
                 if (webPushRegistration && 'showNotification' in webPushRegistration) {
