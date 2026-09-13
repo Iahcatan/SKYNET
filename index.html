@@ -2285,8 +2285,26 @@
                 });
                 const result = await response.json().catch(() => ({}));
                 if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
-                document.getElementById('bossForm').reset();
-                document.getElementById('noticeMinutes').value = 5;
+                // V106: Explicitly clear every boss-record input after the server
+                // confirms the Firebase save. Do not rely only on form.reset(), because
+                // browser/autofill state can restore values in these text inputs.
+                const bossForm = document.getElementById('bossForm');
+                if (bossForm) bossForm.reset();
+                const bossSelectEl = document.getElementById('bossSelect');
+                const killDateEl = document.getElementById('killDate');
+                const killTimeEl = document.getElementById('killTime');
+                const spTimeEl = document.getElementById('spTime');
+                const noticeMinutesEl = document.getElementById('noticeMinutes');
+                if (bossSelectEl) { bossSelectEl.value = ''; bossSelectEl.defaultValue = ''; }
+                if (killDateEl) { killDateEl.value = ''; killDateEl.defaultValue = ''; }
+                if (killTimeEl) { killTimeEl.value = ''; killTimeEl.defaultValue = ''; }
+                if (spTimeEl) { spTimeEl.value = ''; spTimeEl.defaultValue = ''; }
+                if (noticeMinutesEl) { noticeMinutesEl.value = '5'; noticeMinutesEl.defaultValue = '5'; }
+                if (bossSelectEl) bossSelectEl.dispatchEvent(new Event('input', {bubbles:true}));
+                if (killDateEl) killDateEl.dispatchEvent(new Event('input', {bubbles:true}));
+                if (killTimeEl) killTimeEl.dispatchEvent(new Event('input', {bubbles:true}));
+                if (spTimeEl) spTimeEl.dispatchEvent(new Event('input', {bubbles:true}));
+                if (noticeMinutesEl) noticeMinutesEl.dispatchEvent(new Event('input', {bubbles:true}));
                 if (result.bossName) {
                     activeBosses[result.bossName] = {
                         spawnTimeMs: Number(result.spawnTimeMs), killTimeMs: Number(result.killTimeMs),
