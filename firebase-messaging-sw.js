@@ -1,4 +1,4 @@
-// SKYNET 2.0 FCM + iPhone Web Push Service Worker — V109
+// SKYNET 2.0 FCM + iPhone Web Push Service Worker — V110
 // Firebase Messaging must be initialized in the service worker for background/closed-page handling.
 
 importScripts('https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js');

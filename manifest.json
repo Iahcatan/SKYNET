@@ -1,0 +1,18 @@
+{
+  "id": "/SKYNET/",
+  "name": "SKYNET 2.0 Boss Timer",
+  "short_name": "SKYNET",
+  "start_url": "/SKYNET/",
+  "scope": "/SKYNET/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/SKYNET/favicon.ico",
+      "sizes": "any",
+      "type": "image/x-icon",
+      "purpose": "any maskable"
+    }
+  ]
+}

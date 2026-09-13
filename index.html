@@ -6,6 +6,8 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
+    <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
@@ -2065,7 +2067,28 @@
         }
 
         function isIOSStandaloneWebApp() {
-            return Boolean(window.navigator.standalone) || window.matchMedia('(display-mode: standalone)').matches;
+            try {
+                const standaloneMeta = Boolean(window.navigator.standalone);
+                const standaloneMode = window.matchMedia('(display-mode: standalone)').matches;
+                const fullscreenMode = window.matchMedia('(display-mode: fullscreen)').matches;
+                const minimalUiMode = window.matchMedia('(display-mode: minimal-ui)').matches;
+                return standaloneMeta || standaloneMode || fullscreenMode || minimalUiMode;
+            } catch (err) {
+                return Boolean(window.navigator.standalone);
+            }
+        }
+
+        function getIOSWebPushDiagnostics() {
+            return {
+                standaloneMeta: Boolean(window.navigator.standalone),
+                standaloneMode: (() => { try { return window.matchMedia('(display-mode: standalone)').matches; } catch (_) { return false; } })(),
+                fullscreenMode: (() => { try { return window.matchMedia('(display-mode: fullscreen)').matches; } catch (_) { return false; } })(),
+                notification: 'Notification' in window,
+                pushManager: 'PushManager' in window,
+                serviceWorker: 'serviceWorker' in navigator,
+                secureContext: window.isSecureContext === true,
+                userAgent: navigator.userAgent
+            };
         }
 
         function base64UrlToUint8Array(base64UrlData) {
@@ -2077,7 +2100,7 @@
 
         async function registerDashboardServiceWorker() {
             if (!('serviceWorker' in navigator)) throw new Error('Browser นี้ไม่รองรับ Service Worker');
-            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js?v=v109', window.location.origin).toString();
+            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js?v=v110', window.location.origin).toString();
             webPushRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/SKYNET/', updateViaCache: 'none' });
             await navigator.serviceWorker.ready;
             return webPushRegistration;
@@ -2101,14 +2124,16 @@
         async function ensureIOSWebPushSubscription() {
             if (!auth.currentUser) throw new Error('กรุณาเข้าสู่ระบบก่อนเปิด Push Notification');
             if (!isIOSDevice()) throw new Error('This function is intended for iPhone/iPad Web Push');
-            if (!('serviceWorker' in navigator) || !('Notification' in window) || !('PushManager' in window)) {
-                throw new Error('iPhone/iPad เครื่องนี้ไม่รองรับ Web Push');
+            const capability = getIOSWebPushDiagnostics();
+            console.info('[SKYNET iPhone Push] capability:', capability);
+            if (!capability.serviceWorker || !capability.notification || !capability.pushManager || !capability.secureContext) {
+                throw new Error('iPhone/iPad เครื่องนี้ยังไม่พร้อมสำหรับ Web Push: ต้องใช้ HTTPS + Service Worker + Notifications + Push API');
             }
             if (!isIOSStandaloneWebApp()) {
                 throw new Error(currentLang === 'en'
                     ? 'On iPhone/iPad, first choose “Add to Home Screen” in Safari, open the SKYNET app from Home Screen, then enable Push Notification there.'
                     : currentLang === 'ko'
-                        ? 'iPhone/iPad에서는 먼저 Safari에서 “홈 화면에 추가”한 뒤 홈 화면의 SKYNET 앱을 열고 Push Notification을เปิด하세요.'
+                        ? 'iPhone/iPad에서는 먼저 Safari에서 “홈 화면에 추가”한 뒤 홈 화면의 SKYNET 앱을 열고 Push Notification을 켜세요.'
                         : 'บน iPhone/iPad ต้องกด “เพิ่มไปยังหน้าจอโฮม” ใน Safari ก่อน แล้วเปิด SKYNET จากไอคอนบนหน้าจอโฮม จากนั้นจึงเปิด Push Notification');
             }
 
@@ -2117,18 +2142,26 @@
                 const keyResponse = await fetch(`${apiOrigin}/api/push/ios-public-key`, { cache: 'no-store' });
                 const keyPayload = await keyResponse.json().catch(() => ({}));
                 if (!keyResponse.ok || !keyPayload.publicKey) {
-                    throw new Error(keyPayload.error || 'Render ยังไม่ได้ตั้งค่า WEB_PUSH_IOS_VAPID_PRIVATE_KEY');
+                    throw new Error(keyPayload.error || `Render iPhone VAPID public key HTTP ${keyResponse.status}`);
                 }
                 window._skynetIosPushPublicKey = keyPayload.publicKey;
+                console.info('[SKYNET iPhone Push] VAPID public key loaded');
             }
 
             const registration = await registerDashboardServiceWorker();
+            console.info('[SKYNET iPhone Push] service worker ready:', registration.scope);
             let subscription = await registration.pushManager.getSubscription();
+            console.info('[SKYNET iPhone Push] existing subscription:', Boolean(subscription));
             if (!subscription) {
-                subscription = await registration.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: base64UrlToUint8Array(window._skynetIosPushPublicKey)
-                });
+                try {
+                    subscription = await registration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: base64UrlToUint8Array(window._skynetIosPushPublicKey)
+                    });
+                } catch (subscribeErr) {
+                    console.error('[SKYNET iPhone Push] PushManager.subscribe failed:', subscribeErr);
+                    throw new Error(`iPhone Push subscribe ไม่สำเร็จ: ${subscribeErr && subscribeErr.message ? subscribeErr.message : subscribeErr}`);
+                }
             }
 
             const idToken = await auth.currentUser.getIdToken(true);
@@ -2144,11 +2177,14 @@
                 })
             });
             const result = await response.json().catch(() => ({}));
-            if (!response.ok || !result.success) throw new Error(result.error || `iPhone Push registration HTTP ${response.status}`);
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || `iPhone Push registration HTTP ${response.status}`);
+            }
             webPushEnabled = true;
             localStorage.setItem('web_push_enabled', 'true');
             localStorage.setItem('web_push_mode', 'ios-webpush');
             localStorage.setItem('web_push_endpoint', subscription.endpoint);
+            console.info('[SKYNET iPhone Push] server registration successful:', result);
             return subscription;
         }
 
@@ -2313,44 +2349,68 @@
             }
 
             try {
-                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                if (audioCtx.state === 'suspended') await audioCtx.resume();
+                const iosMode = isIOSDevice();
                 if (!('Notification' in window)) throw new Error(langData.noNotifySupport || 'Notifications are not supported');
 
-                // On iPhone/iPad, Web Push must be enabled from the Home Screen web app.
-                // Check this before requesting notification permission so Safari does not receive a meaningless prompt in a normal tab.
-                if (isIOSDevice() && !isIOSStandaloneWebApp()) {
-                    throw new Error(currentLang === 'en'
-                        ? 'Please add SKYNET to the Home Screen in Safari, open it from the Home Screen, and then enable Push Notification.'
-                        : currentLang === 'ko'
-                            ? 'Safari에서 SKYNET을 홈 화면에 추가한 뒤 홈 화면의 SKYNET 앱을 열고 Push Notification을 켜주세요.'
-                            : 'กรุณาเพิ่ม SKYNET ไปยังหน้าจอโฮมใน Safari แล้วเปิด SKYNET จากหน้าจอโฮม ก่อนเปิด Push Notification');
-                }
-
-                const permission = Notification.permission === 'granted'
-                    ? 'granted'
-                    : await Notification.requestPermission();
-                if (permission !== 'granted') {
-                    alert(langData.grantNotifyPrompt);
-                    return;
-                }
-
-                isNotifyEnabled = true;
-                localStorage.setItem('notify_enabled', 'true');
-                updateNotifyButtonUI();
-                playAlertSound('notice');
-
-                try {
-                    await ensureWebPushSubscription();
-                } catch (pushErr) {
-                    webPushEnabled = false;
-                    localStorage.setItem('web_push_enabled', 'false');
-                    console.error('[SKYNET] Web Push registration failed:', pushErr);
-                    const detail = pushErr && pushErr.message ? pushErr.message : String(pushErr);
-                    const prompt = isIOSDevice()
-                        ? `${detail}\n\nตรวจ Render: WEB_PUSH_IOS_VAPID_PRIVATE_KEY และลองเปิด Push ใหม่จาก SKYNET ที่อยู่บน Home Screen`
-                        : `${detail}\n\nให้ตรวจ WEB_PUSH_VAPID_PUBLIC_KEY และ Firebase Cloud Messaging > Web Push certificates บน Firebase ก่อนลองใหม่`;
-                    alert(`เปิดแจ้งเตือนหน้าเว็บแล้ว แต่ Push เบื้องหลังยังไม่พร้อม\n\n${prompt}`);
+                // On iPhone/iPad, keep permission + PushManager.subscribe in the notification button flow.
+                // Do not initialize/resume AudioContext before the Web Push subscription attempt.
+                if (iosMode) {
+                    if (!isIOSStandaloneWebApp()) {
+                        throw new Error(currentLang === 'en'
+                            ? 'Please add SKYNET to the Home Screen in Safari, open it from the Home Screen, and then enable Push Notification.'
+                            : currentLang === 'ko'
+                                ? 'Safari에서 SKYNET을 홈 화면에 추가한 뒤 홈 화면의 SKYNET 앱을 열고 Push Notification을 켜주세요.'
+                                : 'กรุณาเพิ่ม SKYNET ไปยังหน้าจอโฮมใน Safari แล้วเปิด SKYNET จากหน้าจอโฮม ก่อนเปิด Push Notification');
+                    }
+                    const permission = Notification.permission === 'granted'
+                        ? 'granted'
+                        : await Notification.requestPermission();
+                    if (permission !== 'granted') {
+                        alert(langData.grantNotifyPrompt);
+                        return;
+                    }
+                    isNotifyEnabled = true;
+                    localStorage.setItem('notify_enabled', 'true');
+                    updateNotifyButtonUI();
+                    try {
+                        await ensureIOSWebPushSubscription();
+                    } catch (pushErr) {
+                        webPushEnabled = false;
+                        localStorage.setItem('web_push_enabled', 'false');
+                        console.error('[SKYNET iPhone Push] registration failed:', pushErr);
+                        const detail = pushErr && pushErr.message ? pushErr.message : String(pushErr);
+                        alert(`เปิดสิทธิ์แจ้งเตือนแล้ว แต่ iPhone Web Push ยังสมัครไม่สำเร็จ\n\n${detail}\n\nเปิด SKYNET จาก Home Screen และกดปุ่มแจ้งเตือนจากหน้านั้นอีกครั้ง`);
+                        return;
+                    }
+                    try {
+                        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                        if (audioCtx.state === 'suspended') await audioCtx.resume();
+                        playAlertSound('notice');
+                    } catch (_) {}
+                } else {
+                    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    if (audioCtx.state === 'suspended') await audioCtx.resume();
+                    const permission = Notification.permission === 'granted'
+                        ? 'granted'
+                        : await Notification.requestPermission();
+                    if (permission !== 'granted') {
+                        alert(langData.grantNotifyPrompt);
+                        return;
+                    }
+                    isNotifyEnabled = true;
+                    localStorage.setItem('notify_enabled', 'true');
+                    updateNotifyButtonUI();
+                    playAlertSound('notice');
+                    try {
+                        await ensureWebPushSubscription();
+                    } catch (pushErr) {
+                        webPushEnabled = false;
+                        localStorage.setItem('web_push_enabled', 'false');
+                        console.error('[SKYNET] Web Push registration failed:', pushErr);
+                        const detail = pushErr && pushErr.message ? pushErr.message : String(pushErr);
+                        const prompt = `${detail}\n\nให้ตรวจ WEB_PUSH_VAPID_PUBLIC_KEY และ Firebase Cloud Messaging > Web Push certificates บน Firebase ก่อนลองใหม่`;
+                        alert(`เปิดแจ้งเตือนหน้าเว็บแล้ว แต่ Push เบื้องหลังยังไม่พร้อม\n\n${prompt}`);
+                    }
                 }
 
                 if (webPushRegistration && 'showNotification' in webPushRegistration) {
