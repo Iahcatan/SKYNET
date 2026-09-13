@@ -134,7 +134,7 @@
                     <form id="registerForm" autocomplete="off">
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
-                            <input type="text" id="regUser" class="form-control" placeholder="ตั้งชื่อผู้ใช้" data-i18n-ph="phRegUser" required>
+                            <input type="text" id="regUser" class="form-control" minlength="1" placeholder="ตั้งชื่อผู้ใช้" data-i18n-ph="phRegUser" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
@@ -1167,7 +1167,7 @@
             const username=document.getElementById('regUser').value.trim();
             const password=document.getElementById('regPass').value;
             const regCode=document.getElementById('regCode').value.trim();
-            if(username.length<3 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}
+            if(username.length<1 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}
             if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
             if(regCode!==currentRegCode){alert(TRANSLATIONS[currentLang].errRegCodeInvalid);return;}
             try{
@@ -1981,6 +1981,18 @@
             renderTable();
         }
 
+        // V107: Resolve the IANA timezone used for typed boss times.
+        // 'auto' follows the browser/device timezone.
+        function getSelectedInputTimezone() {
+            if (currentTz && currentTz !== 'auto') return currentTz;
+            try {
+                const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                return detected || 'Asia/Bangkok';
+            } catch (_) {
+                return 'Asia/Bangkok';
+            }
+        }
+
         function updateNotifyButtonUI() {
             const notifyBtn = document.getElementById('notifyToggleBtn');
             const langData = TRANSLATIONS[currentLang];
@@ -2281,7 +2293,7 @@
                 const response = await fetch(`${apiOrigin}/api/record-boss`, {
                     method: 'POST',
                     headers: {'Content-Type':'application/json','Authorization':`Bearer ${idToken}`},
-                    body: JSON.stringify({ bossName: bossInput, killTime: timeInput, killDate: dateInput, noticeMinutes: noticeMin, spTimeMinutes: spTimeMin })
+                    body: JSON.stringify({ bossName: bossInput, killTime: timeInput, killDate: dateInput, noticeMinutes: noticeMin, spTimeMinutes: spTimeMin, timeZone: getSelectedInputTimezone() })
                 });
                 const result = await response.json().catch(() => ({}));
                 if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
