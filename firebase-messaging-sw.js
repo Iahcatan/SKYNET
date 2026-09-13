@@ -1,4 +1,4 @@
-// SKYNET 2.0 FCM Service Worker — V102
+// SKYNET 2.0 FCM + iPhone Web Push Service Worker — V109
 // Firebase Messaging must be initialized in the service worker for background/closed-page handling.
 
 importScripts('https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js');
@@ -22,6 +22,10 @@ function handleBackgroundPayload(payload) {
   });
 }
 
+function isStandardSkyNetWebPushPayload(payload) {
+  return !!(payload && payload.data && payload.data.skynetWebPush === '1');
+}
+
 const firebaseMessagingReady = fetch(FIREBASE_CONFIG_URL, { cache: 'no-store' })
   .then((response) => {
     if (!response.ok) throw new Error(`Firebase config HTTP ${response.status}`);
@@ -33,7 +37,10 @@ const firebaseMessagingReady = fetch(FIREBASE_CONFIG_URL, { cache: 'no-store' })
     }
     firebase.initializeApp(config);
     const messaging = firebase.messaging();
-    messaging.onBackgroundMessage((payload) => handleBackgroundPayload(payload));
+    messaging.onBackgroundMessage((payload) => {
+      if (isStandardSkyNetWebPushPayload(payload)) return;
+      return handleBackgroundPayload(payload);
+    });
     return true;
   })
   .catch((error) => {
@@ -45,13 +52,17 @@ const firebaseMessagingReady = fetch(FIREBASE_CONFIG_URL, { cache: 'no-store' })
 self.addEventListener('push', (event) => {
   if (!event.data) return;
   event.waitUntil((async () => {
-    const ready = await firebaseMessagingReady;
-    if (ready) return;
     try {
       const payload = event.data.json();
+      if (isStandardSkyNetWebPushPayload(payload)) {
+        await handleBackgroundPayload(payload);
+        return;
+      }
+      const ready = await firebaseMessagingReady;
+      if (ready) return;
       if (payload && (payload.notification || payload.data)) await handleBackgroundPayload(payload);
     } catch (error) {
-      console.warn('[SKYNET SW] Push fallback skipped:', error);
+      console.warn('[SKYNET SW] Push event handling skipped:', error);
     }
   })());
 });
