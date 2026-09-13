@@ -2068,7 +2068,7 @@
                 throw new Error(`VAPID public key มีความยาวผิดปกติ (${diagPayload.vapidLength} ตัวอักษร) — ให้ใช้ Web Push public key จาก Firebase Cloud Messaging เท่านั้น`);
             }
 
-            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js?v=v102', window.location.origin).toString();
+            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js?v=v104', window.location.origin).toString();
             webPushRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/SKYNET/', updateViaCache: 'none' });
             await navigator.serviceWorker.ready;
 
@@ -2086,7 +2086,7 @@
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${idToken}`
                 },
-                body: JSON.stringify({ token, language: (currentLang === 'en' ? 'en' : 'th') })
+                body: JSON.stringify({ token, language: (['th','en','ko'].includes(currentLang) ? currentLang : 'th') })
             });
             const result = await response.json().catch(() => ({}));
             if (!response.ok || !result.success) throw new Error(result.error || `Push registration HTTP ${response.status}`);
