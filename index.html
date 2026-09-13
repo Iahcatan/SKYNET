@@ -1970,6 +1970,9 @@
             if (langSelect) langSelect.value = lang;
 
             applyLanguage();
+            if (webPushEnabled && auth.currentUser && Notification.permission === 'granted') {
+                ensureWebPushSubscription().catch(err => console.warn('[SKYNET] Push language sync skipped:', err));
+            }
         }
 
         function changeTimezone(tz) {
@@ -2083,7 +2086,7 @@
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${idToken}`
                 },
-                body: JSON.stringify({ token })
+                body: JSON.stringify({ token, language: (currentLang === 'en' ? 'en' : 'th') })
             });
             const result = await response.json().catch(() => ({}));
             if (!response.ok || !result.success) throw new Error(result.error || `Push registration HTTP ${response.status}`);
