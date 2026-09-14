@@ -2388,6 +2388,56 @@
             }
         }
 
+        function setupForegroundFCMNotificationHandler() {
+            try {
+                if (isIOSDevice() || !firebase.messaging) return;
+                webPushMessaging = webPushMessaging || firebase.messaging();
+                if (window._skynetForegroundFcmHandlerReady) return;
+                window._skynetForegroundFcmHandlerReady = true;
+                webPushMessaging.onMessage((payload) => {
+                    try {
+                        const notification = (payload && payload.notification) || {};
+                        const data = (payload && payload.data) || {};
+                        const eventKey = String(data.eventKey || notification.tag || "");
+                        if (!eventKey) return;
+                        const dedupKey = `skynet_foreground_push_${eventKey}`;
+                        if (sessionStorage.getItem(dedupKey) === "1") return;
+                        sessionStorage.setItem(dedupKey, "1");
+                        const title = notification.title || data.title || "SKYNET 2.0";
+                        const body = notification.body || data.body || "มีการแจ้งเตือนจาก Boss Timer";
+                        if (Notification.permission !== "granted") return;
+                        if (!webPushRegistration && "serviceWorker" in navigator) {
+                            navigator.serviceWorker.getRegistration("/SKYNET/").then((registration) => {
+                                webPushRegistration = registration || webPushRegistration;
+                                if (webPushRegistration && "showNotification" in webPushRegistration) {
+                                    return webPushRegistration.showNotification(title, {
+                                        body,
+                                        tag: `skynet-${eventKey}`,
+                                        renotify: false,
+                                        data: { url: data.url || "https://iahcatan.github.io/SKYNET/" }
+                                    });
+                                }
+                                return new Notification(title, { body });
+                            }).catch((err) => console.warn("[SKYNET] Foreground FCM notification failed:", err));
+                        } else if (webPushRegistration && "showNotification" in webPushRegistration) {
+                            webPushRegistration.showNotification(title, {
+                                body,
+                                tag: `skynet-${eventKey}`,
+                                renotify: false,
+                                data: { url: data.url || "https://iahcatan.github.io/SKYNET/" }
+                            }).catch((err) => console.warn("[SKYNET] Foreground FCM notification failed:", err));
+                        } else {
+                            new Notification(title, { body });
+                        }
+                    } catch (err) {
+                        console.warn("[SKYNET] Foreground FCM handler failed:", err);
+                    }
+                });
+            } catch (err) {
+                console.warn("[SKYNET] Foreground FCM setup skipped:", err);
+            }
+        }
+
         async function toggleNotifications() {
             const langData = TRANSLATIONS[currentLang];
             if (isNotifyEnabled) {
@@ -2482,6 +2532,10 @@
 
         async function sendBrowserNotification(title, body) {
             if (!isNotifyEnabled) return;
+            // V113: prevent duplicate foreground notifications when server Push is enabled.
+            // FCM/iPhone Web Push owns the notification; local browser notification remains
+            // available only when Push is disabled.
+            if (webPushEnabled) return;
             try {
                 if (Notification.permission !== 'granted') return;
                 if (!webPushRegistration && 'serviceWorker' in navigator) {
@@ -2750,6 +2804,7 @@
             applyLanguage();
             toggleAttendancePanel(localStorage.getItem('attendance_panel_open') === '1');
             prepareIOSWebPushSupport().catch(() => {});
+            setupForegroundFCMNotificationHandler();
             checkAuthSession();
 
             setInterval(updateCountdowns, 1000);

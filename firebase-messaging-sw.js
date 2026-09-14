@@ -38,7 +38,10 @@ const firebaseMessagingReady = fetch(FIREBASE_CONFIG_URL, { cache: 'no-store' })
     firebase.initializeApp(config);
     const messaging = firebase.messaging();
     messaging.onBackgroundMessage((payload) => {
+      // V113: Firebase automatically displays notification payloads in background.
+      // Do not call showNotification again or Android/Chrome can receive duplicates.
       if (isStandardSkyNetWebPushPayload(payload)) return;
+      if (payload && payload.notification) return;
       return handleBackgroundPayload(payload);
     });
     return true;
@@ -60,7 +63,8 @@ self.addEventListener('push', (event) => {
       }
       const ready = await firebaseMessagingReady;
       if (ready) return;
-      if (payload && (payload.notification || payload.data)) await handleBackgroundPayload(payload);
+      if (payload && payload.notification) return;
+      if (payload && payload.data) await handleBackgroundPayload(payload);
     } catch (error) {
       console.warn('[SKYNET SW] Push event handling skipped:', error);
     }
