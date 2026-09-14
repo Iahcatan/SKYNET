@@ -179,17 +179,67 @@
                     </select>
                 </div>
                 <div class="d-flex align-items-center gap-2">
-                    <label class="form-label mb-0 text-nowrap" data-i18n="labelTimezone">🌍 เขตเวลา:</label>
-                    <select id="tzSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeTimezone(this.value)">
+                    <label class="form-label mb-0 text-nowrap" data-i18n="labelTimezone">🌍 เขตเวลา (IANA):</label>
+                                        <select id="tzSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeTimezone(this.value)">
                         <option value="auto" data-i18n="tzAuto">💻 อัตโนมัติ (ตามเครื่อง)</option>
                         <option value="UTC">🌐 UTC (Universal Time)</option>
-                        <option value="Asia/Bangkok">🇹🇭 Bangkok, Jakarta, Hanoi (UTC+7)</option>
-                        <option value="Asia/Singapore">🇸🇬 Singapore, KL, Manila (UTC+8)</option>
-                        <option value="Asia/Hong_Kong">🇭🇰 Hong Kong, Beijing, Taipei (UTC+8)</option>
-                        <option value="Asia/Tokyo">🇯🇵 Tokyo, Seoul (UTC+9)</option>
-                        <option value="Australia/Melbourne">🇦🇺 Melbourne, Australia (AEST UTC+10 / AEDT UTC+11)</option>
-                        <option value="Europe/London">🇬🇧 London, Dublin (UTC+0/+1)</option>
-                        <option value="America/New_York">🇺🇸 New York, Toronto (EST)</option>
+                        <option value="Asia/Bangkok">🇹🇭 Bangkok, Thailand (UTC+7)</option>
+                        <option value="Asia/Jakarta">🇮🇩 Jakarta / Western Indonesia (UTC+7)</option>
+                        <option value="Asia/Makassar">🇮🇩 Makassar / Central Indonesia (UTC+8)</option>
+                        <option value="Asia/Jayapura">🇮🇩 Jayapura / Eastern Indonesia (UTC+9)</option>
+                        <option value="Asia/Manila">🇵🇭 Manila, Philippines (UTC+8)</option>
+                        <option value="Asia/Singapore">🇸🇬 Singapore (UTC+8)</option>
+                        <option value="Asia/Kuala_Lumpur">🇲🇾 Kuala Lumpur, Malaysia (UTC+8)</option>
+                        <option value="Asia/Ho_Chi_Minh">🇻🇳 Ho Chi Minh City, Vietnam (UTC+7)</option>
+                        <option value="Asia/Phnom_Penh">🇰🇭 Phnom Penh, Cambodia (UTC+7)</option>
+                        <option value="Asia/Vientiane">🇱🇦 Vientiane, Laos (UTC+7)</option>
+                        <option value="Asia/Hong_Kong">🇭🇰 Hong Kong (UTC+8)</option>
+                        <option value="Asia/Shanghai">🇨🇳 Shanghai / Beijing, China (UTC+8)</option>
+                        <option value="Asia/Taipei">🇹🇼 Taipei, Taiwan (UTC+8)</option>
+                        <option value="Asia/Tokyo">🇯🇵 Tokyo, Japan (UTC+9)</option>
+                        <option value="Asia/Seoul">🇰🇷 Seoul, South Korea (UTC+9)</option>
+                        <option value="Asia/Kolkata">🇮🇳 India / Mumbai / New Delhi (UTC+5:30)</option>
+                        <option value="Asia/Dhaka">🇧🇩 Dhaka, Bangladesh (UTC+6)</option>
+                        <option value="Asia/Kathmandu">🇳🇵 Kathmandu, Nepal (UTC+5:45)</option>
+                        <option value="Asia/Colombo">🇱🇰 Colombo, Sri Lanka (UTC+5:30)</option>
+                        <option value="Asia/Karachi">🇵🇰 Karachi, Pakistan (UTC+5)</option>
+                        <option value="Asia/Tashkent">🇺🇿 Tashkent, Uzbekistan (UTC+5)</option>
+                        <option value="Asia/Almaty">🇰🇿 Almaty, Kazakhstan (UTC+5)</option>
+                        <option value="Asia/Ulaanbaatar">🇲🇳 Ulaanbaatar, Mongolia (UTC+8)</option>
+                        <option value="Asia/Yangon">🇲🇲 Yangon, Myanmar (UTC+6:30)</option>
+                        <option value="Asia/Dubai">🇦🇪 Dubai, UAE (UTC+4)</option>
+                        <option value="Asia/Riyadh">🇸🇦 Riyadh, Saudi Arabia (UTC+3)</option>
+                        <option value="Asia/Baghdad">🇮🇶 Baghdad, Iraq (UTC+3)</option>
+                        <option value="Asia/Jerusalem">🇮🇱 Jerusalem, Israel (UTC+2/+3)</option>
+                        <option value="Europe/Istanbul">🇹🇷 Istanbul, Türkiye (UTC+3)</option>
+                        <option value="Europe/London">🇬🇧 London, UK (UTC+0/+1)</option>
+                        <option value="Europe/Paris">🇫🇷 Paris, France (UTC+1/+2)</option>
+                        <option value="Europe/Berlin">🇩🇪 Berlin, Germany (UTC+1/+2)</option>
+                        <option value="Europe/Rome">🇮🇹 Rome, Italy (UTC+1/+2)</option>
+                        <option value="Europe/Madrid">🇪🇸 Madrid, Spain (UTC+1/+2)</option>
+                        <option value="Europe/Amsterdam">🇳🇱 Amsterdam, Netherlands (UTC+1/+2)</option>
+                        <option value="Europe/Moscow">🇷🇺 Moscow, Russia (UTC+3)</option>
+                        <option value="Africa/Cairo">🇪🇬 Cairo, Egypt (UTC+2/+3)</option>
+                        <option value="Africa/Johannesburg">🇿🇦 Johannesburg, South Africa (UTC+2)</option>
+                        <option value="Africa/Nairobi">🇰🇪 Nairobi, Kenya (UTC+3)</option>
+                        <option value="Australia/Perth">🇦🇺 Perth, Australia (UTC+8)</option>
+                        <option value="Australia/Darwin">🇦🇺 Darwin, Australia (UTC+9:30)</option>
+                        <option value="Australia/Brisbane">🇦🇺 Brisbane, Australia (UTC+10)</option>
+                        <option value="Australia/Adelaide">🇦🇺 Adelaide, Australia (UTC+9:30/+10:30)</option>
+                        <option value="Australia/Sydney">🇦🇺 Sydney, Australia (UTC+10/+11)</option>
+                        <option value="Australia/Melbourne">🇦🇺 Melbourne, Australia (UTC+10/+11)</option>
+                        <option value="Pacific/Auckland">🇳🇿 Auckland, New Zealand (UTC+12/+13)</option>
+                        <option value="Pacific/Honolulu">🇺🇸 Honolulu, Hawaii (UTC-10)</option>
+                        <option value="America/Los_Angeles">🇺🇸 Los Angeles, USA (UTC-8/-7)</option>
+                        <option value="America/Denver">🇺🇸 Denver, USA (UTC-7/-6)</option>
+                        <option value="America/Chicago">🇺🇸 Chicago, USA (UTC-6/-5)</option>
+                        <option value="America/New_York">🇺🇸 New York, USA (UTC-5/-4)</option>
+                        <option value="America/Toronto">🇨🇦 Toronto, Canada (UTC-5/-4)</option>
+                        <option value="America/Vancouver">🇨🇦 Vancouver, Canada (UTC-8/-7)</option>
+                        <option value="America/Mexico_City">🇲🇽 Mexico City, Mexico (UTC-6)</option>
+                        <option value="America/Lima">🇵🇪 Lima, Peru (UTC-5)</option>
+                        <option value="America/Sao_Paulo">🇧🇷 São Paulo, Brazil (UTC-3)</option>
+                        <option value="America/Buenos_Aires">🇦🇷 Buenos Aires, Argentina (UTC-3)</option>
                     </select>
                 </div>
                 <div class="d-flex align-items-center gap-2">
@@ -267,7 +317,7 @@
                 </div>
                 <div class="col-md-3">
                     <label class="form-label" data-i18n="labelKillDate">วันที่(วัน/เดือน/ปี)</label>
-                    <input type="text" id="killDate" class="form-control" placeholder="เช่น 08/09/2026" data-i18n-ph="phKillDate" maxlength="10" autocomplete="off" inputmode="numeric">
+                    <input type="text" id="killDate" class="form-control" placeholder="เช่น 14/09/2026 หรือ 14092026" data-i18n-ph="phKillDate" maxlength="10" autocomplete="off" inputmode="numeric">
                     <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่างไว้หากใช้วันที่ปัจจุบัน</small>
                 </div>
                 <div class="col-md-3">
@@ -650,7 +700,7 @@
                 title: "⚔️ Boss Timer Dashboard",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 ภาษา:",
-                labelTimezone: "🌍 เขตเวลา:",
+                labelTimezone: "🌍 เขตเวลา (IANA):",
                 tzAuto: "💻 อัตโนมัติ (ตามเครื่อง)",
                 enableNotify: "🔔 เปิดระบบเสียง & แจ้งเตือน",
                 disableNotify: "🔕 ปิดระบบเสียง & แจ้งเตือน",
@@ -659,8 +709,8 @@
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
                 labelKillDate: "วันที่(วัน/เดือน/ปี)",
-                phKillDate: "เช่น 08/09/2026",
-                hintKillDate: "*เว้นว่างไว้หากใช้วันที่ปัจจุบัน",
+                phKillDate: "เช่น 14/09/2026 หรือ 14092026",
+                hintKillDate: "*เว้นว่างได้ หรือใช้รูปแบบ 14/09/2026 หรือ 14092026",
                 labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
                 phKillTime: "เช่น 17:30 หรือ 1730",
                 hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",
@@ -760,7 +810,7 @@
                 title: "⚔️ Boss Timer Dashboard",
                 online: "🟢 Realtime Sync Active",
                 labelLanguage: "🌐 Language:",
-                labelTimezone: "🌍 Timezone:",
+                labelTimezone: "🌍 Timezone (IANA):",
                 tzAuto: "💻 Auto (Device Local)",
                 enableNotify: "🔔 Enable Sound & Alerts",
                 disableNotify: "🔕 Disable Sound & Alerts",
@@ -769,8 +819,8 @@
                 phBoss: "Type to search or select...",
                 labelKillTime: "Kill Time (24h Format)",
                 labelKillDate: "Date (Day/Month/Year)",
-                phKillDate: "e.g. 08/09/2026",
-                hintKillDate: "*Leave blank to use today's date",
+                phKillDate: "e.g. 14/09/2026 or 14092026",
+                hintKillDate: "*Optional: 14/09/2026 or 14092026; blank = today",
                 labelSpTime: "Special Time (mins)",
                 phKillTime: "e.g. 17:30 or 1730",
                 hintKillTime: "*Leave blank to use current time",
@@ -870,7 +920,7 @@
                 title: "⚔️ Boss Timer Dashboard",
                 online: "🟢 실시간 동기화 활성화",
                 labelLanguage: "🌐 언어:",
-                labelTimezone: "🌍 시간대:",
+                labelTimezone: "🌍 시간대 (IANA):",
                 tzAuto: "💻 자동 (기기 설정)",
                 enableNotify: "🔔 소리 및 알림 켜기",
                 disableNotify: "🔕 소리 및 알림 끄기",
@@ -879,8 +929,8 @@
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
                 labelKillDate: "날짜 (일/월/년)",
-                phKillDate: "예: 08/09/2026",
-                hintKillDate: "*오늘 날짜를 사용하려면 비워두세요",
+                phKillDate: "예: 14/09/2026 또는 14092026",
+                hintKillDate: "*선택: 14/09/2026 또는 14092026; 비우면 오늘",
                 labelSpTime: "추가 시간 (분)",
                 phKillTime: "예: 17:30 또는 1730",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
@@ -2500,7 +2550,7 @@
             const raw = (dateStr || '').trim();
             const now = new Date();
             if (!raw) return { year: now.getFullYear(), month: now.getMonth()+1, day: now.getDate() };
-            const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            const m = raw.match(/^(\d{1,2})\/?(\d{1,2})\/?(\d{4})$/);
             if (!m) return null;
             const day = parseInt(m[1],10), month = parseInt(m[2],10), year = parseInt(m[3],10);
             const test = new Date(year, month-1, day);
@@ -2518,7 +2568,7 @@
             const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
             if (!bossInput) return;
             const parsedDate = parseInputDate(dateInput);
-            if (!parsedDate) { alert('❌ วันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ DD/MM/YYYY เช่น 29/08/2026'); return; }
+            if (!parsedDate) { alert('❌ วันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ DD/MM/YYYY หรือ DDMMYYYY เช่น 14/09/2026 หรือ 14092026'); return; }
             if (timeInput && !parseInputTime(timeInput)) { alert(TRANSLATIONS[currentLang].invalidTimeAlert); return; }
 
             try {
