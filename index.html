@@ -350,7 +350,7 @@
                     <thead>
                         <tr>
                             <th data-i18n="thBoss">ชื่อบอส</th>
-                            <th>วันที่ตาย</th>
+                            <th data-i18n="thKillDate">วันที่</th>
                             <th data-i18n="thKillTime">เวลาตาย (24 ชม.)</th>
                             <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>
                             <th data-i18n="thCountdown">นับถอยหลัง</th>
@@ -719,6 +719,7 @@
                 tableTitle: "📜 ตารางเวลาบอสล่าสุด",
                 btnClear: "ล้างตารางทั้งหมด",
                 thBoss: "ชื่อบอส",
+                thKillDate: "วันที่",
                 thKillTime: "เวลาตาย (24 ชม.)",
                 thSpawnTime: "เวลาเกิด (24 ชม.)",
                 thCountdown: "นับถอยหลัง",
@@ -829,6 +830,7 @@
                 tableTitle: "📜 Boss Schedule Table",
                 btnClear: "Clear All Data",
                 thBoss: "Boss Name",
+                thKillDate: "Date",
                 thKillTime: "Kill Time (24h)",
                 thSpawnTime: "Spawn Time (24h)",
                 thCountdown: "Countdown",
@@ -939,6 +941,7 @@
                 tableTitle: "📜 최근 보스 시간표",
                 btnClear: "전체 목록 삭제",
                 thBoss: "보스 이름",
+                thKillDate: "날짜",
                 thKillTime: "처치 시간 (24h)",
                 thSpawnTime: "젠 시간 (24h)",
                 thCountdown: "카운트다운",
@@ -2701,6 +2704,21 @@
             }
         });
 
+        function formatDisplayDate(value, ms) {
+            const raw = String(value || '').trim();
+            const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (m) return `${m[1].padStart(2, '0')}/${m[2].padStart(2, '0')}/${m[3]}`;
+            const tz = currentTz === 'auto' ? Intl.DateTimeFormat().resolvedOptions().timeZone : currentTz;
+            try {
+                const parts = new Intl.DateTimeFormat('en-GB', { timeZone: tz, day: '2-digit', month: '2-digit', year: 'numeric', calendar: 'gregory' }).formatToParts(new Date(ms));
+                const out = {};
+                parts.forEach(p => { if (p.type !== 'literal') out[p.type] = p.value; });
+                if (out.day && out.month && out.year) return `${out.day}/${out.month}/${out.year}`;
+            } catch (_) {}
+            const d = new Date(ms);
+            return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+        }
+
         function renderTable() {
             const tbody = document.getElementById('bossTableBody');
             tbody.innerHTML = '';
@@ -2720,7 +2738,7 @@
                 
                 tr.innerHTML = `
                     <td class="fw-bold text-warning">${bossName}</td>
-                    <td>${(data.killDate || new Date(data.killTimeMs).toLocaleDateString('th-TH')).replace(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, '$1/$2/$3')}</td>
+                    <td>${formatDisplayDate(data.killDate, data.killTimeMs)}</td>
                     <td>${killTimeStr}</td>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
