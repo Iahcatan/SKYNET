@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V115_WAITRESS_SSE_FCM_REGISTRATION_FIX_2026-09-14 -->
+    <!-- V117_TRANSLATOR_ADMIN_SAME_CHANNEL_2026-09-15 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -253,46 +253,6 @@
             </div>
         </div>
 
-        <!-- 🌐 V116 Free Translator -->
-        <div id="translationPanel" data-admin-only class="card p-4 mb-4 shadow-sm" style="display:none;">
-            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-                <div>
-                    <h4 class="card-title text-info mb-1" data-i18n="translationTitle">🌐 Free Translator • TH / EN / KO</h4>
-                    <small class="text-white-50" data-i18n="translationSubtitle">แปลข้อความจาก Discord ตามช่องที่ตั้งค่า • ใช้ Free API + Cache + Rate Limit</small>
-                </div>
-                <span id="translationStatusBadge" class="badge bg-secondary">OFF</span>
-            </div>
-            <div class="row g-3">
-                <div class="col-md-3">
-                    <label class="form-label" data-i18n="translationEnabled">เปิดระบบแปล</label>
-                    <select id="translationEnabled" class="form-select">
-                        <option value="false" data-i18n="translationOff">ปิด</option>
-                        <option value="true" data-i18n="translationOn">เปิด</option>
-                    </select>
-                </div>
-                <div class="col-md-9">
-                    <label class="form-label" data-i18n="translationSource">Source Channel ID</label>
-                    <input id="translationSourceChannel" class="form-control" inputmode="numeric" placeholder="Discord channel ID">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label">🇹🇭 TH Channel ID</label>
-                    <input id="translationThChannel" class="form-control" inputmode="numeric" placeholder="Thai translation channel ID">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label">🇺🇸 EN Channel ID</label>
-                    <input id="translationEnChannel" class="form-control" inputmode="numeric" placeholder="English translation channel ID">
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label">🇰🇷 KO Channel ID</label>
-                    <input id="translationKoChannel" class="form-control" inputmode="numeric" placeholder="Korean translation channel ID">
-                </div>
-            </div>
-            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
-                <small id="translationRuntimeStatus" class="text-white-50" data-i18n="translationRuntime">Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled</small>
-                <button id="translationSaveBtn" class="btn btn-info fw-bold" onclick="saveTranslationConfig()" data-i18n="translationSave">💾 บันทึกการตั้งค่าแปล</button>
-            </div>
-        </div>
-
         <!-- 🔐 Admin User Management -->
         <div id="adminPanel" class="card p-4 mb-4 shadow-sm" style="display:none;">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -308,6 +268,57 @@
             </div>
 
             <div id="adminPanelContent" style="display:none;">
+
+            <!-- 🌐 V117 Free Translator • Admin only -->
+            <div id="translationPanel" class="card p-4 mb-4 shadow-sm border-info">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                    <div>
+                        <h4 class="card-title text-info mb-1" data-i18n="translationTitle">🌐 Free Translator • TH / EN / KO</h4>
+                        <small class="text-white-50" data-i18n="translationSubtitle">ตั้งค่าการแปล Discord แบบฟรี</small>
+                    </div>
+                    <span id="translationStatusBadge" class="badge bg-secondary">OFF</span>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <label class="form-label" data-i18n="translationEnabled">เปิดระบบแปล</label>
+                        <select id="translationEnabled" class="form-select">
+                            <option value="false" data-i18n="translationOff">ปิด</option>
+                            <option value="true" data-i18n="translationOn">เปิด</option>
+                        </select>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label" data-i18n="translationMode">โหมดการแปล</label>
+                        <select id="translationMode" class="form-select" onchange="updateTranslationModeUI()">
+                            <option value="separate_channels" data-i18n="translationModeSeparate">แยกห้อง TH / EN / KO</option>
+                            <option value="same_channel" data-i18n="translationModeSame">แปลในห้องเดียวกับต้นฉบับ</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label" data-i18n="translationSource">Source Channel ID</label>
+                        <input id="translationSourceChannel" class="form-control" inputmode="numeric" placeholder="Discord channel ID">
+                    </div>
+                    <div id="translationSeparateChannels" class="row g-3 mt-1">
+                        <div class="col-md-4">
+                            <label class="form-label">🇹🇭 TH Channel ID</label>
+                            <input id="translationThChannel" class="form-control" inputmode="numeric" placeholder="Thai translation channel ID">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">🇺🇸 EN Channel ID</label>
+                            <input id="translationEnChannel" class="form-control" inputmode="numeric" placeholder="English translation channel ID">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">🇰🇷 KO Channel ID</label>
+                            <input id="translationKoChannel" class="form-control" inputmode="numeric" placeholder="Korean translation channel ID">
+                        </div>
+                    </div>
+                </div>
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
+                    <small id="translationRuntimeStatus" class="text-white-50" data-i18n="translationRuntime">Free provider • Cache • Rate Limit</small>
+                    <button id="translationSaveBtn" class="btn btn-info fw-bold" onclick="saveTranslationConfig()" data-i18n="translationSave">💾 บันทึกการตั้งค่าแปล</button>
+                </div>
+                <div class="small text-white-50 mt-2" data-i18n="translationModeHint">โหมดห้องเดียว: บอทจะส่งคำแปลภาษาเป้าหมายกลับในห้องต้นฉบับ และไม่แปลซ้ำข้อความของบอท</div>
+            </div>
+
             <div class="row g-3 mb-3">
                 <div class="col-md-4">
                     <div class="card p-3 h-100">
@@ -796,15 +807,12 @@
                 errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",
                 errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",
                 translationTitle: "🌐 Free Translator • TH / EN / KO",
-                translationSubtitle: "แปลข้อความจาก Discord ตามช่องที่ตั้งค่า • ใช้ Free API + Cache + Rate Limit",
+                translationSubtitle: "ตั้งค่าการแปล Discord แบบฟรี • Cache + Rate Limit",
                 translationEnabled: "เปิดระบบแปล", translationOff: "ปิด", translationOn: "เปิด",
+                translationMode: "โหมดการแปล", translationModeSeparate: "แยกห้อง TH / EN / KO", translationModeSame: "แปลในห้องเดียวกับต้นฉบับ",
                 translationSource: "Source Channel ID", translationSave: "💾 บันทึกการตั้งค่าแปล",
-                translationRuntime: "Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled",
-                translationTitle: "🌐 Free Translator • TH / EN / KO",
-                translationSubtitle: "Translate Discord messages using configured channels • Free API + cache + rate limit",
-                translationEnabled: "Enable translator", translationOff: "Off", translationOn: "On",
-                translationSource: "Source Channel ID", translationSave: "💾 Save Translator Settings",
-                translationRuntime: "Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled",
+                translationRuntime: "Free provider • Cache • Rate Limit",
+                translationModeHint: "โหมดห้องเดียว: บอทจะส่งคำแปลกลับในห้องต้นฉบับและไม่แปลซ้ำข้อความของบอท",
                 attendanceTitle: "⚔️ Boss Raid Attendance",
                 attendanceSubtitle: "เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord",
                 attendanceRealtime: "🟢 Real-time",
@@ -916,7 +924,14 @@
                 errAccountNotApproved: "This account has not been approved by Admin.",
                 errWeakAccount: "Username must be at least 3 characters and password at least 6 characters.",
                 errAdminUsername: "The admin username is reserved.",
-                attendanceTitle: "⚔️ Boss Raid Attendance",
+                                translationTitle: "🌐 Free Translator • TH / EN / KO",
+                translationSubtitle: "Configure free Discord translation • Cache + Rate Limit",
+                translationEnabled: "Enable translator", translationOff: "Off", translationOn: "On",
+                translationMode: "Translation mode", translationModeSeparate: "Separate TH / EN / KO channels", translationModeSame: "Translate in the same source channel",
+                translationSource: "Source Channel ID", translationSave: "💾 Save Translator Settings",
+                translationRuntime: "Free provider • Cache • Rate Limit",
+                translationModeHint: "Same-channel mode sends target-language translations back to the source channel and ignores bot messages.",
+attendanceTitle: "⚔️ Boss Raid Attendance",
                 attendanceSubtitle: "Real-time boss raid check-in from Discord",
                 attendanceRealtime: "🟢 Realtime",
                 attendanceTotalRaids: "Total Raids", attendanceUniqueMembers: "Unique Members", attendanceTotalCheckins: "Total Check-ins",
@@ -1028,10 +1043,12 @@
                 errWeakAccount: "사용자 이름은 3자 이상, 비밀번호는 6자 이상이어야 합니다.",
                 errAdminUsername: "admin 사용자 이름은 일반 가입에 사용할 수 없습니다.",
                 translationTitle: "🌐 Free Translator • TH / EN / KO",
-                translationSubtitle: "설정한 채널로 Discord 메시지를 번역 • 무료 API + 캐시 + 속도 제한",
+                translationSubtitle: "무료 Discord 번역 설정 • 캐시 + 속도 제한",
                 translationEnabled: "번역 켜기", translationOff: "끔", translationOn: "켬",
+                translationMode: "번역 모드", translationModeSeparate: "TH / EN / KO 별도 채널", translationModeSame: "원본 채널에서 번역",
                 translationSource: "소스 채널 ID", translationSave: "💾 번역 설정 저장",
-                translationRuntime: "Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled",
+                translationRuntime: "Free provider • Cache • Rate Limit",
+                translationModeHint: "같은 채널 모드에서는 번역 결과를 원본 채널에 보내며 봇 메시지는 다시 번역하지 않습니다.",
                 attendanceTitle: "⚔️ 보스 레이드 출석",
                 attendanceSubtitle: "Discord에서 실시간 보스 레이드 출석 확인",
                 attendanceRealtime: "🟢 실시간",
@@ -1159,7 +1176,7 @@
         let adminUsersListenerAttached = false;
         let adminSessionsListenerAttached = false;
         let adminRefreshTimer = null;
-        let translationConfig = { enabled:false, source_channel_id:'', th_channel_id:'', en_channel_id:'', ko_channel_id:'' };
+        let translationConfig = { enabled:false, mode:'separate_channels', source_channel_id:'', th_channel_id:'', en_channel_id:'', ko_channel_id:'' };
 
         async function createUserSession(userKey, userData) {
             currentUserKey = userKey;
@@ -2040,6 +2057,13 @@
             renderTable();
         }
 
+        function updateTranslationModeUI() {
+            const mode = document.getElementById('translationMode')?.value || 'separate_channels';
+            const wrap = document.getElementById('translationSeparateChannels');
+            const separate = mode === 'separate_channels';
+            if (wrap) wrap.style.display = separate ? '' : 'none';
+        }
+
         async function loadTranslationConfig() {
             if (!auth.currentUser) return;
             try {
@@ -2051,10 +2075,12 @@
                 translationConfig = Object.assign(translationConfig, result.config || {});
                 const setVal = (id, value) => { const el=document.getElementById(id); if(el) el.value = value ?? ''; };
                 setVal('translationEnabled', String(!!translationConfig.enabled));
+                setVal('translationMode', translationConfig.mode || 'separate_channels');
                 setVal('translationSourceChannel', translationConfig.source_channel_id);
                 setVal('translationThChannel', translationConfig.th_channel_id);
                 setVal('translationEnChannel', translationConfig.en_channel_id);
                 setVal('translationKoChannel', translationConfig.ko_channel_id);
+                updateTranslationModeUI();
                 const badge=document.getElementById('translationStatusBadge');
                 if(badge){ badge.className = translationConfig.enabled ? 'badge bg-success' : 'badge bg-secondary'; badge.textContent = translationConfig.enabled ? 'ON' : 'OFF'; }
             } catch(err) { console.warn('[SKYNET] Translation config load skipped:', err); }
@@ -2064,6 +2090,7 @@
             if (!currentUserData || currentUserData.role !== 'admin') { alert(TRANSLATIONS[currentLang].adminOnly); return; }
             const cfg = {
                 enabled: document.getElementById('translationEnabled')?.value === 'true',
+                mode: document.getElementById('translationMode')?.value === 'same_channel' ? 'same_channel' : 'separate_channels',
                 source_channel_id: String(document.getElementById('translationSourceChannel')?.value || '').trim(),
                 th_channel_id: String(document.getElementById('translationThChannel')?.value || '').trim(),
                 en_channel_id: String(document.getElementById('translationEnChannel')?.value || '').trim(),
@@ -2073,6 +2100,7 @@
                 if(cfg[key] && !/^\d+$/.test(cfg[key])) { alert('Discord Channel ID ต้องเป็นตัวเลขเท่านั้น'); return; }
             }
             if(cfg.enabled && !cfg.source_channel_id){ alert(currentLang==='en' ? 'Please enter Source Channel ID.' : currentLang==='ko' ? '소스 채널 ID를 입력하세요.' : 'กรุณาใส่ Source Channel ID'); return; }
+            if(cfg.enabled && cfg.mode === 'separate_channels' && !cfg.th_channel_id && !cfg.en_channel_id && !cfg.ko_channel_id){ alert(currentLang==='en' ? 'Enter at least one TH/EN/KO destination channel.' : currentLang==='ko' ? 'TH/EN/KO 대상 채널을 하나 이상 입력하세요.' : 'กรุณาใส่ห้องปลายทาง TH/EN/KO อย่างน้อย 1 ห้อง'); return; }
             try {
                 const idToken = await auth.currentUser.getIdToken(true);
                 const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
@@ -2958,7 +2986,8 @@
             toggleAttendanceMemberMonthlyPanel,
             toggleAttendanceIndividualPanel,
             loadTranslationConfig,
-            saveTranslationConfig
+            saveTranslationConfig,
+            updateTranslationModeUI
         });
 
         // Keep delete failures visible to the user.
