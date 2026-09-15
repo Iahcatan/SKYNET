@@ -253,6 +253,46 @@
             </div>
         </div>
 
+        <!-- 🌐 V116 Free Translator -->
+        <div id="translationPanel" data-admin-only class="card p-4 mb-4 shadow-sm" style="display:none;">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <div>
+                    <h4 class="card-title text-info mb-1" data-i18n="translationTitle">🌐 Free Translator • TH / EN / KO</h4>
+                    <small class="text-white-50" data-i18n="translationSubtitle">แปลข้อความจาก Discord ตามช่องที่ตั้งค่า • ใช้ Free API + Cache + Rate Limit</small>
+                </div>
+                <span id="translationStatusBadge" class="badge bg-secondary">OFF</span>
+            </div>
+            <div class="row g-3">
+                <div class="col-md-3">
+                    <label class="form-label" data-i18n="translationEnabled">เปิดระบบแปล</label>
+                    <select id="translationEnabled" class="form-select">
+                        <option value="false" data-i18n="translationOff">ปิด</option>
+                        <option value="true" data-i18n="translationOn">เปิด</option>
+                    </select>
+                </div>
+                <div class="col-md-9">
+                    <label class="form-label" data-i18n="translationSource">Source Channel ID</label>
+                    <input id="translationSourceChannel" class="form-control" inputmode="numeric" placeholder="Discord channel ID">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">🇹🇭 TH Channel ID</label>
+                    <input id="translationThChannel" class="form-control" inputmode="numeric" placeholder="Thai translation channel ID">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">🇺🇸 EN Channel ID</label>
+                    <input id="translationEnChannel" class="form-control" inputmode="numeric" placeholder="English translation channel ID">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">🇰🇷 KO Channel ID</label>
+                    <input id="translationKoChannel" class="form-control" inputmode="numeric" placeholder="Korean translation channel ID">
+                </div>
+            </div>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
+                <small id="translationRuntimeStatus" class="text-white-50" data-i18n="translationRuntime">Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled</small>
+                <button id="translationSaveBtn" class="btn btn-info fw-bold" onclick="saveTranslationConfig()" data-i18n="translationSave">💾 บันทึกการตั้งค่าแปล</button>
+            </div>
+        </div>
+
         <!-- 🔐 Admin User Management -->
         <div id="adminPanel" class="card p-4 mb-4 shadow-sm" style="display:none;">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -755,6 +795,16 @@
                 errAccountNotApproved: "บัญชีนี้ยังไม่ได้รับอนุมัติจาก Admin",
                 errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",
                 errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",
+                translationTitle: "🌐 Free Translator • TH / EN / KO",
+                translationSubtitle: "แปลข้อความจาก Discord ตามช่องที่ตั้งค่า • ใช้ Free API + Cache + Rate Limit",
+                translationEnabled: "เปิดระบบแปล", translationOff: "ปิด", translationOn: "เปิด",
+                translationSource: "Source Channel ID", translationSave: "💾 บันทึกการตั้งค่าแปล",
+                translationRuntime: "Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled",
+                translationTitle: "🌐 Free Translator • TH / EN / KO",
+                translationSubtitle: "Translate Discord messages using configured channels • Free API + cache + rate limit",
+                translationEnabled: "Enable translator", translationOff: "Off", translationOn: "On",
+                translationSource: "Source Channel ID", translationSave: "💾 Save Translator Settings",
+                translationRuntime: "Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled",
                 attendanceTitle: "⚔️ Boss Raid Attendance",
                 attendanceSubtitle: "เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord",
                 attendanceRealtime: "🟢 Real-time",
@@ -977,6 +1027,11 @@
                 errAccountNotApproved: "이 계정은 아직 Admin의 승인을 받지 못했습니다.",
                 errWeakAccount: "사용자 이름은 3자 이상, 비밀번호는 6자 이상이어야 합니다.",
                 errAdminUsername: "admin 사용자 이름은 일반 가입에 사용할 수 없습니다.",
+                translationTitle: "🌐 Free Translator • TH / EN / KO",
+                translationSubtitle: "설정한 채널로 Discord 메시지를 번역 • 무료 API + 캐시 + 속도 제한",
+                translationEnabled: "번역 켜기", translationOff: "끔", translationOn: "켬",
+                translationSource: "소스 채널 ID", translationSave: "💾 번역 설정 저장",
+                translationRuntime: "Free provider: LibreTranslate-compatible public mirrors • Cache enabled • Rate limit enabled",
                 attendanceTitle: "⚔️ 보스 레이드 출석",
                 attendanceSubtitle: "Discord에서 실시간 보스 레이드 출석 확인",
                 attendanceRealtime: "🟢 실시간",
@@ -1104,6 +1159,7 @@
         let adminUsersListenerAttached = false;
         let adminSessionsListenerAttached = false;
         let adminRefreshTimer = null;
+        let translationConfig = { enabled:false, source_channel_id:'', th_channel_id:'', en_channel_id:'', ko_channel_id:'' };
 
         async function createUserSession(userKey, userData) {
             currentUserKey = userKey;
@@ -1184,6 +1240,7 @@
                     document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
                     startAttendanceRealtimeListener();
                     syncExistingWebPushSubscription().catch(() => {});
+                    loadTranslationConfig().catch(() => {});
                     const adminPanel=document.getElementById('adminPanel');
                     const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
                     const adminMenu=document.getElementById('adminPanelMenuBtn');
@@ -1981,6 +2038,52 @@
             updateNotifyButtonUI();
             applyKillDateLanguage();
             renderTable();
+        }
+
+        async function loadTranslationConfig() {
+            if (!auth.currentUser) return;
+            try {
+                const idToken = await auth.currentUser.getIdToken(false);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/translation/config`, { headers:{'Authorization':`Bearer ${idToken}`}, cache:'no-store' });
+                const result = await response.json().catch(()=>({}));
+                if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
+                translationConfig = Object.assign(translationConfig, result.config || {});
+                const setVal = (id, value) => { const el=document.getElementById(id); if(el) el.value = value ?? ''; };
+                setVal('translationEnabled', String(!!translationConfig.enabled));
+                setVal('translationSourceChannel', translationConfig.source_channel_id);
+                setVal('translationThChannel', translationConfig.th_channel_id);
+                setVal('translationEnChannel', translationConfig.en_channel_id);
+                setVal('translationKoChannel', translationConfig.ko_channel_id);
+                const badge=document.getElementById('translationStatusBadge');
+                if(badge){ badge.className = translationConfig.enabled ? 'badge bg-success' : 'badge bg-secondary'; badge.textContent = translationConfig.enabled ? 'ON' : 'OFF'; }
+            } catch(err) { console.warn('[SKYNET] Translation config load skipped:', err); }
+        }
+
+        async function saveTranslationConfig() {
+            if (!currentUserData || currentUserData.role !== 'admin') { alert(TRANSLATIONS[currentLang].adminOnly); return; }
+            const cfg = {
+                enabled: document.getElementById('translationEnabled')?.value === 'true',
+                source_channel_id: String(document.getElementById('translationSourceChannel')?.value || '').trim(),
+                th_channel_id: String(document.getElementById('translationThChannel')?.value || '').trim(),
+                en_channel_id: String(document.getElementById('translationEnChannel')?.value || '').trim(),
+                ko_channel_id: String(document.getElementById('translationKoChannel')?.value || '').trim()
+            };
+            for(const key of ['source_channel_id','th_channel_id','en_channel_id','ko_channel_id']){
+                if(cfg[key] && !/^\d+$/.test(cfg[key])) { alert('Discord Channel ID ต้องเป็นตัวเลขเท่านั้น'); return; }
+            }
+            if(cfg.enabled && !cfg.source_channel_id){ alert(currentLang==='en' ? 'Please enter Source Channel ID.' : currentLang==='ko' ? '소스 채널 ID를 입력하세요.' : 'กรุณาใส่ Source Channel ID'); return; }
+            try {
+                const idToken = await auth.currentUser.getIdToken(true);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/translation/config`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${idToken}`}, body:JSON.stringify(cfg) });
+                const result = await response.json().catch(()=>({}));
+                if(!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
+                translationConfig = Object.assign(translationConfig, result.config || cfg);
+                const badge=document.getElementById('translationStatusBadge');
+                if(badge){ badge.className = translationConfig.enabled ? 'badge bg-success' : 'badge bg-secondary'; badge.textContent = translationConfig.enabled ? 'ON' : 'OFF'; }
+                alert(currentLang==='en' ? 'Translator settings saved.' : currentLang==='ko' ? '번역 설정이 저장되었습니다.' : 'บันทึกการตั้งค่าตัวแปลแล้ว');
+            } catch(err) { console.error('[SKYNET] Translation config save failed:', err); alert((currentLang==='en' ? 'Translator settings failed: ' : currentLang==='ko' ? '번역 설정 실패: ' : 'บันทึกการตั้งค่าตัวแปลไม่สำเร็จ: ') + (err.message || err)); }
         }
 
         function changeLanguage(lang) {
@@ -2853,7 +2956,9 @@
             toggleAttendancePanel,
             toggleAttendanceHistoryPanel,
             toggleAttendanceMemberMonthlyPanel,
-            toggleAttendanceIndividualPanel
+            toggleAttendanceIndividualPanel,
+            loadTranslationConfig,
+            saveTranslationConfig
         });
 
         // Keep delete failures visible to the user.
