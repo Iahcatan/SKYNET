@@ -91,6 +91,62 @@
         .attendance-status-scheduled { color: #f59e0b; }
         .attendance-status-closed { color: #94a3b8; }
         .attendance-table td, .attendance-table th { white-space: nowrap; }
+
+        /* V120.1 — Compact attendance count columns only.
+           Keeps the stored values and attendance calculations unchanged. */
+        #attendanceHistoryBody td:nth-child(4),
+        #attendanceMemberMonthlyBody td:nth-child(4),
+        #attendanceMemberMonthlyBody td:nth-child(5) {
+            width: 82px;
+            min-width: 82px;
+            max-width: 82px;
+            text-align: center;
+            padding-left: 6px;
+            padding-right: 6px;
+            font-variant-numeric: tabular-nums;
+        }
+        #attendanceHistoryBody td:nth-child(1),
+        #attendanceMemberMonthlyBody td:nth-child(2) {
+            max-width: 180px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        #attendanceMemberMonthlyBody td:nth-child(3) {
+            max-width: 130px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .attendance-pagination {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            gap: 6px;
+            margin-top: 12px;
+        }
+        .attendance-pagination .btn {
+            min-width: 38px;
+        }
+        .attendance-pagination .page-info {
+            color: #94a3b8;
+            font-size: 0.85rem;
+            margin: 0 4px;
+        }
+        @media (max-width: 768px) {
+            #attendanceHistoryBody td:nth-child(4),
+            #attendanceMemberMonthlyBody td:nth-child(4),
+            #attendanceMemberMonthlyBody td:nth-child(5) {
+                width: 68px;
+                min-width: 68px;
+                max-width: 68px;
+                padding-left: 4px;
+                padding-right: 4px;
+            }
+            #attendanceHistoryBody td:nth-child(1),
+            #attendanceMemberMonthlyBody td:nth-child(2) {
+                max-width: 130px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -431,6 +487,7 @@
                     </tr></thead>
                     <tbody id="attendanceHistoryBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>
                 </table>
+                <div id="attendanceHistoryPagination" class="attendance-pagination" aria-label="Attendance History pagination"></div>
             </div>
 
             </div>
@@ -469,6 +526,7 @@
                     </tr></thead>
                     <tbody id="attendanceMemberMonthlyBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>
                 </table>
+                <div id="attendanceMemberMonthlyPagination" class="attendance-pagination" aria-label="Monthly Member Totals pagination"></div>
             </div>
             </div>
 
@@ -1730,6 +1788,78 @@
             if (hint && langData.hintKillDate) hint.textContent = langData.hintKillDate;
         }
 
+        const ATTENDANCE_PAGE_SIZE = 20;
+        window.__SKYNET_ATTENDANCE_HISTORY_ROWS__ = [];
+        window.__SKYNET_ATTENDANCE_HISTORY_PAGE__ = 1;
+        window.__SKYNET_ATTENDANCE_MEMBER_ROWS__ = [];
+        window.__SKYNET_ATTENDANCE_MEMBER_PAGE__ = 1;
+
+        function renderAttendancePagination(containerId, currentPage, totalPages, onPageChange) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            if (!totalPages || totalPages <= 1) {
+                container.innerHTML = '';
+                return;
+            }
+
+            const safePage = Math.min(Math.max(1, Number(currentPage) || 1), totalPages);
+            const buttons = [];
+            const addButton = (label, page, disabled=false, active=false, title='') => {
+                const classes = `btn btn-sm ${active ? 'btn-info text-dark' : 'btn-outline-secondary'}`;
+                buttons.push(`<button type="button" class="${classes}" ${disabled ? 'disabled' : ''} data-page="${page}" title="${escapeHtml(title || label)}">${label}</button>`);
+            };
+
+            addButton('‹', safePage - 1, safePage <= 1, false, 'Previous page');
+            for (let page = 1; page <= totalPages; page++) {
+                const near = page === 1 || page === totalPages || Math.abs(page - safePage) <= 2;
+                if (!near) {
+                    if (page === 2 && safePage > 4) buttons.push('<span class="page-info">…</span>');
+                    if (page === totalPages - 1 && safePage < totalPages - 3) buttons.push('<span class="page-info">…</span>');
+                    continue;
+                }
+                addButton(String(page), page, false, page === safePage, `Page ${page}`);
+            }
+            addButton('›', safePage + 1, safePage >= totalPages, false, 'Next page');
+            container.innerHTML = buttons.join('');
+            container.querySelectorAll('button[data-page]').forEach(btn => {
+                btn.addEventListener('click', () => onPageChange(Number(btn.dataset.page)));
+            });
+        }
+
+        function renderAttendanceHistoryPage(page=1) {
+            const body = document.getElementById('attendanceHistoryBody');
+            if (!body) return;
+            const rows = window.__SKYNET_ATTENDANCE_HISTORY_ROWS__ || [];
+            const totalPages = Math.max(1, Math.ceil(rows.length / ATTENDANCE_PAGE_SIZE));
+            const safePage = Math.min(Math.max(1, Number(page) || 1), totalPages);
+            window.__SKYNET_ATTENDANCE_HISTORY_PAGE__ = safePage;
+            const start = (safePage - 1) * ATTENDANCE_PAGE_SIZE;
+            const pageRows = rows.slice(start, start + ATTENDANCE_PAGE_SIZE);
+            body.innerHTML = pageRows.length ? pageRows.map(x => {
+                const a=x.a;
+                return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${x.checked.length}</td><td>${escapeHtml(String(a.created_by_name||a.created_by||'-'))}</td><td>${currentLang==='ko'?'마감':currentLang==='en'?'CLOSED':'ปิดแล้ว'}</td></tr>`;
+            }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
+            renderAttendancePagination('attendanceHistoryPagination', safePage, totalPages, renderAttendanceHistoryPage);
+        }
+
+        function renderAttendanceMemberMonthlyPage(page=1) {
+            const body=document.getElementById('attendanceMemberMonthlyBody');
+            if(!body) return;
+            const rows=window.__SKYNET_ATTENDANCE_MEMBER_ROWS__ || [];
+            const totalPages=Math.max(1, Math.ceil(rows.length / ATTENDANCE_PAGE_SIZE));
+            const safePage=Math.min(Math.max(1, Number(page) || 1), totalPages);
+            window.__SKYNET_ATTENDANCE_MEMBER_PAGE__=safePage;
+            const start=(safePage - 1) * ATTENDANCE_PAGE_SIZE;
+            const pageRows=rows.slice(start, start + ATTENDANCE_PAGE_SIZE);
+            body.innerHTML=pageRows.length ? pageRows.map((r,i)=>{
+                const absoluteIndex=start+i;
+                const last=r.lastCheckin ? formatAttendanceDateTime(r.lastCheckin) : '-';
+                const roleHtml=(r.roles||[]).length ? r.roles.map(role => `<span class="badge bg-secondary me-1">${escapeHtml(role)}</span>`).join('') : '-';
+                return `<tr><td>${absoluteIndex+1}</td><td>${escapeHtml(r.name)}</td><td>${roleHtml}</td><td><strong>${r.checkins}</strong></td><td>${r.raids}</td><td>${escapeHtml(last)}</td></tr>`;
+            }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
+            renderAttendancePagination('attendanceMemberMonthlyPagination', safePage, totalPages, renderAttendanceMemberMonthlyPage);
+        }
+
         function renderAttendanceDashboard(rootData) {
             try {
                 const all = [];
@@ -1781,17 +1911,15 @@
                 document.getElementById('attendanceTotalCheckinsCount').innerText = totalCheckins;
 
                 const current = all.filter(x => x.a.status !== 'closed');
-                const history = all.filter(x => x.a.status === 'closed').slice().reverse().slice(0,100);
+                const history = all.filter(x => x.a.status === 'closed').slice().reverse();
+                window.__SKYNET_ATTENDANCE_HISTORY_ROWS__ = history;
+                window.__SKYNET_ATTENDANCE_HISTORY_PAGE__ = 1;
                 const currentBody = document.getElementById('attendanceCurrentBody');
                 currentBody.innerHTML = current.length ? current.map(x => {
                     const a=x.a; const status=a.status==='open' ? (currentLang==='ko'?'진행 중':currentLang==='en'?'OPEN':'เปิด') : (currentLang==='ko'?'예정':currentLang==='en'?'SCHEDULED':'กำหนดการ');
                     return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${escapeHtml(String(a.checkin_open||'-'))} – ${escapeHtml(String(a.checkin_close||'-'))}</td><td>${x.checked.length}</td><td>${status}</td></tr>`;
                 }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
-                const historyBody = document.getElementById('attendanceHistoryBody');
-                historyBody.innerHTML = history.length ? history.map(x => {
-                    const a=x.a;
-                    return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${x.checked.length}</td><td>${escapeHtml(String(a.created_by_name||a.created_by||'-'))}</td><td>${currentLang==='ko'?'마감':currentLang==='en'?'CLOSED':'ปิดแล้ว'}</td></tr>`;
-                }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
+                renderAttendanceHistoryPage(1);
 
                 const months = Object.keys(monthlyMembers).sort().reverse();
                 const monthlyBody = document.getElementById('attendanceMonthlyBody');
@@ -1835,11 +1963,9 @@
                 if(row.lastCheckin && (!out.lastCheckin || row.lastCheckin > out.lastCheckin)) out.lastCheckin=row.lastCheckin;
             }));
             const rows=Object.values(merged).sort((a,b)=>b.checkins-a.checkins || String(a.name).localeCompare(String(b.name)));
-            body.innerHTML=rows.length ? rows.map((r,i)=>{
-                const last=r.lastCheckin ? formatAttendanceDateTime(r.lastCheckin) : '-';
-                const roleHtml = (r.roles||[]).length ? r.roles.map(role => `<span class="badge bg-secondary me-1">${escapeHtml(role)}</span>`).join('') : '-';
-                return `<tr><td>${i+1}</td><td>${escapeHtml(r.name)}</td><td>${roleHtml}</td><td><strong>${r.checkins}</strong></td><td>${r.raids}</td><td>${escapeHtml(last)}</td></tr>`;
-            }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
+            window.__SKYNET_ATTENDANCE_MEMBER_ROWS__ = rows;
+            window.__SKYNET_ATTENDANCE_MEMBER_PAGE__ = 1;
+            renderAttendanceMemberMonthlyPage(1);
         }
 
         function escapeHtml(value) {
