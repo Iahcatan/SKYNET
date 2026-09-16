@@ -462,11 +462,12 @@
                     <thead><tr>
                         <th>#</th>
                         <th data-i18n="attendanceMemberName">สมาชิก</th>
+                        <th data-i18n="attendanceRole">Role</th>
                         <th data-i18n="attendanceMemberCount">จำนวนเข้าร่วม</th>
                         <th data-i18n="attendanceMemberRaids">จำนวนกิจกรรม</th>
                         <th data-i18n="attendanceLastCheckin">เช็คชื่อล่าสุด</th>
                     </tr></thead>
-                    <tbody id="attendanceMemberMonthlyBody"><tr><td colspan="5" class="text-center text-muted">-</td></tr></tbody>
+                    <tbody id="attendanceMemberMonthlyBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>
                 </table>
             </div>
             </div>
@@ -478,6 +479,9 @@
                     <button id="attendanceIndividualCollapseBtn" type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendanceIndividualPanel()">▼ เปิด</button>
                 </div>
                 <div class="d-flex flex-wrap gap-2">
+                    <select id="attendanceIndividualRoleSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:150px;">
+                        <option value="all" data-i18n="attendanceAllRoles">ทุก Role</option>
+                    </select>
                     <select id="attendanceIndividualMemberSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:220px;">
                         <option value="" data-i18n="attendanceSelectMember">เลือกสมาชิก</option>
                     </select>
@@ -759,7 +763,7 @@
                 attendanceSubtitle: "เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord",
                 attendanceRealtime: "🟢 Real-time",
                 attendanceTotalRaids: "กิจกรรมทั้งหมด", attendanceUniqueMembers: "สมาชิกที่เข้าร่วม", attendanceTotalCheckins: "เช็คชื่อรวม",
-                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน", attendanceMemberMonthly: "👤 สรุปรายสมาชิกสะสมรายเดือน", attendanceAllMonths: "ทุกเดือน", attendanceMemberName: "สมาชิก", attendanceMemberCount: "จำนวนเข้าร่วม", attendanceMemberRaids: "จำนวนกิจกรรม", attendanceLastCheckin: "เช็คชื่อล่าสุด", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ",
+                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน", attendanceMemberMonthly: "👤 สรุปรายสมาชิกสะสมรายเดือน", attendanceAllMonths: "ทุกเดือน", attendanceMemberName: "สมาชิก", attendanceMemberCount: "จำนวนเข้าร่วม", attendanceMemberRaids: "จำนวนกิจกรรม", attendanceLastCheckin: "เช็คชื่อล่าสุด", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ", attendanceRole: "Role", attendanceAllRoles: "ทุก Role", attendanceRoleEternal: "Eternal", attendanceRoleMeaw: "Meaw", attendanceRoleAnti: "Anti",
                 attendanceBoss: "บอส", attendanceDate: "วันที่", attendanceAttackTime: "เวลาโจมตี", attendanceOpenClose: "เปิด–ปิด",
                 attendanceCount: "ผู้เข้าร่วม", attendanceCreatedBy: "สร้างโดย", attendanceStatus: "สถานะ", attendanceMonth: "เดือน",
                 attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ", attendanceCollapseOpen: "▼ เปิด", attendanceCollapseClose: "▲ ปิด",
@@ -870,7 +874,7 @@
                 attendanceSubtitle: "Real-time boss raid check-in from Discord",
                 attendanceRealtime: "🟢 Realtime",
                 attendanceTotalRaids: "Total Raids", attendanceUniqueMembers: "Unique Members", attendanceTotalCheckins: "Total Check-ins",
-                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports", attendanceMemberMonthly: "👤 Monthly Member Totals", attendanceAllMonths: "All months", attendanceMemberName: "Member", attendanceMemberCount: "Check-ins", attendanceMemberRaids: "Raids", attendanceLastCheckin: "Last Check-in", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ",
+                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports", attendanceMemberMonthly: "👤 Monthly Member Totals", attendanceAllMonths: "All months", attendanceMemberName: "Member", attendanceMemberCount: "Check-ins", attendanceMemberRaids: "Raids", attendanceLastCheckin: "Last Check-in", attendanceIndividual: "👤 Individual Attendance", attendanceSelectMember: "Select member", attendanceIndividualName: "Member", attendanceIndividualCheckins: "Check-ins", attendanceIndividualRaids: "Raids", attendanceIndividualLast: "Last Check-in", attendanceIndividualDate: "Date", attendanceIndividualBoss: "Boss", attendanceIndividualAttack: "Attack Time", attendanceIndividualCheckedAt: "Checked At", attendanceIndividualStatus: "Status", attendanceRole: "Role", attendanceAllRoles: "All Roles", attendanceRoleEternal: "Eternal", attendanceRoleMeaw: "Meaw", attendanceRoleAnti: "Anti",
                 attendanceBoss: "Boss", attendanceDate: "Date", attendanceAttackTime: "Attack Time", attendanceOpenClose: "Open–Close",
                 attendanceCount: "Participants", attendanceCreatedBy: "Created By", attendanceStatus: "Status", attendanceMonth: "Month",
                 attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins", attendanceCollapseOpen: "▼ Open", attendanceCollapseClose: "▲ Close",
@@ -981,7 +985,7 @@
                 attendanceSubtitle: "Discord에서 실시간 보스 레이드 출석 확인",
                 attendanceRealtime: "🟢 실시간",
                 attendanceTotalRaids: "전체 활동", attendanceUniqueMembers: "참여 회원", attendanceTotalCheckins: "총 출석",
-                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서", attendanceMemberMonthly: "👤 월별 회원 누적", attendanceAllMonths: "전체 월", attendanceMemberName: "회원", attendanceMemberCount: "참여 횟수", attendanceMemberRaids: "활동 수", attendanceLastCheckin: "최근 출석", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ",
+                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서", attendanceMemberMonthly: "👤 월별 회원 누적", attendanceAllMonths: "전체 월", attendanceMemberName: "회원", attendanceMemberCount: "참여 횟수", attendanceMemberRaids: "활동 수", attendanceLastCheckin: "최근 출석", attendanceIndividual: "👤 개인 출석 정보", attendanceSelectMember: "회원 선택", attendanceIndividualName: "회원", attendanceIndividualCheckins: "출석", attendanceIndividualRaids: "활동", attendanceIndividualLast: "최근 출석", attendanceIndividualDate: "날짜", attendanceIndividualBoss: "보스", attendanceIndividualAttack: "공격 시간", attendanceIndividualCheckedAt: "출석 확인 시간", attendanceIndividualStatus: "상태", attendanceRole: "역할", attendanceAllRoles: "전체 역할", attendanceRoleEternal: "Eternal", attendanceRoleMeaw: "Meaw", attendanceRoleAnti: "Anti",
                 attendanceBoss: "보스", attendanceDate: "날짜", attendanceAttackTime: "공격 시간", attendanceOpenClose: "시작–마감",
                 attendanceCount: "참여자", attendanceCreatedBy: "생성자", attendanceStatus: "상태", attendanceMonth: "월",
                 attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석", attendanceCollapseOpen: "▼ 열기", attendanceCollapseClose: "▲ 닫기",
@@ -1471,15 +1475,52 @@
             adminRefreshTimer=setInterval(refresh,15000);
         }
 
+        const ATTENDANCE_DISPLAY_ROLES = ['Eternal', 'Meaw', 'Anti'];
+
+        function normalizeAttendanceRoles(raw) {
+            const list = Array.isArray(raw) ? raw : (raw ? String(raw).split(/[,|]/) : []);
+            const seen = new Set();
+            return list.map(v => String(v || '').trim()).filter(v => {
+                const found = ATTENDANCE_DISPLAY_ROLES.find(r => r.toLowerCase() === v.toLowerCase());
+                if (!found || seen.has(found)) return false;
+                seen.add(found); return true;
+            });
+        }
+
+        function attendanceDateTimeLocale() {
+            return currentLang === 'ko' ? 'ko-KR' : currentLang === 'en' ? 'en-GB' : 'th-TH';
+        }
+
+        function formatAttendanceDateTime(value) {
+            if (!value) return '-';
+            const d = new Date(value);
+            if (isNaN(d.getTime())) return '-';
+            try { return d.toLocaleString(attendanceDateTimeLocale(), {hour12:false}); }
+            catch (_) { return d.toLocaleString(); }
+        }
+
         function refreshAttendanceIndividualSelectors() {
             const members = window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ || {};
+            const roleSelect = document.getElementById('attendanceIndividualRoleSelect');
             const memberSelect = document.getElementById('attendanceIndividualMemberSelect');
             const monthSelect = document.getElementById('attendanceIndividualMonthSelect');
+            const oldRole = roleSelect ? (roleSelect.value || 'all') : 'all';
+            const oldMember = memberSelect ? (memberSelect.value || '') : '';
+            const allowedRoles = new Set(ATTENDANCE_DISPLAY_ROLES);
+            if (roleSelect) {
+                roleSelect.innerHTML = `<option value="all">${escapeHtml(TRANSLATIONS[currentLang].attendanceAllRoles || 'All Roles')}</option>` +
+                    ATTENDANCE_DISPLAY_ROLES.map(r => `<option value="${r}">${escapeHtml(TRANSLATIONS[currentLang]['attendanceRole'+r] || r)}</option>`).join('');
+                roleSelect.value = allowedRoles.has(oldRole) ? oldRole : 'all';
+            }
+            const selectedRole = roleSelect ? String(roleSelect.value || 'all') : 'all';
+            const rows = Object.values(members)
+                .filter(r => selectedRole === 'all' || normalizeAttendanceRoles(r.roles || r.role).includes(selectedRole))
+                .sort((a,b)=>String(a.name).localeCompare(String(b.name)));
             if (memberSelect) {
-                const oldMember = memberSelect.value || '';
-                const rows = Object.values(members).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
-                memberSelect.innerHTML = `<option value="">${escapeHtml(TRANSLATIONS[currentLang].attendanceSelectMember || 'Select member')}</option>` + rows.map(r => `<option value="${escapeHtml(r.uid)}">${escapeHtml(r.name)}</option>`).join('');
-                if (oldMember && members[oldMember]) memberSelect.value = oldMember;
+                memberSelect.innerHTML = `<option value="">${escapeHtml(TRANSLATIONS[currentLang].attendanceSelectMember || 'Select member')}</option>` +
+                    rows.map(r => `<option value="${escapeHtml(r.uid)}">${escapeHtml(r.name)}${normalizeAttendanceRoles(r.roles || r.role).length ? ' • ' + escapeHtml(normalizeAttendanceRoles(r.roles || r.role).join(', ')) : ''}</option>`).join('');
+                if (oldMember && rows.some(r => String(r.uid) === oldMember)) memberSelect.value = oldMember;
+                else memberSelect.value = '';
             }
             if (monthSelect) {
                 const oldMonth = monthSelect.value || 'all';
@@ -1494,6 +1535,7 @@
         function renderAttendanceIndividual() {
             const members = window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ || {};
             const memberSelect = document.getElementById('attendanceIndividualMemberSelect');
+            const roleSelect = document.getElementById('attendanceIndividualRoleSelect');
             const monthSelect = document.getElementById('attendanceIndividualMonthSelect');
             const body = document.getElementById('attendanceIndividualBody');
             const nameEl = document.getElementById('attendanceIndividualNameValue');
@@ -1502,10 +1544,10 @@
             const lastEl = document.getElementById('attendanceIndividualLastValue');
             if (!body || !nameEl || !checksEl || !raidsEl || !lastEl) return;
             const uid = memberSelect ? String(memberSelect.value || '') : '';
+            const role = roleSelect ? String(roleSelect.value || 'all') : 'all';
             const month = monthSelect ? String(monthSelect.value || 'all') : 'all';
             const member = uid ? members[uid] : null;
-            if (uid) console.debug('[SKYNET] Attendance individual lookup', {uid: uid, found: !!member, entries: member ? (member.entries || []).length : 0, month: month});
-            if (!member) {
+            if (!member || (role !== 'all' && !normalizeAttendanceRoles(member.roles || member.role).includes(role))) {
                 nameEl.textContent = '-'; checksEl.textContent='0'; raidsEl.textContent='0'; lastEl.textContent='-';
                 body.innerHTML='<tr><td colspan="5" class="text-center text-muted">-</td></tr>';
                 return;
@@ -1514,14 +1556,15 @@
             nameEl.textContent = member.name || uid;
             checksEl.textContent = String(entries.length);
             raidsEl.textContent = String(new Set(entries.map(e=>e.activityId || `${e.activityDate}|${e.bossName}|${e.attackTime}`)).size);
-            lastEl.textContent = entries[0] && entries[0].checkedAt ? new Date(entries[0].checkedAt).toLocaleString('th-TH',{hour12:false}) : '-';
+            lastEl.textContent = entries[0] && entries[0].checkedAt ? formatAttendanceDateTime(entries[0].checkedAt) : '-';
             body.innerHTML = entries.length ? entries.map(e => {
-                const checkedAt = e.checkedAt ? new Date(e.checkedAt).toLocaleString('th-TH',{hour12:false}) : '-';
-                const status = e.status === 'checked_in' ? (currentLang==='en'?'Checked in':currentLang==='ko'?'출석':'เช็คชื่อแล้ว') : escapeHtml(e.status || '-');
+                const checkedAt = e.checkedAt ? formatAttendanceDateTime(e.checkedAt) : '-';
+                const status = e.status === 'checked_in' ? (currentLang==='en'?'Checked in':currentLang==='ko'?'출석 완료':'เช็คชื่อแล้ว') : escapeHtml(e.status || '-');
                 return `<tr><td>${escapeHtml(e.activityDate)}</td><td class="fw-bold text-warning">${escapeHtml(e.bossName)}</td><td>${escapeHtml(e.attackTime)}</td><td>${escapeHtml(checkedAt)}</td><td>${status}</td></tr>`;
             }).join('') : '<tr><td colspan="5" class="text-center text-muted">-</td></tr>';
         }
 
+        document.getElementById('attendanceIndividualRoleSelect')?.addEventListener('change', () => { refreshAttendanceIndividualSelectors(); renderAttendanceIndividual(); });
         document.getElementById('attendanceIndividualMemberSelect')?.addEventListener('change', renderAttendanceIndividual);
         document.getElementById('attendanceIndividualMonthSelect')?.addEventListener('change', renderAttendanceIndividual);
 
@@ -1710,13 +1753,16 @@
                             if(uid) unique.add(uid);
                             if(!uid || !monthKey) return;
                             const bucket = monthlyMembers[monthKey] || (monthlyMembers[monthKey]={});
-                            const row = bucket[uid] || (bucket[uid]={uid, name:p.display_name||p.username||uid, checkins:0, raids:0, lastCheckin:''});
+                            const pRoles = normalizeAttendanceRoles(p.roles || p.role);
+                            const row = bucket[uid] || (bucket[uid]={uid, name:p.display_name||p.username||uid, roles:pRoles, checkins:0, raids:0, lastCheckin:''});
+                            row.roles = normalizeAttendanceRoles([...(row.roles||[]), ...pRoles]);
                             row.checkins += 1;
                             row.raids += 1;
                             const checkedAt=String(p.checked_in_at||'');
                             if(checkedAt && (!row.lastCheckin || checkedAt > row.lastCheckin)) row.lastCheckin=checkedAt;
 
-                            const individual = individualMembers[uid] || (individualMembers[uid]={uid, name:p.display_name||p.username||uid, entries:[]});
+                            const individual = individualMembers[uid] || (individualMembers[uid]={uid, name:p.display_name||p.username||uid, roles:pRoles, entries:[]});
+                            individual.roles = normalizeAttendanceRoles([...(individual.roles||[]), ...pRoles]);
                             individual.entries.push({
                                 monthKey,
                                 bossName:String(a.boss_name||'-'),
@@ -1782,16 +1828,18 @@
             buckets.forEach(bucket => Object.values(bucket).forEach(row => {
                 const uid=String(row.uid||'');
                 if(!uid) return;
-                const out=merged[uid] || (merged[uid]={uid,name:row.name||uid,checkins:0,raids:0,lastCheckin:''});
+                const out=merged[uid] || (merged[uid]={uid,name:row.name||uid,roles:normalizeAttendanceRoles(row.roles||row.role),checkins:0,raids:0,lastCheckin:''});
                 out.checkins += Number(row.checkins||0);
                 out.raids += Number(row.raids||0);
+                if(row.roles || row.role) out.roles = normalizeAttendanceRoles([...(out.roles||[]), ...(normalizeAttendanceRoles(row.roles||row.role)||[])]);
                 if(row.lastCheckin && (!out.lastCheckin || row.lastCheckin > out.lastCheckin)) out.lastCheckin=row.lastCheckin;
             }));
             const rows=Object.values(merged).sort((a,b)=>b.checkins-a.checkins || String(a.name).localeCompare(String(b.name)));
             body.innerHTML=rows.length ? rows.map((r,i)=>{
-                const last=r.lastCheckin ? new Date(r.lastCheckin).toLocaleString('th-TH',{hour12:false}) : '-';
-                return `<tr><td>${i+1}</td><td>${escapeHtml(r.name)}</td><td><strong>${r.checkins}</strong></td><td>${r.raids}</td><td>${escapeHtml(last)}</td></tr>`;
-            }).join('') : '<tr><td colspan="5" class="text-center text-muted">-</td></tr>';
+                const last=r.lastCheckin ? formatAttendanceDateTime(r.lastCheckin) : '-';
+                const roleHtml = (r.roles||[]).length ? r.roles.map(role => `<span class="badge bg-secondary me-1">${escapeHtml(role)}</span>`).join('') : '-';
+                return `<tr><td>${i+1}</td><td>${escapeHtml(r.name)}</td><td>${roleHtml}</td><td><strong>${r.checkins}</strong></td><td>${r.raids}</td><td>${escapeHtml(last)}</td></tr>`;
+            }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
         }
 
         function escapeHtml(value) {
@@ -1981,6 +2029,12 @@
             updateNotifyButtonUI();
             applyKillDateLanguage();
             renderTable();
+            if (window.__SKYNET_ATTENDANCE_ROOT__) {
+                renderAttendanceDashboard(window.__SKYNET_ATTENDANCE_ROOT__);
+            } else {
+                refreshAttendanceIndividualSelectors();
+                renderAttendanceIndividual();
+            }
         }
 
         function changeLanguage(lang) {
