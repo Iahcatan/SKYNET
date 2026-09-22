@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V126_DISCORD_USER_NOTIFY_PERMISSION_FIX_2026-09-23 -->
+    <!-- V127_DISCORD_USER_NOTIFY_PERMISSION_FIX_2026-09-23 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -1325,7 +1325,7 @@
                     document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
                     startAttendanceRealtimeListener();
                     syncExistingWebPushSubscription().catch(() => {});
-                    applyDiscordUserNotifySettingsToUI(userData);
+                    syncDiscordUserNotifySettingsFromApi(userData).catch(() => {});
                     const adminPanel=document.getElementById('adminPanel');
                     const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
                     const adminMenu=document.getElementById('adminPanelMenuBtn');
@@ -1461,7 +1461,7 @@
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('mainDashboard').style.display = 'block';
                 syncExistingWebPushSubscription().catch(() => {});
-                applyDiscordUserNotifySettingsToUI(userData);
+                syncDiscordUserNotifySettingsFromApi(userData).catch(() => {});
                 document.getElementById('userBadge').innerText = `👤 ${userData.username || cred.user.email}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
                 const adminPanel = document.getElementById('adminPanel');
                 const adminMenu = document.getElementById('adminPanelMenuBtn');
@@ -1506,6 +1506,51 @@
             const newCode=document.getElementById('newRegCodeInput').value.trim();
             if(newCode){await settingsRef.child('register_code').set(newCode);alert(TRANSLATIONS[currentLang].codeChangedSuccess);const modal=bootstrap.Modal.getInstance(document.getElementById('changeCodeModal'));if(modal)modal.hide();}
         });
+
+        async function fetchDiscordUserNotifySettings(targetUid = currentUserKey) {
+            if (!auth.currentUser || !targetUid) return null;
+            const idToken = await auth.currentUser.getIdToken(false);
+            const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+            const response = await fetch(`${apiOrigin}/api/discord-user-notify?targetUid=${encodeURIComponent(targetUid)}`, {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${idToken}` },
+                cache: 'no-store'
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
+            return result.settings || null;
+        }
+
+        async function syncDiscordUserNotifySettingsFromApi(userData = currentUserData) {
+            try {
+                const settings = await fetchDiscordUserNotifySettings(currentUserKey);
+                if (!settings) {
+                    applyDiscordUserNotifySettingsToUI(userData);
+                    return null;
+                }
+                currentUserData = {...(userData || {}), ...settings};
+                applyDiscordUserNotifySettingsToUI(currentUserData);
+                return settings;
+            } catch (err) {
+                console.warn('[SKYNET] Discord per-user notification settings read failed:', err);
+                applyDiscordUserNotifySettingsToUI(userData);
+                return null;
+            }
+        }
+
+        async function fetchAllDiscordUserNotifySettings() {
+            if (!auth.currentUser) return {};
+            const idToken = await auth.currentUser.getIdToken(false);
+            const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+            const response = await fetch(`${apiOrigin}/api/discord-user-notify?all=1`, {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${idToken}` },
+                cache: 'no-store'
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
+            return (result.preferences && typeof result.preferences === 'object') ? result.preferences : {};
+        }
 
         function applyDiscordUserNotifySettingsToUI(userData = currentUserData) {
             const data = userData || {};
@@ -1639,12 +1684,17 @@
             }
             currentUserData = adminData;
 
-            const [usersSnap, sessionsSnap] = await Promise.all([
+            const [usersSnap, sessionsSnap, discordPrefsResult] = await Promise.all([
                 withTimeout(usersRef.once('value'), 8000, 'ADMIN_USERS_READ_TIMEOUT'),
-                withTimeout(sessionsRef.once('value'), 8000, 'ADMIN_SESSIONS_READ_TIMEOUT')
+                withTimeout(sessionsRef.once('value'), 8000, 'ADMIN_SESSIONS_READ_TIMEOUT'),
+                fetchAllDiscordUserNotifySettings().catch(err => {
+                    console.warn('[SKYNET] Admin Discord preference read failed:', err);
+                    return {};
+                })
             ]);
             const users = usersSnap.val() || {};
             const sessions = sessionsSnap.val() || {};
+            const discordPrefs = discordPrefsResult || {};
             const nowMs = Date.now();
             const statusEl = document.getElementById('adminDataStatus');
             if (statusEl) {
@@ -1653,6 +1703,8 @@
             }
 
             const userRows = Object.entries(users).map(([key, user]) => {
+                const discordPref = (discordPrefs[key] && typeof discordPrefs[key] === 'object') ? discordPrefs[key] : {};
+                const mergedUser = {...(user || {}), ...discordPref};
                 const userSessions = Object.values(sessions).filter(s => s && s.userKey === key);
                 const latestSession = userSessions.slice().sort((a,b) =>
                     new Date(b.lastSeenAt || b.loginAt || 0) - new Date(a.lastSeenAt || a.loginAt || 0)
@@ -1667,7 +1719,7 @@
                     return Number.isFinite(seenMs) && (nowMs - seenMs) >= 0 && (nowMs - seenMs) <= ACTIVE_SESSION_TIMEOUT_MS;
                 });
                 const active = userHeartbeatActive || sessionActive;
-                return {key, user, active, lastSeen};
+                return {key, user: mergedUser, active, lastSeen};
             });
 
             const pendingCount = userRows.filter(x => x.user.status === 'pending').length;
