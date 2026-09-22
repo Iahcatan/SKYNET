@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V125_DISCORD_USER_NOTIFY_429_SAFE_FIX_2026-09-22 -->
+    <!-- V126_DISCORD_USER_NOTIFY_PERMISSION_FIX_2026-09-23 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -1536,19 +1536,34 @@
                 if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyNeedId;
                 return;
             }
-            const now = new Date().toISOString();
             const updates = {
                 discordUserId: discordUserId,
                 discordNotificationLanguage: language,
-                discordNotificationEnabled: enabled,
-                discordNotificationUpdatedAt: now
+                discordNotificationEnabled: enabled
             };
             try {
-                await usersRef.child(currentUserKey).update(updates);
-                currentUserData = {...(currentUserData || {}), ...updates};
+                const idToken = await auth.currentUser.getIdToken(false);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/discord-user-notify`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${idToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({targetUid: currentUserKey, ...updates})
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || `HTTP ${response.status}`);
+                }
+                const savedUpdates = {
+                    ...updates,
+                    discordNotificationUpdatedAt: result.discordNotificationUpdatedAt || new Date().toISOString()
+                };
+                currentUserData = {...(currentUserData || {}), ...savedUpdates};
                 applyDiscordUserNotifySettingsToUI(currentUserData);
                 if (statusEl) statusEl.textContent = enabled ? TRANSLATIONS[currentLang].discordUserNotifySaved : TRANSLATIONS[currentLang].discordUserNotifyDisabled;
-                console.info('[SKYNET] Discord per-user notification settings saved', updates);
+                console.info('[SKYNET] Discord per-user notification settings saved via Admin SDK API', savedUpdates);
                 if (currentUserData.role === 'admin') loadAdminUsers().catch(() => {});
             } catch (err) {
                 if (statusEl) statusEl.textContent = `❌ ${err.message || err}`;
@@ -1575,15 +1590,26 @@
                 if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyNeedId;
                 return;
             }
-            const now = new Date().toISOString();
             const updates = {
                 discordUserId,
                 discordNotificationLanguage: language,
-                discordNotificationEnabled: enabled,
-                discordNotificationUpdatedAt: now
+                discordNotificationEnabled: enabled
             };
             try {
-                await usersRef.child(userKey).update(updates);
+                const idToken = await auth.currentUser.getIdToken(false);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/discord-user-notify`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${idToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({targetUid: userKey, ...updates})
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || `HTTP ${response.status}`);
+                }
                 if (statusEl) statusEl.textContent = enabled ? `✅ ${TRANSLATIONS[currentLang].discordUserNotifySaved}` : `🔕 ${TRANSLATIONS[currentLang].discordUserNotifyDisabled}`;
             } catch (err) {
                 if (statusEl) statusEl.textContent = `❌ ${err.message || err}`;
