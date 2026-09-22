@@ -2174,7 +2174,7 @@
 
             applyLanguage();
             if (webPushEnabled && auth.currentUser && Notification.permission === 'granted') {
-                ensureWebPushSubscription().catch(err => console.warn('[SKYNET] Push language sync skipped:', err));
+                syncPushPreferences().catch(err => console.warn('[SKYNET] Push language sync skipped:', err));
             }
         }
 
@@ -2182,6 +2182,9 @@
             currentTz = tz;
             localStorage.setItem('app_tz', tz);
             renderTable();
+            if (webPushEnabled && auth.currentUser && Notification.permission === 'granted') {
+                syncPushPreferences().catch(err => console.warn('[SKYNET] Push timezone sync skipped:', err));
+            }
         }
 
         // V107: Resolve the IANA timezone used for typed boss times.
@@ -2193,6 +2196,43 @@
                 return detected || 'Asia/Bangkok';
             } catch (_) {
                 return 'Asia/Bangkok';
+            }
+        }
+
+        async function syncPushPreferences() {
+            if (!auth.currentUser || !webPushEnabled) return;
+            const apiOrigin = getPushApiOrigin();
+            const timezone = getSelectedInputTimezone();
+            const language = ['th', 'en', 'ko'].includes(currentLang) ? currentLang : 'th';
+            const token = webPushToken || localStorage.getItem('web_push_token') || '';
+            let endpoint = localStorage.getItem('web_push_endpoint') || '';
+            try {
+                if (isIOSDevice()) {
+                    const registration = webPushRegistration || await navigator.serviceWorker.getRegistration('/SKYNET/');
+                    if (registration && registration.pushManager) {
+                        const subscription = await registration.pushManager.getSubscription();
+                        endpoint = subscription ? subscription.endpoint : endpoint;
+                    }
+                }
+                if (!token && !endpoint) return;
+                const idToken = await auth.currentUser.getIdToken(false);
+                const response = await fetch(`${apiOrigin}/api/push/preferences`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${idToken}`
+                    },
+                    body: JSON.stringify({ token, endpoint, language, timezone })
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.success) throw new Error(result.error || `Push preference HTTP ${response.status}`);
+                localStorage.setItem('web_push_language', language);
+                localStorage.setItem('web_push_timezone', timezone);
+                webPushLastRegisteredLanguage = language;
+                webPushLastRegisteredTimezone = timezone;
+                console.info('[SKYNET] Push language/timezone synced:', language, timezone);
+            } catch (err) {
+                console.warn('[SKYNET] Push preference sync skipped:', err);
             }
         }
 
@@ -2371,7 +2411,8 @@
                 },
                 body: JSON.stringify({
                     subscription: subscription.toJSON ? subscription.toJSON() : subscription,
-                    language: (['th', 'en', 'ko'].includes(currentLang) ? currentLang : 'th')
+                    language: (['th', 'en', 'ko'].includes(currentLang) ? currentLang : 'th'),
+                    timezone: getSelectedInputTimezone()
                 })
             });
             const result = await response.json().catch(() => ({}));
@@ -2389,6 +2430,7 @@
         let webPushRegistrationPromise = null;
         let webPushLastRegisteredToken = localStorage.getItem('web_push_token') || '';
         let webPushLastRegisteredLanguage = localStorage.getItem('web_push_language') || '';
+        let webPushLastRegisteredTimezone = localStorage.getItem('web_push_timezone') || '';
 
         async function ensureWebPushSubscription() {
             if (webPushRegistrationPromise) return webPushRegistrationPromise;
@@ -2426,6 +2468,7 @@
                 if (!token) throw new Error('FCM ไม่คืน registration token — ตรวจ Notification permission, FCM Registration API และ service worker');
 
                 const language = ['th', 'en', 'ko'].includes(currentLang) ? currentLang : 'th';
+                const timezone = getSelectedInputTimezone();
                 webPushToken = token;
                 webPushEnabled = true;
                 localStorage.setItem('web_push_token', token);
@@ -2434,7 +2477,7 @@
 
                 // The same browser/device token and language are already registered.
                 // Do not POST repeatedly on every auth-state callback or language render.
-                if (webPushLastRegisteredToken === token && webPushLastRegisteredLanguage === language) {
+                if (webPushLastRegisteredToken === token && webPushLastRegisteredLanguage === language && webPushLastRegisteredTimezone === timezone) {
                     return token;
                 }
 
@@ -2445,13 +2488,15 @@
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${idToken}`
                     },
-                    body: JSON.stringify({ token, language })
+                    body: JSON.stringify({ token, language, timezone })
                 });
                 const result = await response.json().catch(() => ({}));
                 if (!response.ok || !result.success) throw new Error(result.error || `Push registration HTTP ${response.status}`);
                 webPushLastRegisteredToken = token;
                 webPushLastRegisteredLanguage = language;
+                webPushLastRegisteredTimezone = timezone;
                 localStorage.setItem('web_push_language', language);
+                localStorage.setItem('web_push_timezone', timezone);
                 return token;
             })();
             try {
@@ -2493,6 +2538,7 @@
             }
             localStorage.removeItem('web_push_endpoint');
             localStorage.removeItem('web_push_mode');
+            localStorage.removeItem('web_push_timezone');
         }
 
         async function disableWebPushSubscription() {
@@ -2519,6 +2565,7 @@
                 localStorage.removeItem('web_push_token');
                 localStorage.removeItem('web_push_mode');
                 localStorage.removeItem('web_push_language');
+                localStorage.removeItem('web_push_timezone');
                 webPushLastRegisteredToken = '';
                 webPushLastRegisteredLanguage = '';
             }
@@ -2545,7 +2592,8 @@
                         },
                         body: JSON.stringify({
                             subscription: subscription.toJSON ? subscription.toJSON() : subscription,
-                            language: (['th', 'en', 'ko'].includes(currentLang) ? currentLang : 'th')
+                            language: (['th', 'en', 'ko'].includes(currentLang) ? currentLang : 'th'),
+                            timezone: getSelectedInputTimezone()
                         })
                     });
                     const result = await response.json().catch(() => ({}));
@@ -2554,9 +2602,12 @@
                     localStorage.setItem('web_push_enabled', 'true');
                     localStorage.setItem('web_push_mode', 'ios-webpush');
                     localStorage.setItem('web_push_endpoint', subscription.endpoint);
+                    localStorage.setItem('web_push_language', ['th', 'en', 'ko'].includes(currentLang) ? currentLang : 'th');
+                    localStorage.setItem('web_push_timezone', getSelectedInputTimezone());
                 } else {
                     await ensureWebPushSubscription();
                 }
+                await syncPushPreferences();
             } catch (err) {
                 console.warn('[SKYNET] Existing Web Push sync skipped:', err);
             }
