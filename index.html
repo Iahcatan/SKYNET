@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V115_WAITRESS_SSE_FCM_REGISTRATION_FIX_2026-09-14 -->
+    <!-- V125_DISCORD_USER_NOTIFY_429_SAFE_FIX_2026-09-22 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -309,6 +309,42 @@
             </div>
         </div>
 
+        <!-- 🔔 V125: Per-user Discord DM notification preferences -->
+        <div class="card p-3 mb-4 shadow-sm">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                <div>
+                    <h5 class="mb-1 text-info" data-i18n="discordUserNotifyTitle">💬 Discord DM แจ้งเตือนส่วนตัว</h5>
+                    <small class="text-white-50" data-i18n="discordUserNotifySubtitle">ตั้งค่าเฉพาะบัญชีนี้เท่านั้น • ไม่เปลี่ยนข้อความประกาศในห้อง Discord เดิม</small>
+                </div>
+                <span class="badge bg-secondary" data-i18n="discordUserNotifyOptIn">🔐 Opt-in</span>
+            </div>
+            <div class="row g-3 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label" for="discordUserIdInput" data-i18n="discordUserIdLabel">Discord User ID</label>
+                    <input id="discordUserIdInput" class="form-control" inputmode="numeric" autocomplete="off" placeholder="เช่น 123456789012345678" data-i18n-ph="discordUserIdPlaceholder">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label" for="discordUserLangSelect" data-i18n="discordUserLangLabel">ภาษาการแจ้งเตือนใน Discord</label>
+                    <select id="discordUserLangSelect" class="form-select">
+                        <option value="th">🇹🇭 ไทย</option>
+                        <option value="en">🇺🇸 English</option>
+                        <option value="ko">🇰🇷 한국어</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="discordUserNotifyEnabled">
+                        <label class="form-check-label text-white" for="discordUserNotifyEnabled" data-i18n="discordUserNotifyEnabledLabel">เปิดรับ DM จาก Boss Timer</label>
+                    </div>
+                    <small class="text-white-50" data-i18n="discordUserNotifyNote">ระบบจะส่งเฉพาะเมื่อเปิดใช้งานและมี Discord User ID</small>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-outline-info w-100" onclick="saveDiscordUserNotifySettings()" data-i18n="discordUserNotifySave">💾 บันทึก</button>
+                </div>
+            </div>
+            <div id="discordUserNotifyStatus" class="small mt-2 text-white-50"></div>
+        </div>
+
         <!-- 🔐 Admin User Management -->
         <div id="adminPanel" class="card p-4 mb-4 shadow-sm" style="display:none;">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -355,6 +391,7 @@
                             <th data-i18n="adminThLastLogin">เข้าสู่ระบบล่าสุด</th>
                             <th data-i18n="adminThLastSeen">ใช้งานล่าสุด</th>
                             <th data-i18n="adminThLogins">จำนวนครั้ง</th>
+                            <th data-i18n="adminThDiscord">Discord DM</th>
                             <th data-i18n="adminThAction">จัดการ</th>
                         </tr>
                     </thead>
@@ -837,7 +874,21 @@
                 adminThLastLogin: "เข้าสู่ระบบล่าสุด",
                 adminThLastSeen: "ใช้งานล่าสุด",
                 adminThLogins: "จำนวนครั้ง",
+                adminThDiscord: "Discord DM",
                 adminThAction: "จัดการ",
+                discordUserNotifyTitle: "💬 Discord DM แจ้งเตือนส่วนตัว",
+                discordUserNotifySubtitle: "ตั้งค่าเฉพาะบัญชีนี้เท่านั้น • ไม่เปลี่ยนข้อความประกาศในห้อง Discord เดิม",
+                discordUserNotifyOptIn: "🔐 เปิดใช้งานเอง",
+                discordUserIdLabel: "Discord User ID",
+                discordUserIdPlaceholder: "เช่น 123456789012345678",
+                discordUserLangLabel: "ภาษาการแจ้งเตือนใน Discord",
+                discordUserNotifyEnabledLabel: "เปิดรับ DM จาก Boss Timer",
+                discordUserNotifyNote: "ระบบจะส่งเฉพาะเมื่อเปิดใช้งานและมี Discord User ID",
+                discordUserNotifySave: "💾 บันทึก",
+                discordUserNotifySaved: "✅ บันทึกการตั้งค่า Discord DM แล้ว",
+                discordUserNotifyNeedId: "⚠️ กรุณากรอก Discord User ID ให้ถูกต้อง หรือปิดการแจ้งเตือน",
+                discordUserNotifyInvalidLang: "⚠️ ภาษาที่เลือกไม่ถูกต้อง",
+                discordUserNotifyDisabled: "ปิดรับ Discord DM แล้ว",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
                 adminDisable: "ปิดใช้งาน",
@@ -948,7 +999,21 @@
                 adminThLastLogin: "Last Login",
                 adminThLastSeen: "Last Seen",
                 adminThLogins: "Logins",
+                adminThDiscord: "Discord DM",
                 adminThAction: "Action",
+                discordUserNotifyTitle: "💬 Personal Discord DM Alerts",
+                discordUserNotifySubtitle: "Only this account is affected • Existing public Discord channel messages remain unchanged",
+                discordUserNotifyOptIn: "🔐 Opt-in",
+                discordUserIdLabel: "Discord User ID",
+                discordUserIdPlaceholder: "e.g. 123456789012345678",
+                discordUserLangLabel: "Discord notification language",
+                discordUserNotifyEnabledLabel: "Receive Boss Timer DMs",
+                discordUserNotifyNote: "DMs are sent only when enabled and a Discord User ID is set",
+                discordUserNotifySave: "💾 Save",
+                discordUserNotifySaved: "✅ Discord DM settings saved",
+                discordUserNotifyNeedId: "⚠️ Enter a valid Discord User ID or turn notifications off",
+                discordUserNotifyInvalidLang: "⚠️ Invalid notification language",
+                discordUserNotifyDisabled: "Discord DMs disabled",
                 adminApprove: "Approve",
                 adminReject: "Reject",
                 adminDisable: "Disable",
@@ -1059,7 +1124,21 @@
                 adminThLastLogin: "최근 로그인",
                 adminThLastSeen: "최근 활동",
                 adminThLogins: "로그인 횟수",
+                adminThDiscord: "Discord DM",
                 adminThAction: "관리",
+                discordUserNotifyTitle: "💬 개인 Discord DM 알림",
+                discordUserNotifySubtitle: "이 계정에만 적용됩니다 • 기존 공개 Discord 채널 공지는 변경되지 않습니다",
+                discordUserNotifyOptIn: "🔐 옵트인",
+                discordUserIdLabel: "Discord User ID",
+                discordUserIdPlaceholder: "예: 123456789012345678",
+                discordUserLangLabel: "Discord 알림 언어",
+                discordUserNotifyEnabledLabel: "Boss Timer DM 받기",
+                discordUserNotifyNote: "활성화하고 Discord User ID를 입력한 경우에만 DM을 보냅니다",
+                discordUserNotifySave: "💾 저장",
+                discordUserNotifySaved: "✅ Discord DM 설정이 저장되었습니다",
+                discordUserNotifyNeedId: "⚠️ 올바른 Discord User ID를 입력하거나 알림을 꺼주세요",
+                discordUserNotifyInvalidLang: "⚠️ 잘못된 알림 언어입니다",
+                discordUserNotifyDisabled: "Discord DM 알림이 꺼졌습니다",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
                 adminDisable: "ปิดใช้งาน",
@@ -1246,6 +1325,7 @@
                     document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
                     startAttendanceRealtimeListener();
                     syncExistingWebPushSubscription().catch(() => {});
+                    applyDiscordUserNotifySettingsToUI(userData);
                     const adminPanel=document.getElementById('adminPanel');
                     const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
                     const adminMenu=document.getElementById('adminPanelMenuBtn');
@@ -1296,7 +1376,8 @@
                 const now=new Date().toISOString();
                 await usersRef.child(cred.user.uid).set({
                     username, usernameKey:makeUserKey(username), role:'user', status:'pending', createdAt:now,
-                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
+                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0,
+                    discordUserId:'',discordNotificationLanguage:'th',discordNotificationEnabled:false,discordNotificationUpdatedAt:null
                 });
                 await auth.signOut();
                 alert(TRANSLATIONS[currentLang].regPending);
@@ -1380,6 +1461,7 @@
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('mainDashboard').style.display = 'block';
                 syncExistingWebPushSubscription().catch(() => {});
+                applyDiscordUserNotifySettingsToUI(userData);
                 document.getElementById('userBadge').innerText = `👤 ${userData.username || cred.user.email}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
                 const adminPanel = document.getElementById('adminPanel');
                 const adminMenu = document.getElementById('adminPanelMenuBtn');
@@ -1424,6 +1506,90 @@
             const newCode=document.getElementById('newRegCodeInput').value.trim();
             if(newCode){await settingsRef.child('register_code').set(newCode);alert(TRANSLATIONS[currentLang].codeChangedSuccess);const modal=bootstrap.Modal.getInstance(document.getElementById('changeCodeModal'));if(modal)modal.hide();}
         });
+
+        function applyDiscordUserNotifySettingsToUI(userData = currentUserData) {
+            const data = userData || {};
+            const idEl = document.getElementById('discordUserIdInput');
+            const langEl = document.getElementById('discordUserLangSelect');
+            const enabledEl = document.getElementById('discordUserNotifyEnabled');
+            if (idEl) idEl.value = data.discordUserId || '';
+            if (langEl) langEl.value = ['th', 'en', 'ko'].includes(String(data.discordNotificationLanguage || '')) ? data.discordNotificationLanguage : 'th';
+            if (enabledEl) enabledEl.checked = data.discordNotificationEnabled === true || data.discordNotificationEnabled === 'true';
+            const statusEl = document.getElementById('discordUserNotifyStatus');
+            if (statusEl) statusEl.textContent = enabledEl && enabledEl.checked ? '🟢 Discord DM: ON' : '🔕 Discord DM: OFF';
+        }
+
+        async function saveDiscordUserNotifySettings() {
+            if (!await requireApprovedUser()) return;
+            const idEl = document.getElementById('discordUserIdInput');
+            const langEl = document.getElementById('discordUserLangSelect');
+            const enabledEl = document.getElementById('discordUserNotifyEnabled');
+            const statusEl = document.getElementById('discordUserNotifyStatus');
+            const discordUserId = String(idEl?.value || '').trim();
+            const language = String(langEl?.value || 'th').trim().toLowerCase();
+            const enabled = !!enabledEl?.checked;
+            if (!['th', 'en', 'ko'].includes(language)) {
+                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyInvalidLang;
+                return;
+            }
+            if (enabled && !/^\d{15,22}$/.test(discordUserId)) {
+                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyNeedId;
+                return;
+            }
+            const now = new Date().toISOString();
+            const updates = {
+                discordUserId: discordUserId,
+                discordNotificationLanguage: language,
+                discordNotificationEnabled: enabled,
+                discordNotificationUpdatedAt: now
+            };
+            try {
+                await usersRef.child(currentUserKey).update(updates);
+                currentUserData = {...(currentUserData || {}), ...updates};
+                applyDiscordUserNotifySettingsToUI(currentUserData);
+                if (statusEl) statusEl.textContent = enabled ? TRANSLATIONS[currentLang].discordUserNotifySaved : TRANSLATIONS[currentLang].discordUserNotifyDisabled;
+                console.info('[SKYNET] Discord per-user notification settings saved', updates);
+                if (currentUserData.role === 'admin') loadAdminUsers().catch(() => {});
+            } catch (err) {
+                if (statusEl) statusEl.textContent = `❌ ${err.message || err}`;
+                console.error('[SKYNET] Discord per-user notification settings save failed:', err);
+            }
+        }
+
+        async function saveAdminDiscordUserSettings(userKey) {
+            if (!await requireAdmin()) return;
+            const root = document.getElementById(`admin-discord-${userKey}`);
+            if (!root) return;
+            const idInput = root.querySelector('[data-role="discord-id"]');
+            const langSelect = root.querySelector('[data-role="discord-lang"]');
+            const enabledInput = root.querySelector('[data-role="discord-enabled"]');
+            const statusEl = root.querySelector('[data-role="discord-status"]');
+            const discordUserId = String(idInput?.value || '').trim();
+            const language = String(langSelect?.value || 'th').trim().toLowerCase();
+            const enabled = !!enabledInput?.checked;
+            if (!['th', 'en', 'ko'].includes(language)) {
+                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyInvalidLang;
+                return;
+            }
+            if (enabled && !/^\d{15,22}$/.test(discordUserId)) {
+                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyNeedId;
+                return;
+            }
+            const now = new Date().toISOString();
+            const updates = {
+                discordUserId,
+                discordNotificationLanguage: language,
+                discordNotificationEnabled: enabled,
+                discordNotificationUpdatedAt: now
+            };
+            try {
+                await usersRef.child(userKey).update(updates);
+                if (statusEl) statusEl.textContent = enabled ? `✅ ${TRANSLATIONS[currentLang].discordUserNotifySaved}` : `🔕 ${TRANSLATIONS[currentLang].discordUserNotifyDisabled}`;
+            } catch (err) {
+                if (statusEl) statusEl.textContent = `❌ ${err.message || err}`;
+                console.error('[SKYNET] Admin Discord per-user settings failed:', err);
+            }
+        }
 
         // --- Admin User Management ---
         async function requireAdmin(){
@@ -1507,11 +1673,30 @@
                     else if(user.status==='approved') actionHtml=`<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}','disabled')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;
                     else actionHtml=`<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}','approved')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;
                 }
+                const discordEnabled = user.discordNotificationEnabled === true || user.discordNotificationEnabled === 'true';
+                const discordLang = ['th','en','ko'].includes(String(user.discordNotificationLanguage || '')) ? String(user.discordNotificationLanguage) : 'th';
+                const discordId = escapeHtml(user.discordUserId || '');
+                const discordCell = `
+                    <div id="admin-discord-${key}" class="d-flex flex-column gap-1" style="min-width:240px;">
+                        <input class="form-control form-control-sm" data-role="discord-id" inputmode="numeric" value="${discordId}" placeholder="Discord User ID">
+                        <div class="d-flex gap-1 align-items-center">
+                            <select class="form-select form-select-sm" data-role="discord-lang" style="max-width:115px;">
+                                <option value="th" ${discordLang==='th'?'selected':''}>🇹🇭 TH</option>
+                                <option value="en" ${discordLang==='en'?'selected':''}>🇺🇸 EN</option>
+                                <option value="ko" ${discordLang==='ko'?'selected':''}>🇰🇷 KO</option>
+                            </select>
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" data-role="discord-enabled" ${discordEnabled?'checked':''}>
+                            </div>
+                            <button class="btn btn-sm btn-outline-info" onclick="saveAdminDiscordUserSettings('${key}')">💾</button>
+                        </div>
+                        <small class="text-white-50" data-role="discord-status">${discordEnabled ? '🟢 ON' : '🔕 OFF'}</small>
+                    </div>`;
                 const tr=document.createElement('tr');
-                tr.innerHTML=`<td><div class="fw-bold text-info">${escapeHtml(user.username||key)}</div><small class="text-white-50">${user.role==='admin'?'Admin':'User'}</small></td><td>${statusBadge}</td><td><small>${formatAdminDate(user.createdAt)}</small></td><td><small>${formatAdminDate(user.lastLoginAt)}</small></td><td><small>${formatAdminDate(lastSeen)}</small></td><td>${Number(user.loginCount)||0}</td><td>${actionHtml}</td>`;
+                tr.innerHTML=`<td><div class="fw-bold text-info">${escapeHtml(user.username||key)}</div><small class="text-white-50">${user.role==='admin'?'Admin':'User'}</small></td><td>${statusBadge}</td><td><small>${formatAdminDate(user.createdAt)}</small></td><td><small>${formatAdminDate(user.lastLoginAt)}</small></td><td><small>${formatAdminDate(lastSeen)}</small></td><td>${Number(user.loginCount)||0}</td><td>${discordCell}</td><td>${actionHtml}</td>`;
                 tbody.appendChild(tr);
             });
-            if(!userRows.length) tbody.innerHTML=`<tr><td colspan="8" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
+            if(!userRows.length) tbody.innerHTML=`<tr><td colspan="9" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
         }
 
         function startAdminRealtimeListeners(){
@@ -3090,7 +3275,10 @@
             toggleAttendancePanel,
             toggleAttendanceHistoryPanel,
             toggleAttendanceMemberMonthlyPanel,
-            toggleAttendanceIndividualPanel
+            toggleAttendanceIndividualPanel,
+            saveDiscordUserNotifySettings,
+            applyDiscordUserNotifySettingsToUI,
+            saveAdminDiscordUserSettings
         });
 
         // Keep delete failures visible to the user.
