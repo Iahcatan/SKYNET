@@ -2462,7 +2462,40 @@
             }
         }
 
-        async function syncPushPreferences() {
+        function syncPushPreferences() {
+            if (!auth.currentUser || !webPushEnabled) return Promise.resolve();
+            webPushPreferenceSyncDirty = true;
+            const promise = new Promise((resolve, reject) => {
+                webPushPreferenceSyncWaiters.push({ resolve, reject });
+            });
+            if (!webPushPreferenceSyncInFlight) {
+                if (webPushPreferenceSyncTimer) clearTimeout(webPushPreferenceSyncTimer);
+                webPushPreferenceSyncTimer = setTimeout(runQueuedPushPreferenceSync, 750);
+            }
+            return promise;
+        }
+
+        async function runQueuedPushPreferenceSync() {
+            webPushPreferenceSyncTimer = null;
+            if (webPushPreferenceSyncInFlight || !webPushPreferenceSyncDirty) return;
+            webPushPreferenceSyncInFlight = true;
+            webPushPreferenceSyncDirty = false;
+            const waiters = webPushPreferenceSyncWaiters;
+            webPushPreferenceSyncWaiters = [];
+            try {
+                const result = await syncPushPreferencesNow();
+                waiters.forEach(({ resolve }) => resolve(result));
+            } catch (err) {
+                waiters.forEach(({ reject }) => reject(err));
+            } finally {
+                webPushPreferenceSyncInFlight = false;
+                if (webPushPreferenceSyncDirty) {
+                    webPushPreferenceSyncTimer = setTimeout(runQueuedPushPreferenceSync, 250);
+                }
+            }
+        }
+
+        async function syncPushPreferencesNow() {
             if (!auth.currentUser || !webPushEnabled) return;
             const apiOrigin = getPushApiOrigin();
             const timezone = getSelectedInputTimezone();
@@ -2694,6 +2727,10 @@
         let webPushLastRegisteredToken = localStorage.getItem('web_push_token') || '';
         let webPushLastRegisteredLanguage = localStorage.getItem('web_push_language') || '';
         let webPushLastRegisteredTimezone = localStorage.getItem('web_push_timezone') || '';
+        let webPushPreferenceSyncTimer = null;
+        let webPushPreferenceSyncInFlight = false;
+        let webPushPreferenceSyncDirty = false;
+        let webPushPreferenceSyncWaiters = [];
 
         async function ensureWebPushSubscription() {
             if (webPushRegistrationPromise) return webPushRegistrationPromise;
