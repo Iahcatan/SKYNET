@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V145_AUTOATTENDANCE_429_TERMINAL_STALE_QUEUE_REST_RECOVERY_FIX_2026-09-24 -->
+    <!-- V146_DASHBOARD_DELETE_CONFIRMATION_FIX_2026-09-24 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -835,6 +835,7 @@
                 footer: "ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ",
                 invalidTimeAlert: "กรุณากรอกเวลาให้ถูกต้องตามระบบ 24 ชั่วโมง (เช่น 08:30 หรือ 17:45)",
                 confirmClear: "คุณต้องการล้างตารางบอสทั้งหมดใช่หรือไม่?",
+                confirmDelete: "คุณต้องการลบบอส {boss} ใช่หรือไม่?",
                 notifyReadyTitle: "⚔️ ระบบแจ้งเตือนพร้อมทำงาน",
                 notifyReadyBody: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว",
                 noNotifySupport: "เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือนแบบ Pop-up",
@@ -960,6 +961,7 @@
                 footer: "Real-time Boss Countdown System • Synced with Cloud Database",
                 invalidTimeAlert: "Please enter time in valid 24-hour format (e.g. 08:30 or 17:45)",
                 confirmClear: "Are you sure you want to clear all boss timers?",
+                confirmDelete: "Are you sure you want to delete boss {boss}?",
                 notifyReadyTitle: "⚔️ Notifications Active",
                 notifyReadyBody: "You will be alerted before boss spawns and when spawned.",
                 noNotifySupport: "This browser does not support Pop-up notifications.",
@@ -1085,6 +1087,7 @@
                 footer: "실시간 보스 카운트다운 시스템 • 클라우드 자동 동기화",
                 invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 หรือ 17:45)",
                 confirmClear: "모든 보스 타이머를 삭제하시겠습니까?",
+                confirmDelete: "보스 {boss}을(를) 삭제하시겠습니까?",
                 notifyReadyTitle: "⚔️ 알림 시스템 준비 완료",
                 notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",
                 noNotifySupport: "이 브라우저는 팝업 알림을 지원하지 않습니다.",
@@ -3287,6 +3290,8 @@
                 deleteBtn.className = 'btn btn-sm btn-danger';
                 deleteBtn.textContent = langData.btnDelete;
                 deleteBtn.addEventListener('click', () => {
+                    const confirmText = (langData.confirmDelete || 'Are you sure you want to delete boss {boss}?').replace('{boss}', bossName);
+                    if (!window.confirm(confirmText)) return;
                     window.deleteBoss(bossName);
                 });
                 tr.querySelector('.boss-action-cell').appendChild(deleteBtn);
