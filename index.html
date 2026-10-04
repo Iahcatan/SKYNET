@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V182_DISCORD_API_BLOCK_GATEWAY_ONREADY_RECOVERY_STATE_RACE_FIX_2026-10-03 | BASE=V181_DISCORD_API_BLOCK_REPEATED_429_ESCALATED_RECOVERY_GUARD_FIX_2026-10-03 -->
+    <!-- V183_INOTIAWAR_GUILDSIEGE_WEEKLY_VOICE_DASHBOARD_2026-10-04 | BASE=V182_DISCORD_API_BLOCK_GATEWAY_ONREADY_RECOVERY_STATE_RACE_FIX_2026-10-03 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -458,6 +458,31 @@
             </div>
         </div>
 
+        <!-- 🛡️ Weekly Guild Siege fixed schedule (display-only; does not alter boss_schedule) -->
+        <div class="card p-4 mb-4 shadow-sm" id="weeklyEventsSection">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <div>
+                    <h4 class="card-title text-primary mb-1" data-i18n="weeklyEventsTitle">🛡️ ตารางกิจกรรมประจำสัปดาห์</h4>
+                    <div class="text-white-50 small" data-i18n="weeklyEventsSubtitle">ตารางคงที่ • เวลาอ้างอิงประเทศไทย (Asia/Bangkok)</div>
+                </div>
+                <span id="weeklyEventsTimezoneBadge" class="badge bg-secondary">Asia/Bangkok</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th data-i18n="weeklyEventName">กิจกรรม</th>
+                            <th data-i18n="weeklyEventDay">วัน</th>
+                            <th data-i18n="weeklyEventTime">เวลา</th>
+                            <th data-i18n="weeklyEventNext">ครั้งถัดไป</th>
+                            <th data-i18n="weeklyEventCountdown">นับถอยหลัง</th>
+                        </tr>
+                    </thead>
+                    <tbody id="weeklyEventsBody"></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- ⚔️ Boss Raid Attendance -->
         <div class="card p-4 mb-4 shadow-sm" id="attendanceDashboardSection">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -817,6 +842,12 @@
                 labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",
                 btnSave: "⚔️ บันทึกเวลา",
                 tableTitle: "📜 ตารางเวลาบอสล่าสุด",
+                weeklyEventsTitle: "🛡️ ตารางกิจกรรมประจำสัปดาห์",
+                weeklyEventsSubtitle: "ตารางคงที่ • เวลาอ้างอิงประเทศไทย (Asia/Bangkok)",
+                weeklyEventName: "กิจกรรม", weeklyEventDay: "วัน", weeklyEventTime: "เวลา",
+                weeklyEventNext: "ครั้งถัดไป", weeklyEventCountdown: "นับถอยหลัง",
+                guildSiegeName: "Guild Siege", dayWednesday: "วันพุธ", daySunday: "วันอาทิตย์",
+                weeklyNow: "กำลังถึงเวลา", weeklyHours: "ชม.", weeklyMinutes: "นาที", weeklySeconds: "วินาที",
                 btnClear: "ล้างข้อมูลทั้งหมด",
                 thBoss: "ชื่อบอส",
                 thKillDate: "วันที่",
@@ -943,6 +974,12 @@
                 labelNotice: "Advance Notice (Mins)",
                 btnSave: "⚔️ Save Time",
                 tableTitle: "📜 Boss Schedule Table",
+                weeklyEventsTitle: "🛡️ Weekly Guild Events",
+                weeklyEventsSubtitle: "Fixed schedule • Source time: Thailand (Asia/Bangkok)",
+                weeklyEventName: "Event", weeklyEventDay: "Day", weeklyEventTime: "Time",
+                weeklyEventNext: "Next", weeklyEventCountdown: "Countdown",
+                guildSiegeName: "Guild Siege", dayWednesday: "Wednesday", daySunday: "Sunday",
+                weeklyNow: "Now", weeklyHours: "h", weeklyMinutes: "m", weeklySeconds: "s",
                 btnClear: "Clear All Data",
                 thBoss: "Boss Name",
                 thKillDate: "Date",
@@ -1069,6 +1106,12 @@
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
                 tableTitle: "📜 최근 보스 시간표",
+                weeklyEventsTitle: "🛡️ 주간 길드 이벤트",
+                weeklyEventsSubtitle: "고정 일정 • 기준 시간: 태국 (Asia/Bangkok)",
+                weeklyEventName: "이벤트", weeklyEventDay: "요일", weeklyEventTime: "시간",
+                weeklyEventNext: "다음 일정", weeklyEventCountdown: "카운트다운",
+                guildSiegeName: "Guild Siege", dayWednesday: "수요일", daySunday: "일요일",
+                weeklyNow: "지금", weeklyHours: "시간", weeklyMinutes: "분", weeklySeconds: "초",
                 btnClear: "전체 목록 삭제",
                 thBoss: "보스 이름",
                 thKillDate: "날짜",
@@ -2498,6 +2541,7 @@
                 refreshAttendanceIndividualSelectors();
                 renderAttendanceIndividual();
             }
+            updateWeeklyEvents();
         }
 
         function changeLanguage(lang) {
@@ -3419,6 +3463,96 @@
             });
         }
 
+        const WEEKLY_GUILD_SIEGE_ROWS = [
+            { weekday: 3, hour: 12, minute: 30, dayKey: 'dayWednesday' },
+            { weekday: 0, hour: 12, minute: 30, dayKey: 'daySunday' }
+        ];
+
+        function getBangkokDateParts(date) {
+            const parts = new Intl.DateTimeFormat('en-CA', {
+                timeZone: 'Asia/Bangkok',
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+            }).formatToParts(date).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+            return {
+                year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
+                hour: Number(parts.hour), minute: Number(parts.minute), second: Number(parts.second)
+            };
+        }
+
+        function bangkokOccurrenceFromLocalParts(year, month, day, hour, minute) {
+            return new Date(Date.UTC(year, month - 1, day, hour - 7, minute, 0, 0));
+        }
+
+        function getNextWeeklyOccurrence(weekdaySundayBased, hour, minute, now = new Date()) {
+            const bkk = getBangkokDateParts(now);
+            const currentDateUtc = new Date(Date.UTC(bkk.year, bkk.month - 1, bkk.day));
+            const currentWeekday = currentDateUtc.getUTCDay();
+            let delta = (weekdaySundayBased - currentWeekday + 7) % 7;
+            let candidate = new Date(currentDateUtc.getTime() + delta * 86400000);
+            let occurrence = bangkokOccurrenceFromLocalParts(candidate.getUTCFullYear(), candidate.getUTCMonth() + 1, candidate.getUTCDate(), hour, minute);
+            if (occurrence.getTime() <= now.getTime()) {
+                candidate = new Date(candidate.getTime() + 7 * 86400000);
+                occurrence = bangkokOccurrenceFromLocalParts(candidate.getUTCFullYear(), candidate.getUTCMonth() + 1, candidate.getUTCDate(), hour, minute);
+            }
+            return occurrence;
+        }
+
+        function formatWeeklyDateTime(date) {
+            let tz = currentTz || DASHBOARD_DEFAULT_TZ;
+            if (tz === 'auto') {
+                try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || DASHBOARD_DEFAULT_TZ; } catch (_) { tz = DASHBOARD_DEFAULT_TZ; }
+            }
+            try {
+                return new Intl.DateTimeFormat(currentLang === 'th' ? 'th-TH' : currentLang === 'ko' ? 'ko-KR' : 'en-US', {
+                    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', hour12: false
+                }).format(date);
+            } catch (_) {
+                return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'short' }).format(date);
+            }
+        }
+
+        function formatWeeklyCountdown(diffMs) {
+            if (diffMs <= 0) return TRANSLATIONS[currentLang].weeklyNow;
+            let sec = Math.floor(diffMs / 1000);
+            const h = Math.floor(sec / 3600); sec %= 3600;
+            const m = Math.floor(sec / 60); const s = sec % 60;
+            const t = TRANSLATIONS[currentLang];
+            const parts = [];
+            if (h) parts.push(`${h}${t.weeklyHours}`);
+            if (h || m) parts.push(`${m}${t.weeklyMinutes}`);
+            parts.push(`${s}${t.weeklySeconds}`);
+            return parts.join(' ');
+        }
+
+        function updateWeeklyEvents() {
+            const body = document.getElementById('weeklyEventsBody');
+            const badge = document.getElementById('weeklyEventsTimezoneBadge');
+            if (!body) return;
+            const t = TRANSLATIONS[currentLang];
+            const now = new Date();
+            let shownTz = currentTz || DASHBOARD_DEFAULT_TZ;
+            if (shownTz === 'auto') {
+                try { shownTz = Intl.DateTimeFormat().resolvedOptions().timeZone || DASHBOARD_DEFAULT_TZ; } catch (_) { shownTz = DASHBOARD_DEFAULT_TZ; }
+            }
+            if (badge) badge.textContent = shownTz;
+
+            body.innerHTML = '';
+            WEEKLY_GUILD_SIEGE_ROWS.forEach(row => {
+                const next = getNextWeeklyOccurrence(row.weekday, row.hour, row.minute, now);
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="fw-bold text-primary">${escapeHtml(t.guildSiegeName)}</td>
+                    <td>${escapeHtml(t[row.dayKey])}</td>
+                    <td class="text-info">12:30 (TH)</td>
+                    <td>${escapeHtml(formatWeeklyDateTime(next))}</td>
+                    <td class="fw-bold">${escapeHtml(formatWeeklyCountdown(next.getTime() - now.getTime()))}</td>
+                `;
+                body.appendChild(tr);
+            });
+        }
+
         function initApp() {
             const dataList = document.getElementById('bossOptions');
             const allNames = new Set();
@@ -3453,10 +3587,12 @@
             checkAuthSession();
 
             setInterval(updateCountdowns, 250);
+            setInterval(updateWeeklyEvents, 1000);
             document.addEventListener('visibilitychange', () => {
                 if (!document.hidden) updateCountdowns();
             });
             updateCountdowns();
+            updateWeeklyEvents();
             setInterval(() => {
                 if (currentUserData && currentUserData.role === 'admin') loadAdminUsers().catch(err => console.warn('[SKYNET] admin interval:', err));
             }, 30000);
