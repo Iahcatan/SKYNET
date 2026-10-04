@@ -1,0 +1,13013 @@
+# SKYNET_BOSSTIMER_V73_COMMAND18_INTEGRITY_FIX_2026-09-08
+import os
+
+# 🛡️ ON-DEMAND MULTI-CHANNEL PATCH v3
+import json
+import threading
+import base64
+import asyncio
+import time
+import shutil
+import traceback
+import logging
+import re
+import uuid
+import sqlite3
+import queue
+import hashlib
+from collections import deque
+from typing import Optional
+import aiohttp
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from urllib.parse import urlsplit
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import HTTPError, URLError
+from cryptography import exceptions as crypto_exceptions
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+from flask import Flask, render_template_string, request, jsonify, Response
+from waitress import serve
+import edge_tts
+import imageio_ffmpeg
+
+# 🔥 Firebase Admin SDK Setup
+import firebase_admin
+from firebase_admin import credentials, db, auth as firebase_auth, messaging as firebase_messaging
+
+# ==========================================
+# 🔥 0. เชื่อมต่อ Firebase Realtime Database
+# ==========================================
+# อ่านค่าการเชื่อมต่อจาก Environment Variable แทนการเก็บ Service Account Key
+# รองรับทั้ง FIREBASE_SERVICE_ACCOUNT_JSON (JSON string) และ
+# FIREBASE_SERVICE_ACCOUNT_BASE64 (Base64 ของ JSON)
+# DATABASE_URL ใช้ค่าจาก Environment Variable เช่นกัน
+FIREBASE_SERVICE_ACCOUNT_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+FIREBASE_SERVICE_ACCOUNT_BASE64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_BASE64", "").strip()
+DATABASE_URL = os.environ.get(
+    "FIREBASE_DATABASE_URL",
+    "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
+).strip()
+
+if not firebase_admin._apps:
+    try:
+        firebase_service_account = None
+
+        if FIREBASE_SERVICE_ACCOUNT_JSON:
+            firebase_service_account = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+        elif FIREBASE_SERVICE_ACCOUNT_BASE64:
+            decoded_key = base64.b64decode(FIREBASE_SERVICE_ACCOUNT_BASE64).decode("utf-8")
+            firebase_service_account = json.loads(decoded_key)
+
+        if firebase_service_account:
+            cred = credentials.Certificate(firebase_service_account)
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': DATABASE_URL
+            })
+            print("✅ เชื่อมต่อ Firebase Realtime Database สำเร็จ!")
+        else:
+            raise ValueError(
+                "ไม่พบ FIREBASE_SERVICE_ACCOUNT_JSON หรือ FIREBASE_SERVICE_ACCOUNT_BASE64 ใน Environment Variable"
+            )
+    except Exception as e:
+        print(f"❌ ไม่สามารถเชื่อมต่อ Firebase Realtime Database ได้: {e}")
+
+# ==========================================
+# ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
+# ==========================================
+
+NOTICE_BF_PATCH_VERSION = "V185_WEEKLY_EVENTS_DM_ROLE_ATTENDANCE_COUNTDOWN_FIX_2026-10-04 | BASE=V184_INOTIAWAR_1105_1110_MESSAGE_FIX_2026-10-04"
+
+# V57 runtime split:
+# - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
+# - bot = dedicated bot runtime; owns Discord Gateway/REST/Voice/TTS listeners.
+# Defaulting to web is deliberate: a missing env var must never accidentally
+# start Discord traffic from the Render shared outbound IP.
+SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
+if SKYNET_RUNTIME_ROLE not in {"web", "bot"}:
+    raise RuntimeError("SKYNET_RUNTIME_ROLE must be exactly 'web' or 'bot'")
+print(f"🧭 SKYNET runtime role: {SKYNET_RUNTIME_ROLE}")
+print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
+
+logging.getLogger('discord.player').setLevel(logging.WARNING)
+logging.getLogger('discord.voice_state').setLevel(logging.WARNING)
+
+# ==========================================
+# 🔒 Thread Safety Lock สำหรับแชร์ข้อมูล & Flag ป้องกัน Loop
+# ==========================================
+schedule_lock = threading.Lock()
+is_bot_ready = False
+is_updating_from_bot = False
+
+# ==========================================
+# ⚙️ 2. ตั้งค่า Timezone ไทย & Helper Functions
+# ==========================================
+TZ_THAI = timezone(timedelta(hours=7))
+
+# V107: Dashboard-selected timezone handling. This is used only by the
+# Dashboard /api/record-boss path; existing Discord command time parsing remains unchanged.
+DASHBOARD_DEFAULT_TZ = "Asia/Bangkok"
+
+def resolve_dashboard_timezone(value):
+    requested = str(value or "").strip()
+    if requested.lower() in {"", "auto", "local"}:
+        requested = DASHBOARD_DEFAULT_TZ
+    try:
+        return requested, ZoneInfo(requested)
+    except (ZoneInfoNotFoundError, ValueError):
+        print(f"⚠️ Dashboard timezone invalid; falling back to {DASHBOARD_DEFAULT_TZ} | requested={requested}", flush=True)
+        return DASHBOARD_DEFAULT_TZ, ZoneInfo(DASHBOARD_DEFAULT_TZ)
+
+def parse_dashboard_time_components(time_str):
+    cleaned = str(time_str or "").strip().replace(".", ":")
+    if not cleaned:
+        return None
+    if re.fullmatch(r"\d{3,6}", cleaned):
+        if len(cleaned) == 3:
+            hh, mm, ss = int(cleaned[0]), int(cleaned[1:]), 0
+        elif len(cleaned) == 4:
+            hh, mm, ss = int(cleaned[:2]), int(cleaned[2:]), 0
+        elif len(cleaned) == 5:
+            hh, mm, ss = int(cleaned[0]), int(cleaned[1:3]), int(cleaned[3:])
+        else:
+            hh, mm, ss = int(cleaned[:2]), int(cleaned[2:4]), int(cleaned[4:])
+    elif ":" in cleaned:
+        parts = cleaned.split(":")
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            hh, mm, ss = int(parts[0]), int(parts[1]), 0
+        elif len(parts) == 3 and all(p.isdigit() for p in parts):
+            hh, mm, ss = int(parts[0]), int(parts[1]), int(parts[2])
+        else:
+            raise ValueError("Invalid time format")
+    else:
+        raise ValueError("Invalid time format")
+    if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+        raise ValueError("Invalid time range")
+    return hh, mm, ss
+
+def parse_bool(val, default=False) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        cleaned = val.strip().lower()
+        if cleaned in ('true', '1', 'yes'):
+            return True
+        if cleaned in ('false', '0', 'no'):
+            return False
+    return default
+
+def parse_to_thai_datetime(data_val):
+    if not data_val:
+        return None
+    if isinstance(data_val, (int, float)):
+        return datetime.fromtimestamp(data_val / 1000.0, tz=TZ_THAI)
+    elif isinstance(data_val, str):
+        cleaned_val = data_val.replace(" น.", "").strip()
+        try:
+            if cleaned_val.endswith('Z'):
+                cleaned_val = cleaned_val[:-1] + '+00:00'
+            st = datetime.fromisoformat(cleaned_val)
+            if st.tzinfo is None:
+                return st.replace(tzinfo=TZ_THAI)
+            return st.astimezone(TZ_THAI)
+        except ValueError:
+            now = datetime.now(TZ_THAI)
+            try:
+                time_obj = datetime.strptime(cleaned_val, "%H:%M:%S").time()
+                st = now.replace(hour=time_obj.hour, minute=time_obj.minute, second=time_obj.second, microsecond=0)
+                if (st - now).total_seconds() > 600:
+                    st -= timedelta(days=1)
+                elif st < now - timedelta(hours=18):
+                    st += timedelta(days=1)
+                return st
+            except ValueError:
+                try:
+                    time_obj = datetime.strptime(cleaned_val, "%H:%M").time()
+                    st = now.replace(hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0)
+                    if (st - now).total_seconds() > 600:
+                        st -= timedelta(days=1)
+                    elif st < now - timedelta(hours=18):
+                        st += timedelta(days=1)
+                    return st
+                except ValueError:
+                    pass
+            return None
+    elif isinstance(data_val, datetime):
+        if data_val.tzinfo is None:
+            return data_val.replace(tzinfo=TZ_THAI)
+        return data_val.astimezone(TZ_THAI)
+    return None
+
+def parse_date_input(date_str: str, now: datetime):
+    """Parse DD/MM/YYYY. Blank date means today in Thailand timezone."""
+    if not date_str or not str(date_str).strip():
+        return now.date()
+    cleaned = str(date_str).strip()
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", cleaned)
+    if not m:
+        raise ValueError("Invalid date format")
+    day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        return datetime(year, month, day, tzinfo=TZ_THAI).date()
+    except ValueError:
+        raise ValueError("Invalid date value")
+
+def parse_time_input(time_str: str, now: datetime) -> datetime:
+    if not time_str or not time_str.strip():
+        return now
+    cleaned = time_str.strip().replace(".", ":")
+    if re.fullmatch(r'\d{3,6}', cleaned):
+        if len(cleaned) == 3:
+            hh, mm, ss = int(cleaned[0]), int(cleaned[1:]), 0
+        elif len(cleaned) == 4:
+            hh, mm, ss = int(cleaned[:2]), int(cleaned[2:]), 0
+        elif len(cleaned) == 5:
+            hh, mm, ss = int(cleaned[0]), int(cleaned[1:3]), int(cleaned[3:])
+        elif len(cleaned) == 6:
+            hh, mm, ss = int(cleaned[:2]), int(cleaned[2:4]), int(cleaned[4:])
+    elif ":" in cleaned:
+        parts = [int(p) for p in cleaned.split(":") if p.isdigit()]
+        if len(parts) == 2:
+            hh, mm, ss = parts[0], parts[1], 0
+        elif len(parts) == 3:
+            hh, mm, ss = parts[0], parts[1], parts[2]
+        else:
+            raise ValueError("Invalid time format")
+    else:
+        raise ValueError("Invalid time format")
+    if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+        raise ValueError("Invalid time range")
+    boss_died_at = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+    if (boss_died_at - now).total_seconds() > 600:
+        boss_died_at -= timedelta(days=1)
+    return boss_died_at
+
+def get_boss_respawn_time(boss_name: str) -> timedelta:
+    if not boss_name: return timedelta(minutes=30)
+    cleaned = boss_name.strip().lower()
+    for key, val in BOSS_RESPAWN_TIMES.items():
+        if key.lower() == cleaned: return val
+    # Custom bosses are normally loaded into BOSS_RESPAWN_TIMES during startup.
+    # A Dashboard request can, however, arrive during a Render handover before that
+    # async load completes. Prefer the already-loaded durable custom definition before
+    # using the legacy 30-minute fallback. Built-in boss behavior is unchanged.
+    for key, cfg in (custom_bosses or {}).items():
+        if str(key).strip().lower() != cleaned or not isinstance(cfg, dict):
+            continue
+        try:
+            seconds = int(cfg.get('respawnSeconds', 0) or 0)
+        except (TypeError, ValueError):
+            seconds = 0
+        if seconds > 0:
+            return timedelta(seconds=seconds)
+    return timedelta(minutes=30)
+
+def _get_custom_boss_config_authoritative(boss_name: str) -> tuple[str | None, dict | None]:
+    """Resolve a custom boss definition from memory first, then authoritative Firebase.
+
+    Dashboard recording can run while the normal custom_bosses startup task is still
+    loading. Reading the persisted definition here prevents an exact custom respawn
+    (including seconds) from silently becoming the generic 30-minute fallback.
+    """
+    cleaned = str(boss_name or '').strip().casefold()
+    if not cleaned:
+        return None, None
+    for key, cfg in (custom_bosses or {}).items():
+        if str(key).strip().casefold() == cleaned and isinstance(cfg, dict):
+            return str(key).strip(), dict(cfg)
+    try:
+        root = db.reference('custom_bosses').get() or {}
+    except Exception as exc:
+        print(
+            f"⚠️ DASHBOARD custom boss authoritative read failed | boss={boss_name} | {exc!r}",
+            flush=True,
+        )
+        return None, None
+    if isinstance(root, dict):
+        for key, cfg in root.items():
+            if str(key).strip().casefold() == cleaned and isinstance(cfg, dict):
+                return str(key).strip(), dict(cfg)
+    return None, None
+
+def get_boss_canonical_name(boss_name: str) -> str:
+    if not boss_name: return boss_name
+    cleaned = boss_name.strip().lower()
+    for key in BOSS_RESPAWN_TIMES.keys():
+        if key.lower() == cleaned: return key
+    return boss_name
+
+def get_boss_advance_notice_seconds(boss_name: str) -> int:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    if "wadangka" in cleaned or "วาดังการ์" in cleaned: return 1800 
+    for key, val in ADVANCE_NOTICE_SECONDS.items():
+        if key.lower() == cleaned: return val
+    return 300
+
+def get_boss_advance_notice_text(boss_name: str) -> str:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    if "wadangka" in cleaned or "วาดังการ์" in cleaned: return "30 นาที" 
+    for key, val in ADVANCE_NOTICE_TEXT.items():
+        if key.lower() == cleaned: return val
+    return "5 นาที"
+
+def get_boss_advance_notice_text_en(boss_name: str) -> str:
+    seconds = get_boss_advance_notice_seconds(boss_name)
+    if seconds == 3600: return "1 hour"
+    return f"{int(seconds / 60)} minutes"
+
+def get_boss_advance_notice_text_ko(boss_name: str) -> str:
+    seconds = get_boss_advance_notice_seconds(boss_name)
+    if seconds == 3600: return "1시간"
+    return f"{int(seconds / 60)}분"
+
+def get_boss_cd_text(boss_name: str) -> str:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    for key, val in BOSS_CD_TEXT.items():
+        if key.lower() == cleaned: return val
+    return "30 นาที"
+
+def get_boss_pronunciation(boss_name: str) -> str:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    for key, val in BOSS_PRONUNCIATION.items():
+        if key.lower() == cleaned: return val
+    return boss_name
+
+# ==========================================
+# 🗄️ Database Utility (SQLite Persistent Storage)
+# ==========================================
+DB_FILE = "bot_database.db"
+
+def init_db():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        # Web Push delivery deduplication is isolated in SQLite and does not alter
+        # boss_schedule/Firebase schedule/Discord command data.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS web_push_sent_events (
+                event_key TEXT PRIMARY KEY,
+                sent_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print("✅ บันทึก/เชื่อมต่อ Database (SQLite) สำเร็จ")
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในการตั้งค่า Database: {e}")
+
+def set_db_value(key: str, value):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        val_str = json.dumps(value, ensure_ascii=False)
+        cursor.execute(
+            "INSERT INTO bot_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, val_str)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ บันทึกข้อมูลลง Database ไม่สำเร็จ ({key}): {e}")
+
+def get_db_value(key: str, default=None):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return json.loads(row[0])
+    except Exception as e:
+        print(f"❌ ดึงข้อมูลจาก Database ไม่สำเร็จ ({key}): {e}")
+    return default
+
+# ==========================================
+# 🔔 WEB PUSH / FCM NOTIFICATIONS
+# Android/Chrome continues to use Firebase Cloud Messaging (FCM).
+# iPhone/iPad Home Screen web apps use standards-based Web Push (VAPID/APNs).
+# Isolated from Discord commands, Boss schedule logic, TTS and Voice.
+# ==========================================
+WEB_PUSH_VAPID_PUBLIC_KEY = os.environ.get("WEB_PUSH_VAPID_PUBLIC_KEY", "").strip()
+WEB_PUSH_IOS_VAPID_PRIVATE_KEY = os.environ.get("WEB_PUSH_IOS_VAPID_PRIVATE_KEY", "").strip()
+WEB_PUSH_VAPID_SUBJECT = os.environ.get(
+    "WEB_PUSH_VAPID_SUBJECT",
+    os.environ.get("WEB_PUSH_DEFAULT_URL", "https://iahcatan.github.io/SKYNET/").strip(),
+).strip()
+WEB_PUSH_DEFAULT_URL = os.environ.get(
+    "WEB_PUSH_DEFAULT_URL",
+    "https://iahcatan.github.io/SKYNET/",
+).strip()
+_web_push_stage_inflight = set()
+_web_push_missing_config_logged = False
+_web_push_ios_key_cache = None
+_web_push_ios_key_error_logged = False
+
+
+def _web_push_cors(response):
+    origin = request.headers.get("Origin", "")
+    allowed = {
+        "https://iahcatan.github.io",
+        "https://bosstimer-ry18.onrender.com",
+        "http://localhost:5000",
+    }
+    response.headers["Access-Control-Allow-Origin"] = origin if origin in allowed else "https://iahcatan.github.io"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Origin"
+    return response
+
+
+def _verify_dashboard_user_request():
+    auth_header = request.headers.get("Authorization", "").strip()
+    if not auth_header.lower().startswith("bearer "):
+        raise PermissionError("Missing Firebase ID token")
+    id_token = auth_header.split(" ", 1)[1].strip()
+    decoded = firebase_auth.verify_id_token(id_token)
+    uid = str(decoded.get("uid") or "").strip()
+    if not uid:
+        raise PermissionError("Invalid Firebase ID token")
+    profile = db.reference(f"users/{uid}").get() or {}
+    if not isinstance(profile, dict) or profile.get("status") != "approved":
+        raise PermissionError("Account is not approved")
+    return uid, profile
+
+
+def _web_push_token_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+
+
+def _web_push_subscription_key(endpoint: str) -> str:
+    return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:32]
+
+
+def _normalize_web_push_timezone(value: str) -> str:
+    """Return a valid IANA timezone for one push device; never trust client input blindly."""
+    candidate = str(value or "").strip()
+    if candidate == "auto" or not candidate:
+        return "Asia/Bangkok"
+    try:
+        ZoneInfo(candidate)
+        return candidate
+    except (ZoneInfoNotFoundError, ValueError):
+        return "Asia/Bangkok"
+
+
+def _format_web_push_event_time(spawn_time: datetime, timezone_name: str, language: str) -> str:
+    """Format the absolute boss spawn instant in each device's selected timezone."""
+    tz_name = _normalize_web_push_timezone(timezone_name)
+    try:
+        local_dt = spawn_time.astimezone(ZoneInfo(tz_name))
+    except (ZoneInfoNotFoundError, ValueError):
+        local_dt = spawn_time.astimezone(TZ_THAI)
+    if language == "ko":
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    return local_dt.strftime("%d/%m/%Y %H:%M")
+
+
+def _web_push_message_by_language(
+    boss_name: str,
+    stage: str,
+    spawn_time: datetime,
+    notice_minutes: int,
+    language: str,
+    timezone_name: str,
+) -> tuple[str, str]:
+    """Build a localized title/body while showing the event time in the device timezone."""
+    language = language if language in {"th", "en", "ko"} else "th"
+    local_time = _format_web_push_event_time(spawn_time, timezone_name, language)
+    if stage == "spawn":
+        return {
+            "en": (f"⚔️ {boss_name} — Spawned!", f"Boss {boss_name} has spawned! Local time: {local_time}"),
+            "ko": (f"⚔️ {boss_name} — 생성 완료!", f"보스 {boss_name}이(가) 생성되었습니다! 현지 시간: {local_time}"),
+            "th": (f"⚔️ {boss_name} — เกิดแล้ว", f"บอส {boss_name} เกิดแล้ว เวลา {local_time} น."),
+        }[language]
+    return {
+        "en": (f"⏳ {boss_name} — Spawning Soon!", f"Boss {boss_name} will spawn in {notice_minutes} minutes. Spawn time: {local_time}"),
+        "ko": (f"⏳ {boss_name} — 생성 임박!", f"보스 {boss_name}이(가) {notice_minutes}분 후에 생성됩니다. 생성 시간: {local_time}"),
+        "th": (f"⏳ {boss_name} — ใกล้เกิดใน {notice_minutes} นาที", f"บอส {boss_name} จะเกิดในอีก {notice_minutes} นาที เวลา {local_time} น."),
+    }[language]
+
+
+def _b64url_decode(value: str) -> bytes:
+    raw = str(value or "").encode("ascii")
+    return base64.urlsafe_b64decode(raw + b"=" * (-len(raw) % 4))
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _load_ios_vapid_private_key():
+    raw = WEB_PUSH_IOS_VAPID_PRIVATE_KEY.strip()
+    if not raw:
+        return None
+    if "BEGIN" in raw:
+        key = serialization.load_pem_private_key(raw.encode("utf-8"), password=None)
+    else:
+        compact = raw.replace(" ", "").replace("\n", "")
+        key_bytes = None
+        try:
+            key_bytes = _b64url_decode(compact)
+        except Exception:
+            key_bytes = None
+        if key_bytes is None or len(key_bytes) != 32:
+            try:
+                key_bytes = bytes.fromhex(compact)
+            except Exception as exc:
+                raise ValueError("WEB_PUSH_IOS_VAPID_PRIVATE_KEY ต้องเป็น PEM หรือ base64url/hex ของ private scalar P-256") from exc
+        key = ec.derive_private_key(int.from_bytes(key_bytes, "big"), ec.SECP256R1())
+    if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+        raise ValueError("WEB_PUSH_IOS_VAPID_PRIVATE_KEY ต้องเป็น EC P-256")
+    return key
+
+
+def _ios_vapid_public_key_b64url() -> str:
+    global _web_push_ios_key_cache, _web_push_ios_key_error_logged
+    if _web_push_ios_key_cache:
+        return _web_push_ios_key_cache
+    try:
+        private_key = _load_ios_vapid_private_key()
+        if private_key is None:
+            return ""
+        public_bytes = private_key.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
+        _web_push_ios_key_cache = _b64url_encode(public_bytes)
+        return _web_push_ios_key_cache
+    except Exception as exc:
+        if not _web_push_ios_key_error_logged:
+            print(f"⚠️ iPhone Web Push VAPID key load failed: {exc}", flush=True)
+            _web_push_ios_key_error_logged = True
+        return ""
+
+
+try:
+    _ios_startup_public_key = _ios_vapid_public_key_b64url()
+except Exception:
+    _ios_startup_public_key = ""
+print(
+    f"🍎 iPhone Web Push config | private_key={'configured' if WEB_PUSH_IOS_VAPID_PRIVATE_KEY else 'missing'} | public_key={'ready' if _ios_startup_public_key else 'invalid/missing'} | subject={WEB_PUSH_VAPID_SUBJECT}",
+    flush=True,
+)
+
+
+# ==========================================
+# 🌐 1. Web Dashboard & Server สำหรับ Render
+# ==========================================
+app = Flask(__name__)
+
+@app.route("/manifest.json", methods=["GET"])
+def web_manifest_api():
+    response = jsonify({
+        "id": "/SKYNET/",
+        "name": "SKYNET 2.0 Boss Timer",
+        "short_name": "SKYNET",
+        "start_url": "/SKYNET/",
+        "scope": "/SKYNET/",
+        "display": "standalone",
+        "background_color": "#0f172a",
+        "theme_color": "#0f172a",
+        "icons": [{"src": "/SKYNET/favicon.ico", "sizes": "any", "type": "image/x-icon", "purpose": "any maskable"}],
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+@app.route("/api/push/public-key", methods=["GET", "OPTIONS"])
+def web_push_public_key_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    response = jsonify({
+        "success": bool(WEB_PUSH_VAPID_PUBLIC_KEY),
+        "publicKey": WEB_PUSH_VAPID_PUBLIC_KEY,
+    })
+    return _web_push_cors(response)
+
+
+@app.route("/api/push/ios-public-key", methods=["GET", "OPTIONS"])
+def web_push_ios_public_key_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    public_key = _ios_vapid_public_key_b64url()
+    if not public_key:
+        return _web_push_cors(jsonify({
+            "success": False,
+            "publicKey": "",
+            "subject": WEB_PUSH_VAPID_SUBJECT,
+            "publicKeyLength": 0,
+            "error": "WEB_PUSH_IOS_VAPID_PRIVATE_KEY is missing or invalid on Render",
+        })), 503
+    return _web_push_cors(jsonify({
+        "success": True,
+        "publicKey": public_key,
+        "subject": WEB_PUSH_VAPID_SUBJECT,
+        "publicKeyLength": len(public_key),
+    }))
+
+
+@app.route("/api/push/diagnostics", methods=["GET", "OPTIONS"])
+def web_push_diagnostics_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    ios_public_key = _ios_vapid_public_key_b64url()
+    return _web_push_cors(jsonify({
+        "success": True,
+        "projectId": "skynet-3ad44",
+        "vapidConfigured": bool(WEB_PUSH_VAPID_PUBLIC_KEY),
+        "vapidLength": len(WEB_PUSH_VAPID_PUBLIC_KEY),
+        "messagingModule": firebase_messaging is not None,
+        "iosWebPushConfigured": bool(ios_public_key and WEB_PUSH_IOS_VAPID_PRIVATE_KEY and WEB_PUSH_VAPID_SUBJECT),
+        "iosVapidPublicKeyLength": len(ios_public_key),
+        "defaultUrl": WEB_PUSH_DEFAULT_URL,
+    }))
+
+
+@app.route("/api/push/subscribe", methods=["POST", "OPTIONS"])
+def web_push_subscribe_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    try:
+        uid, _profile = _verify_dashboard_user_request()
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get("token") or "").strip()
+        if not token or len(token) < 20:
+            return _web_push_cors(jsonify({"success": False, "error": "Invalid FCM registration token"})), 400
+        requested_language = str(payload.get("language") or "th").strip().lower()
+        if requested_language not in {"th", "en", "ko"}:
+            requested_language = "th"
+        requested_timezone = _normalize_web_push_timezone(payload.get("timezone"))
+        token_key = _web_push_token_key(token)
+        record = {
+            "token": token,
+            "language": requested_language,
+            "timezone": requested_timezone,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            "userAgent": str(request.headers.get("User-Agent") or "")[:500],
+        }
+        token_ref = db.reference(f"web_push_tokens/{uid}/{token_key}")
+        existing = token_ref.get() or {}
+        changed = (
+            not isinstance(existing, dict)
+            or existing.get("token") != token
+            or existing.get("language") != requested_language
+            or existing.get("timezone") != requested_timezone
+            or existing.get("userAgent") != record["userAgent"]
+        )
+        if changed:
+            token_ref.set(record)
+            print(f"🔔 Web Push/FCM token registered | uid={uid} | key={token_key} | language={requested_language} | timezone={requested_timezone}", flush=True)
+        else:
+            # Idempotent re-registration: do not write/log the same device repeatedly.
+            print(f"🟢 Web Push/FCM token already registered | uid={uid} | key={token_key}", flush=True)
+        return _web_push_cors(jsonify({"success": True, "tokenKey": token_key, "changed": changed}))
+    except PermissionError as exc:
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 401
+    except Exception as exc:
+        print(f"❌ /api/push/subscribe failed: {exc}", flush=True)
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 500
+
+
+@app.route("/api/push/unsubscribe", methods=["POST", "OPTIONS"])
+def web_push_unsubscribe_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    try:
+        uid, _profile = _verify_dashboard_user_request()
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get("token") or "").strip()
+        if not token:
+            return _web_push_cors(jsonify({"success": False, "error": "FCM token is required"})), 400
+        token_key = _web_push_token_key(token)
+        db.reference(f"web_push_tokens/{uid}/{token_key}").delete()
+        print(f"🔕 Web Push/FCM token removed | uid={uid} | key={token_key}", flush=True)
+        return _web_push_cors(jsonify({"success": True}))
+    except PermissionError as exc:
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 401
+    except Exception as exc:
+        print(f"❌ /api/push/unsubscribe failed: {exc}", flush=True)
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 500
+
+
+@app.route("/api/push/web-subscribe", methods=["POST", "OPTIONS"])
+def web_push_standard_subscribe_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    try:
+        uid, _profile = _verify_dashboard_user_request()
+        if not _ios_vapid_public_key_b64url():
+            return _web_push_cors(jsonify({"success": False, "error": "iPhone Web Push VAPID key is not configured on Render"})), 503
+        payload = request.get_json(silent=True) or {}
+        subscription = payload.get("subscription")
+        if not isinstance(subscription, dict):
+            return _web_push_cors(jsonify({"success": False, "error": "Web Push subscription is required"})), 400
+        endpoint = str(subscription.get("endpoint") or "").strip()
+        keys = subscription.get("keys") or {}
+        p256dh = str(keys.get("p256dh") or "").strip()
+        auth_secret = str(keys.get("auth") or "").strip()
+        if not endpoint or not p256dh or not auth_secret:
+            return _web_push_cors(jsonify({"success": False, "error": "Invalid Web Push subscription keys"})), 400
+        parsed = urlsplit(endpoint)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return _web_push_cors(jsonify({"success": False, "error": "Invalid Web Push endpoint"})), 400
+        requested_language = str(payload.get("language") or "th").strip().lower()
+        if requested_language not in {"th", "en", "ko"}:
+            requested_language = "th"
+        requested_timezone = _normalize_web_push_timezone(payload.get("timezone"))
+        sub_key = _web_push_subscription_key(endpoint)
+        record = {
+            "subscription": {
+                "endpoint": endpoint,
+                "keys": {"p256dh": p256dh, "auth": auth_secret},
+            },
+            "language": requested_language,
+            "timezone": requested_timezone,
+            "platform": "ios-webpush",
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            "userAgent": str(request.headers.get("User-Agent") or "")[:500],
+        }
+        db.reference(f"web_push_subscriptions/{uid}/{sub_key}").set(record)
+        print(
+            f"🍎 iPhone Web Push subscription registered | uid={uid} | key={sub_key} | endpoint_host={parsed.netloc} | language={requested_language} | timezone={requested_timezone}",
+            flush=True,
+        )
+        return _web_push_cors(jsonify({"success": True, "subscriptionKey": sub_key}))
+    except PermissionError as exc:
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 401
+    except Exception as exc:
+        print(f"❌ /api/push/web-subscribe failed | type={type(exc).__name__} | {exc}", flush=True)
+        return _web_push_cors(jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"})), 500
+
+
+@app.route("/api/push/preferences", methods=["POST", "OPTIONS"])
+def web_push_preferences_api():
+    """Update language + timezone for one already-registered push device."""
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    try:
+        uid, _profile = _verify_dashboard_user_request()
+        payload = request.get_json(silent=True) or {}
+        requested_language = str(payload.get("language") or "th").strip().lower()
+        if requested_language not in {"th", "en", "ko"}:
+            requested_language = "th"
+        requested_timezone = _normalize_web_push_timezone(payload.get("timezone"))
+
+        token = str(payload.get("token") or "").strip()
+        endpoint = str(payload.get("endpoint") or "").strip()
+        updated = False
+        if token:
+            token_key = _web_push_token_key(token)
+            token_ref = db.reference(f"web_push_tokens/{uid}/{token_key}")
+            current = token_ref.get() or {}
+            if isinstance(current, dict) and current.get("token") == token:
+                current.update({
+                    "language": requested_language,
+                    "timezone": requested_timezone,
+                    "updatedAt": datetime.now(timezone.utc).isoformat(),
+                })
+                token_ref.set(current)
+                updated = True
+        if endpoint:
+            sub_key = _web_push_subscription_key(endpoint)
+            sub_ref = db.reference(f"web_push_subscriptions/{uid}/{sub_key}")
+            current = sub_ref.get() or {}
+            if isinstance(current, dict):
+                current.update({
+                    "language": requested_language,
+                    "timezone": requested_timezone,
+                    "updatedAt": datetime.now(timezone.utc).isoformat(),
+                })
+                sub_ref.set(current)
+                updated = True
+        if not updated:
+            return _web_push_cors(jsonify({"success": False, "error": "Push device registration not found"})), 404
+        print(
+            f"🔄 Web Push preferences updated | uid={uid} | language={requested_language} | timezone={requested_timezone}",
+            flush=True,
+        )
+        return _web_push_cors(jsonify({"success": True, "language": requested_language, "timezone": requested_timezone}))
+    except PermissionError as exc:
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 401
+    except Exception as exc:
+        print(f"❌ /api/push/preferences failed: {exc}", flush=True)
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 500
+
+
+@app.route("/api/discord-user-notify", methods=["GET", "POST", "OPTIONS"])
+def discord_user_notify_api():
+    """Read/write per-dashboard-user Discord DM preferences through Firebase Admin SDK.
+
+    V127 fix:
+    - V126 still stored these feature-specific fields under users/<uid>.
+    - Some existing RTDB deployments intentionally restrict writes to the users node.
+    - Store only this feature under discord_user_notifications/<uid> instead.
+    - Browser never writes this node directly; the Firebase ID token is verified here.
+    - GET supports one user or an admin-only all-users view for the dashboard.
+    """
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        origin = request.headers.get("Origin", "")
+        allowed = {
+            "https://iahcatan.github.io",
+            "https://bosstimer-ry18.onrender.com",
+            "http://localhost:5000",
+        }
+        response.headers["Access-Control-Allow-Origin"] = origin if origin in allowed else "https://iahcatan.github.io"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Max-Age"] = "600"
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "Origin"
+        return response
+
+    if request.method == "OPTIONS":
+        return _api_json({"success": True}), 204
+
+    try:
+        uid, profile = _verify_dashboard_user_request()
+        requester_is_admin = str(profile.get("role") or "").strip().lower() == "admin"
+
+        if request.method == "GET":
+            target_uid = str(request.args.get("targetUid") or uid).strip()
+            all_users = str(request.args.get("all") or "").strip().lower() in {"1", "true", "yes"}
+
+            if all_users:
+                if not requester_is_admin:
+                    return _api_json({"success": False, "error": "Admin permission required"}), 403
+                preferences = db.reference(DISCORD_USER_NOTIFY_ROOT).get() or {}
+                if not isinstance(preferences, dict):
+                    preferences = {}
+                # Backward-compatibility: include legacy values that may have been
+                # written by V125/V126 but are not yet present in the new node.
+                users = db.reference("users").get() or {}
+                if isinstance(users, dict):
+                    for legacy_uid, legacy_profile in users.items():
+                        if legacy_uid in preferences or not isinstance(legacy_profile, dict):
+                            continue
+                        legacy_id = str(legacy_profile.get("discordUserId") or "").strip()
+                        legacy_lang = str(legacy_profile.get("discordNotificationLanguage") or "th").strip().lower()
+                        legacy_enabled = parse_bool(legacy_profile.get("discordNotificationEnabled"), False)
+                        if legacy_id or legacy_enabled:
+                            preferences[str(legacy_uid)] = {
+                                "discordUserId": legacy_id,
+                                "discordNotificationLanguage": legacy_lang if legacy_lang in {"th", "en", "ko"} else "th",
+                                "discordNotificationEnabled": legacy_enabled,
+                                "discordNotificationUpdatedAt": legacy_profile.get("discordNotificationUpdatedAt"),
+                            }
+                return _api_json({"success": True, "preferences": preferences})
+
+            if not target_uid:
+                return _api_json({"success": False, "error": "Target user is required"}), 400
+            if target_uid != uid and not requester_is_admin:
+                return _api_json({"success": False, "error": "Admin permission required"}), 403
+
+            stored = db.reference(f"{DISCORD_USER_NOTIFY_ROOT}/{target_uid}").get() or {}
+            if not isinstance(stored, dict) or not stored:
+                legacy = db.reference(f"users/{target_uid}").get() or {}
+                if isinstance(legacy, dict):
+                    stored = {
+                        "discordUserId": str(legacy.get("discordUserId") or ""),
+                        "discordNotificationLanguage": str(legacy.get("discordNotificationLanguage") or "th").lower(),
+                        "discordNotificationEnabled": parse_bool(legacy.get("discordNotificationEnabled"), False),
+                        "discordNotificationUpdatedAt": legacy.get("discordNotificationUpdatedAt"),
+                    }
+            language = str(stored.get("discordNotificationLanguage") or "th").lower()
+            if language not in {"th", "en", "ko"}:
+                language = "th"
+            settings = {
+                "discordUserId": str(stored.get("discordUserId") or ""),
+                "discordNotificationLanguage": language,
+                "discordNotificationEnabled": parse_bool(stored.get("discordNotificationEnabled"), False),
+                "discordNotificationUpdatedAt": stored.get("discordNotificationUpdatedAt"),
+            }
+            return _api_json({"success": True, "targetUid": target_uid, "settings": settings})
+
+        payload = request.get_json(silent=True) or {}
+        target_uid = str(payload.get("targetUid") or uid).strip()
+        if not target_uid:
+            return _api_json({"success": False, "error": "Target user is required"}), 400
+        if target_uid != uid and not requester_is_admin:
+            return _api_json({"success": False, "error": "Admin permission required"}), 403
+
+        target_profile = db.reference(f"users/{target_uid}").get() or {}
+        if not isinstance(target_profile, dict):
+            return _api_json({"success": False, "error": "Target user profile not found"}), 404
+        if str(target_profile.get("status") or "").strip().lower() != "approved":
+            return _api_json({"success": False, "error": "Target account is not approved"}), 403
+
+        discord_user_id = str(payload.get("discordUserId") or "").strip()
+        language = str(payload.get("discordNotificationLanguage") or "th").strip().lower()
+        enabled = parse_bool(payload.get("discordNotificationEnabled"), False)
+
+        if language not in {"th", "en", "ko"}:
+            return _api_json({"success": False, "error": "Invalid notification language"}), 400
+        if discord_user_id and not re.fullmatch(r"\d{15,22}", discord_user_id):
+            return _api_json({"success": False, "error": "Invalid Discord User ID"}), 400
+        if enabled and not discord_user_id:
+            return _api_json({"success": False, "error": "Discord User ID is required when Discord DM is enabled"}), 400
+
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        updates = {
+            "discordUserId": discord_user_id,
+            "discordNotificationLanguage": language,
+            "discordNotificationEnabled": enabled,
+            "discordNotificationUpdatedAt": now,
+            "updatedByUid": uid,
+        }
+        db.reference(f"{DISCORD_USER_NOTIFY_ROOT}/{target_uid}").set(updates)
+        _invalidate_discord_user_dm_preferences_cache()
+
+        print(
+            f"✅ Discord per-user notification settings saved | "
+            f"requester={uid} | target={target_uid} | enabled={enabled} | "
+            f"language={language} | discord_user_id={'set' if discord_user_id else 'empty'}",
+            flush=True,
+        )
+        return _api_json({"success": True, "targetUid": target_uid, **updates})
+    except PermissionError as exc:
+        print(f"⚠️ /api/discord-user-notify auth permission denied: {exc}", flush=True)
+        return _api_json({"success": False, "error": str(exc)}), 401
+    except Exception as exc:
+        print(
+            f"❌ /api/discord-user-notify failed | type={type(exc).__name__} | error={exc!r}",
+            flush=True,
+        )
+        traceback.print_exc()
+        return _api_json({"success": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+
+@app.route("/api/push/web-unsubscribe", methods=["POST", "OPTIONS"])
+def web_push_standard_unsubscribe_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    try:
+        uid, _profile = _verify_dashboard_user_request()
+        payload = request.get_json(silent=True) or {}
+        endpoint = str(payload.get("endpoint") or "").strip()
+        if not endpoint:
+            return _web_push_cors(jsonify({"success": False, "error": "Web Push endpoint is required"})), 400
+        sub_key = _web_push_subscription_key(endpoint)
+        db.reference(f"web_push_subscriptions/{uid}/{sub_key}").delete()
+        print(f"🔕 iPhone Web Push subscription removed | uid={uid} | key={sub_key}", flush=True)
+        return _web_push_cors(jsonify({"success": True}))
+    except PermissionError as exc:
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 401
+    except Exception as exc:
+        print(f"❌ /api/push/web-unsubscribe failed: {exc}", flush=True)
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 500
+
+
+def _hkdf_extract(salt: bytes, ikm: bytes) -> bytes:
+    import hmac
+    return hmac.new(salt, ikm, hashlib.sha256).digest()
+
+
+def _hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
+    import hmac
+    output = b""
+    previous = b""
+    counter = 1
+    while len(output) < length:
+        previous = hmac.new(prk, previous + info + bytes([counter]), hashlib.sha256).digest()
+        output += previous
+        counter += 1
+        if counter > 255:
+            raise ValueError("HKDF expand length too large")
+    return output[:length]
+
+
+def _webpush_encrypt_aes128gcm(payload: bytes, subscription: dict) -> bytes:
+    keys = subscription.get("keys") or {}
+    receiver_raw = _b64url_decode(str(keys.get("p256dh") or ""))
+    auth_secret = _b64url_decode(str(keys.get("auth") or ""))
+    if len(receiver_raw) != 65 or receiver_raw[0] != 4:
+        raise ValueError("Invalid p256dh key")
+    if len(auth_secret) < 16:
+        raise ValueError("Invalid auth secret")
+    receiver_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), receiver_raw)
+    sender_private = ec.generate_private_key(ec.SECP256R1())
+    sender_public_raw = sender_private.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    ecdh_secret = sender_private.exchange(ec.ECDH(), receiver_key)
+    key_info = b"WebPush: info\x00" + receiver_raw + sender_public_raw
+    prk_key = _hkdf_extract(auth_secret, ecdh_secret)
+    ikm = _hkdf_expand(prk_key, key_info, 32)
+    salt = os.urandom(16)
+    prk = _hkdf_extract(salt, ikm)
+    cek = _hkdf_expand(prk, b"Content-Encoding: aes128gcm\x00", 16)
+    nonce = _hkdf_expand(prk, b"Content-Encoding: nonce\x00", 12)
+    # Single RFC 8188 record. The 0x02 delimiter marks the final record.
+    padded = payload + b"\x02"
+    ciphertext = AESGCM(cek).encrypt(nonce, padded, None)
+    rs = 4096
+    return salt + rs.to_bytes(4, "big") + bytes([len(sender_public_raw)]) + sender_public_raw + ciphertext
+
+
+def _webpush_vapid_headers(endpoint: str) -> dict:
+    private_key = _load_ios_vapid_private_key()
+    if private_key is None:
+        raise RuntimeError("WEB_PUSH_IOS_VAPID_PRIVATE_KEY is not configured")
+    if not WEB_PUSH_VAPID_SUBJECT:
+        raise RuntimeError("WEB_PUSH_VAPID_SUBJECT is not configured")
+    parsed = urlsplit(endpoint)
+    audience = f"{parsed.scheme}://{parsed.netloc}"
+    now = int(time.time())
+    header = {"typ": "JWT", "alg": "ES256"}
+    claims = {"aud": audience, "exp": now + 12 * 60 * 60, "sub": WEB_PUSH_VAPID_SUBJECT}
+    encoded_header = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    encoded_claims = _b64url_encode(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{encoded_header}.{encoded_claims}".encode("ascii")
+    der_sig = private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    r_value, s_value = decode_dss_signature(der_sig)
+    raw_sig = r_value.to_bytes(32, "big") + s_value.to_bytes(32, "big")
+    jwt = f"{encoded_header}.{encoded_claims}.{_b64url_encode(raw_sig)}"
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return {
+        "Authorization": f"vapid t={jwt}, k={_b64url_encode(public_key)}",
+        "TTL": "86400",
+        "Urgency": "high",
+        "Content-Encoding": "aes128gcm",
+        "Content-Type": "application/octet-stream",
+    }
+
+
+def _send_standard_webpush(subscription: dict, payload: dict) -> tuple[bool, int | None, str]:
+    endpoint = str(subscription.get("endpoint") or "").strip()
+    if not endpoint:
+        raise ValueError("Web Push endpoint missing")
+    body = _webpush_encrypt_aes128gcm(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        subscription,
+    )
+    headers = _webpush_vapid_headers(endpoint)
+    req = UrlRequest(endpoint, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=20) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            return 200 <= status < 300, status, ""
+    except HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        return False, int(exc.code), detail
+    except URLError as exc:
+        return False, None, str(exc)
+
+
+async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime, notice_minutes: int):
+    """Send one dashboard push event exactly once per registered device/subscription."""
+    global _web_push_missing_config_logged
+    event_key = hashlib.sha256(
+        f"{boss_name}|{stage}|{int(spawn_time.timestamp() * 1000)}".encode("utf-8")
+    ).hexdigest()
+    if event_key in _web_push_stage_inflight:
+        return
+    _web_push_stage_inflight.add(event_key)
+    try:
+        sent_record = await asyncio.to_thread(
+            lambda: db.reference(f"web_push_sent_events/{event_key}").get() or {}
+        )
+        if not isinstance(sent_record, dict):
+            sent_record = {}
+
+        fcm_sent_keys = set(str(x) for x in (sent_record.get("fcmSentKeys") or []) if x)
+        web_sent_keys = set(str(x) for x in (sent_record.get("standardWebPushSentKeys") or []) if x)
+        fcm_retry_counts = dict(sent_record.get("fcmRetryCounts") or {}) if isinstance(sent_record.get("fcmRetryCounts"), dict) else {}
+        web_retry_counts = dict(sent_record.get("standardWebPushRetryCounts") or {}) if isinstance(sent_record.get("standardWebPushRetryCounts"), dict) else {}
+        fcm_failed_keys = set(str(x) for x in (sent_record.get("fcmFailedKeys") or []) if x)
+        web_failed_keys = set(str(x) for x in (sent_record.get("standardWebPushFailedKeys") or []) if x)
+
+        fcm_root = await asyncio.to_thread(lambda: db.reference("web_push_tokens").get() or {})
+        standard_root = await asyncio.to_thread(lambda: db.reference("web_push_subscriptions").get() or {})
+
+        tokens = []
+        if isinstance(fcm_root, dict):
+            for uid, uid_data in fcm_root.items():
+                if not isinstance(uid_data, dict):
+                    continue
+                for token_key, item in uid_data.items():
+                    if isinstance(item, dict) and item.get("token"):
+                        language = str(item.get("language") or "th").strip().lower()
+                        if language not in {"th", "en", "ko"}:
+                            language = "th"
+                        device_timezone = _normalize_web_push_timezone(item.get("timezone"))
+                        tokens.append((str(uid), str(token_key), str(item["token"]), language, device_timezone))
+
+        subscriptions = []
+        if isinstance(standard_root, dict):
+            for uid, uid_data in standard_root.items():
+                if not isinstance(uid_data, dict):
+                    continue
+                for sub_key, item in uid_data.items():
+                    if not isinstance(item, dict):
+                        continue
+                    subscription = item.get("subscription")
+                    if not isinstance(subscription, dict) or not subscription.get("endpoint"):
+                        continue
+                    language = str(item.get("language") or "th").strip().lower()
+                    if language not in {"th", "en", "ko"}:
+                        language = "th"
+                    device_timezone = _normalize_web_push_timezone(item.get("timezone"))
+                    subscriptions.append((str(uid), str(sub_key), subscription, language, device_timezone))
+
+        if stage == "spawn":
+            message_by_lang = {
+                "en": (f"⚔️ {boss_name} — Spawned!", f"Boss {boss_name} has spawned!"),
+                "ko": (f"⚔️ {boss_name} — 생성 완료!", f"보스 {boss_name}이(가) 생성되었습니다!"),
+                "th": (f"⚔️ {boss_name} — เกิดแล้ว", f"บอส {boss_name} เกิดแล้ว"),
+            }
+        else:
+            message_by_lang = {
+                "en": (f"⏳ {boss_name} — Spawning Soon!", f"Boss {boss_name} will spawn in {notice_minutes} minutes"),
+                "ko": (f"⏳ {boss_name} — 생성 임박!", f"보스 {boss_name}이(가) {notice_minutes}분 후에 생성됩니다."),
+                "th": (f"⏳ {boss_name} — ใกล้เกิดใน {notice_minutes} นาที", f"บอส {boss_name} จะเกิดใน {notice_minutes} นาที"),
+            }
+
+        # Once every currently registered device is either delivered or has exhausted
+        # its bounded retry budget, this event becomes permanently complete.
+        def _fcm_complete():
+            keys = {k for _u, k, _t, _l, _tz in tokens}
+            return not keys or keys.issubset(fcm_sent_keys | fcm_failed_keys)
+
+        def _web_complete():
+            keys = {k for _u, k, _s, _l, _tz in subscriptions}
+            return not keys or keys.issubset(web_sent_keys | web_failed_keys)
+
+        fcm_success_count = 0
+        fcm_attempted = 0
+        fcm_stale = []
+        if not _fcm_complete():
+            for uid, token_key, token, language, device_timezone in tokens:
+                if token_key in fcm_sent_keys or token_key in fcm_failed_keys:
+                    continue
+                retry_count = int(fcm_retry_counts.get(token_key) or 0)
+                if retry_count >= 3:
+                    fcm_failed_keys.add(token_key)
+                    continue
+                fcm_attempted += 1
+                try:
+                    title, body = _web_push_message_by_language(
+                        boss_name, stage, spawn_time, notice_minutes, language, device_timezone
+                    )
+                    message = firebase_messaging.Message(
+                        token=token,
+                        notification=firebase_messaging.Notification(title=title, body=body),
+                        webpush=firebase_messaging.WebpushConfig(
+                            notification=firebase_messaging.WebpushNotification(
+                                title=title,
+                                body=body,
+                                tag=f"skynet-boss-{stage}-{event_key}",
+                                renotify=False,
+                                require_interaction=False,
+                            ),
+                            fcm_options=firebase_messaging.WebpushFCMOptions(link=WEB_PUSH_DEFAULT_URL),
+                        ),
+                        data={
+                            "bossName": str(boss_name),
+                            "stage": str(stage),
+                            "eventKey": event_key,
+                            "title": title,
+                            "body": body,
+                            "timezone": device_timezone,
+                            "localEventTime": _format_web_push_event_time(spawn_time, device_timezone, language),
+                            "url": WEB_PUSH_DEFAULT_URL,
+                        },
+                    )
+                    await asyncio.to_thread(firebase_messaging.send, message)
+                    fcm_success_count += 1
+                    fcm_sent_keys.add(token_key)
+                    await asyncio.to_thread(
+                        db.reference(f"web_push_sent_events/{event_key}/fcmSentKeys/{token_key}").set,
+                        True,
+                    )
+                except Exception as exc:
+                    fcm_retry_counts[token_key] = retry_count + 1
+                    await asyncio.to_thread(
+                        db.reference(f"web_push_sent_events/{event_key}/fcmRetryCounts/{token_key}").set,
+                        retry_count + 1,
+                    )
+                    code = str(getattr(exc, "code", "") or "")
+                    text = str(exc).lower()
+                    if "registration-token-not-registered" in code or "unregistered" in code.lower() or "not a valid fcm registration token" in text:
+                        fcm_stale.append((uid, token_key))
+                        fcm_failed_keys.add(token_key)
+                    elif retry_count + 1 >= 3:
+                        fcm_failed_keys.add(token_key)
+                        print(f"⚠️ FCM delivery exhausted after 3 attempts | boss={boss_name} | stage={stage} | uid={uid} | key={token_key} | {exc}", flush=True)
+                    else:
+                        print(f"⚠️ Web Push/FCM send failed; will retry | boss={boss_name} | stage={stage} | uid={uid} | key={token_key} | attempt={retry_count + 1}/3 | {exc}", flush=True)
+            for uid, token_key in fcm_stale:
+                try:
+                    await asyncio.to_thread(db.reference(f"web_push_tokens/{uid}/{token_key}").delete)
+                except Exception:
+                    pass
+
+        standard_success_count = 0
+        standard_attempted = 0
+        standard_stale = []
+        if not _web_complete():
+            if not _ios_vapid_public_key_b64url() or not WEB_PUSH_IOS_VAPID_PRIVATE_KEY:
+                if not _web_push_missing_config_logged:
+                    print("⚠️ iPhone Web Push is configured with subscriptions but VAPID private key is missing; standard Web Push delivery is on hold", flush=True)
+                    _web_push_missing_config_logged = True
+            else:
+                for uid, sub_key, subscription, language, device_timezone in subscriptions:
+                    if sub_key in web_sent_keys or sub_key in web_failed_keys:
+                        continue
+                    retry_count = int(web_retry_counts.get(sub_key) or 0)
+                    if retry_count >= 3:
+                        web_failed_keys.add(sub_key)
+                        continue
+                    standard_attempted += 1
+                    try:
+                        title, body = _web_push_message_by_language(
+                            boss_name, stage, spawn_time, notice_minutes, language, device_timezone
+                        )
+                        payload = {
+                            "notification": {
+                                "title": title,
+                                "body": body,
+                                "tag": f"skynet-boss-{stage}-{event_key}",
+                                "renotify": False,
+                                "requireInteraction": False,
+                            },
+                            "data": {
+                                "skynetWebPush": "1",
+                                "bossName": str(boss_name),
+                                "stage": str(stage),
+                                "eventKey": event_key,
+                                "timezone": device_timezone,
+                                "localEventTime": _format_web_push_event_time(spawn_time, device_timezone, language),
+                                "url": WEB_PUSH_DEFAULT_URL,
+                            },
+                        }
+                        delivered, status, detail = await asyncio.to_thread(_send_standard_webpush, subscription, payload)
+                        if delivered:
+                            standard_success_count += 1
+                            web_sent_keys.add(sub_key)
+                            await asyncio.to_thread(
+                                db.reference(f"web_push_sent_events/{event_key}/standardWebPushSentKeys/{sub_key}").set,
+                                True,
+                            )
+                        elif status in {404, 410}:
+                            standard_stale.append((uid, sub_key))
+                            web_failed_keys.add(sub_key)
+                        else:
+                            web_retry_counts[sub_key] = retry_count + 1
+                            await asyncio.to_thread(
+                                db.reference(f"web_push_sent_events/{event_key}/standardWebPushRetryCounts/{sub_key}").set,
+                                retry_count + 1,
+                            )
+                            if retry_count + 1 >= 3:
+                                web_failed_keys.add(sub_key)
+                                print(f"⚠️ iPhone Web Push delivery exhausted after 3 attempts | boss={boss_name} | stage={stage} | uid={uid} | key={sub_key} | status={status} | {detail}", flush=True)
+                            else:
+                                print(f"⚠️ iPhone Web Push send failed; will retry | boss={boss_name} | stage={stage} | uid={uid} | key={sub_key} | attempt={retry_count + 1}/3 | status={status} | {detail}", flush=True)
+                    except Exception as exc:
+                        web_retry_counts[sub_key] = retry_count + 1
+                        await asyncio.to_thread(
+                            db.reference(f"web_push_sent_events/{event_key}/standardWebPushRetryCounts/{sub_key}").set,
+                            retry_count + 1,
+                        )
+                        if retry_count + 1 >= 3:
+                            web_failed_keys.add(sub_key)
+                        print(f"⚠️ iPhone Web Push send failed safely | boss={boss_name} | stage={stage} | uid={uid} | key={sub_key} | attempt={retry_count + 1}/3 | {exc}", flush=True)
+                for uid, sub_key in standard_stale:
+                    try:
+                        await asyncio.to_thread(db.reference(f"web_push_subscriptions/{uid}/{sub_key}").delete)
+                    except Exception:
+                        pass
+
+        fcm_done = _fcm_complete()
+        standard_done = _web_complete()
+        await asyncio.to_thread(
+            db.reference(f"web_push_sent_events/{event_key}").update,
+            {
+                "bossName": boss_name,
+                "stage": stage,
+                "spawnTime": spawn_time.isoformat(),
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+                "fcmDone": fcm_done,
+                "fcmSentKeys": sorted(fcm_sent_keys),
+                "fcmFailedKeys": sorted(fcm_failed_keys),
+                "standardWebPushDone": standard_done,
+                "standardWebPushSentKeys": sorted(web_sent_keys),
+                "standardWebPushFailedKeys": sorted(web_failed_keys),
+                "fcmSuccessCount": len(fcm_sent_keys),
+                "standardWebPushSuccessCount": len(web_sent_keys),
+            },
+        )
+
+        if fcm_done and standard_done:
+            print(
+                f"✅ Web Push event completed | boss={boss_name} | stage={stage} | fcm={len(fcm_sent_keys)} delivered | iphone={len(web_sent_keys)} delivered",
+                flush=True,
+            )
+        else:
+            print(
+                f"🔁 Web Push event pending retry | boss={boss_name} | stage={stage} | fcm={len(fcm_sent_keys)}/{len({k for _u,k,_t,_l in tokens})} | iphone={len(web_sent_keys)}/{len({k for _u,k,_s,_l in subscriptions})}",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"⚠️ Web Push stage failed safely | boss={boss_name} | stage={stage} | {exc}", flush=True)
+    finally:
+        _web_push_stage_inflight.discard(event_key)
+
+
+async def queue_web_push_stage(boss_name: str, stage: str, spawn_time: datetime, notice_minutes: int):
+    """Queue a push stage only while its persistent event is not complete."""
+    try:
+        event_key = hashlib.sha256(
+            f"{boss_name}|{stage}|{int(spawn_time.timestamp() * 1000)}".encode("utf-8")
+        ).hexdigest()
+        if event_key in _web_push_stage_inflight:
+            return
+        record = await asyncio.to_thread(lambda: db.reference(f"web_push_sent_events/{event_key}").get() or {})
+        if isinstance(record, dict) and bool(record.get("fcmDone")) and bool(record.get("standardWebPushDone")):
+            return
+        asyncio.create_task(
+            _send_web_push_stage(boss_name, stage, spawn_time, notice_minutes),
+            name=f"web-push-{stage}-{boss_name}",
+        )
+    except Exception as exc:
+        print(f"⚠️ Web Push task queue failed safely | boss={boss_name} | stage={stage} | {exc}", flush=True)
+
+
+HTML_TEMPLATE = '<!DOCTYPE html>\n<html lang="th">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <meta name="apple-mobile-web-app-capable" content="yes">\n    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">\n    <meta name="mobile-web-app-capable" content="yes">\n    <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">\n    <link rel="manifest" href="/SKYNET/manifest.json">\n    <title>Boss Timer Dashboard</title>\n    <!-- V185_WEEKLY_EVENTS_DM_ROLE_ATTENDANCE_COUNTDOWN_FIX_2026-10-04 | BASE=V184_INOTIAWAR_1105_1110_MESSAGE_FIX_2026-10-04 -->\n    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">\n    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">\n    \n    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>\n    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>\n    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>\n    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-messaging-compat.js"></script>\n    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>\n\n    <style>\n        body {\n            background-color: #0f172a;\n            color: #f8fafc;\n            font-family: \'Kanit\', sans-serif;\n        }\n        .card {\n            background-color: #1e293b;\n            border: 1px solid #334155;\n            border-radius: 12px;\n        }\n        .form-label {\n            color: #ffffff !important;\n            font-weight: 500;\n        }\n        .form-control, .form-select {\n            background-color: #0f172a !important;\n            border: 1px solid #334155;\n            color: #ffffff !important;\n        }\n        .form-control::placeholder {\n            color: #64748b;\n        }\n        .form-control:focus, .form-select:focus {\n            background-color: #0f172a !important;\n            color: #ffffff !important;\n            border-color: #3b82f6;\n            box-shadow: none;\n        }\n        .table {\n            color: #f8fafc;\n        }\n        .table-dark {\n            --bs-table-bg: #1e293b;\n            --bs-table-hover-bg: #334155;\n        }\n        .status-badge {\n            font-size: 0.85rem;\n            padding: 5px 10px;\n            border-radius: 15px;\n        }\n        .settings-bar {\n            background-color: #1e293b;\n            border: 1px solid #334155;\n            border-radius: 12px;\n            padding: 12px 20px;\n        }\n        footer, footer small {\n            color: #ffffff !important;\n        }\n        .modal-content {\n            background-color: #1e293b;\n            color: #f8fafc;\n            border: 1px solid #334155;\n        }\n        .nav-tabs .nav-link {\n            color: #94a3b8;\n            border: none;\n        }\n        .nav-tabs .nav-link.active {\n            background-color: transparent;\n            color: #38bdf8;\n            border-bottom: 3px solid #38bdf8;\n            font-weight: 600;\n        }\n        .attendance-stat { min-height: 120px; }\n        .attendance-stat .attendance-stat-value { color: #ffffff !important; }\n        .attendance-stat .fs-3, .attendance-stat .fs-4, .attendance-stat .fs-5 { color: #ffffff !important; }\n        .attendance-status-open { color: #22c55e; }\n        .attendance-status-scheduled { color: #f59e0b; }\n        .attendance-status-closed { color: #94a3b8; }\n        .attendance-table td, .attendance-table th { white-space: nowrap; }\n\n        /* V185: Keep Weekly Guild Events table geometry stable while countdown text changes.\n           Values update in-place instead of rebuilding the table every second. */\n        #weeklyEventsSection .table {\n            table-layout: fixed;\n            width: 100%;\n        }\n        #weeklyEventsSection .table th:nth-child(1),\n        #weeklyEventsSection .table td:nth-child(1) { width: 22%; }\n        #weeklyEventsSection .table th:nth-child(2),\n        #weeklyEventsSection .table td:nth-child(2) { width: 16%; }\n        #weeklyEventsSection .table th:nth-child(3),\n        #weeklyEventsSection .table td:nth-child(3) { width: 14%; }\n        #weeklyEventsSection .table th:nth-child(4),\n        #weeklyEventsSection .table td:nth-child(4) { width: 25%; }\n        #weeklyEventsSection .table th:nth-child(5),\n        #weeklyEventsSection .table td:nth-child(5) { width: 23%; }\n        #weeklyEventsSection .weekly-next-value,\n        #weeklyEventsSection .weekly-countdown-value {\n            display: inline-block;\n            min-width: 12ch;\n            white-space: nowrap;\n            font-variant-numeric: tabular-nums;\n            font-feature-settings: "tnum" 1;\n        }\n        #weeklyEventsSection .weekly-next-value { min-width: 18ch; }\n        @media (max-width: 768px) {\n            #weeklyEventsSection .table { min-width: 680px; }\n        }\n\n        /* V120.1 — Compact attendance count columns only.\n           Keeps the stored values and attendance calculations unchanged. */\n        #attendanceHistoryBody td:nth-child(4),\n        #attendanceMemberMonthlyBody td:nth-child(4),\n        #attendanceMemberMonthlyBody td:nth-child(5) {\n            width: 82px;\n            min-width: 82px;\n            max-width: 82px;\n            text-align: center;\n            padding-left: 6px;\n            padding-right: 6px;\n            font-variant-numeric: tabular-nums;\n        }\n        #attendanceHistoryBody td:nth-child(1),\n        #attendanceMemberMonthlyBody td:nth-child(2) {\n            max-width: 180px;\n            overflow: hidden;\n            text-overflow: ellipsis;\n        }\n        #attendanceMemberMonthlyBody td:nth-child(3) {\n            max-width: 130px;\n            overflow: hidden;\n            text-overflow: ellipsis;\n        }\n        .attendance-pagination {\n            display: flex;\n            flex-wrap: wrap;\n            justify-content: center;\n            align-items: center;\n            gap: 6px;\n            margin-top: 12px;\n        }\n        .attendance-pagination .btn {\n            min-width: 38px;\n        }\n        .attendance-pagination .page-info {\n            color: #94a3b8;\n            font-size: 0.85rem;\n            margin: 0 4px;\n        }\n        @media (max-width: 768px) {\n            #attendanceHistoryBody td:nth-child(4),\n            #attendanceMemberMonthlyBody td:nth-child(4),\n            #attendanceMemberMonthlyBody td:nth-child(5) {\n                width: 68px;\n                min-width: 68px;\n                max-width: 68px;\n                padding-left: 4px;\n                padding-right: 4px;\n            }\n            #attendanceHistoryBody td:nth-child(1),\n            #attendanceMemberMonthlyBody td:nth-child(2) {\n                max-width: 130px;\n            }\n        }\n    </style>\n</head>\n<body>\n    <div id="authContainer" class="container py-5" style="max-width: 450px;">\n        <div class="card p-4 shadow-lg">\n            \n            <div class="d-flex justify-content-end mb-2">\n                <select id="authLangSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">\n                    <option value="th">🇹🇭 ไทย (TH)</option>\n                    <option value="en">🇺🇸 English (EN)</option>\n                    <option value="ko">🇰🇷 한국어 (KO)</option>\n                </select>\n            </div>\n\n            <h3 class="text-center text-warning mb-4" data-i18n="authTitle">⚔️ Boss Timer Access</h3>\n            \n            <ul class="nav nav-tabs nav-justified mb-3" id="authTabs" role="tablist">\n                <li class="nav-item">\n                    <button class="nav-link active" id="login-tab" data-bs-toggle="tab" data-bs-target="#loginPane" type="button" data-i18n="tabLogin">เข้าสู่ระบบ</button>\n                </li>\n                <li class="nav-item">\n                    <button class="nav-link" id="register-tab" data-bs-toggle="tab" data-bs-target="#registerPane" type="button" data-i18n="tabRegister">ลงทะเบียน</button>\n                </li>\n            </ul>\n\n            <div class="tab-content">\n                <div class="tab-pane fade show active" id="loginPane" role="tabpanel">\n                    <form id="loginForm" autocomplete="off">\n                        <div class="mb-3">\n                            <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>\n                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกชื่อผู้ใช้" data-i18n-ph="phLoginUser" required>\n                        </div>\n                        <div class="mb-3">\n                            <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>\n                            <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" data-i18n-ph="phLoginPass" required>\n                        </div>\n                        <div class="form-check mb-3">\n                            <input class="form-check-input" type="checkbox" id="rememberMe">\n                            <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>\n                        </div>\n                        <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>\n                        <div id="loginDebug" class="small text-info mt-2" style="min-height:1.2em"></div>\n                    </form>\n                </div>\n\n                <div class="tab-pane fade" id="registerPane" role="tabpanel">\n                    <form id="registerForm" autocomplete="off">\n                        <div class="mb-3">\n                            <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>\n                            <input type="text" id="regUser" class="form-control" minlength="1" placeholder="ตั้งชื่อผู้ใช้" data-i18n-ph="phRegUser" required>\n                        </div>\n                        <div class="mb-3">\n                            <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>\n                            <input type="password" id="regPass" class="form-control" placeholder="ตั้งรหัสผ่าน" data-i18n-ph="phRegPass" required>\n                        </div>\n                        <div class="mb-3">\n                            <label class="form-label" data-i18n="labelRegCode">โค้ดสำหรับสมัคร</label>\n                            <input type="password" id="regCode" class="form-control" placeholder="กรอกโค้ดสำหรับสมัคร" data-i18n-ph="phRegCode" required>\n                        </div>\n                        <button type="submit" class="btn btn-success w-100 fw-bold" data-i18n="btnRegister">📝 ลงทะเบียน</button>\n                    </form>\n                </div>\n            </div>\n        </div>\n    </div>\n\n    <div id="mainDashboard" class="container py-4" style="display: none;">\n        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">\n            <h2 data-i18n="title">⚔️ Boss Timer Dashboard</h2>\n            <div class="d-flex align-items-center gap-2">\n                <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>\n                <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>\n                <button id="adminPanelMenuBtn" onclick="scrollToAdminPanel()" data-admin-only class="btn btn-outline-danger btn-sm" style="display:none;">🛡️ Admin Panel</button>\n                <button onclick="openChangeCodeModal()" data-admin-only class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>\n                <button onclick="logout()" class="btn btn-outline-danger btn-sm" data-i18n="btnLogout">🚪 ออกจากระบบ</button>\n            </div>\n        </div>\n\n        <div class="settings-bar mb-4 d-flex flex-wrap align-items-center justify-content-between gap-3">\n            <div class="d-flex flex-wrap align-items-center gap-3">\n                <div class="d-flex align-items-center gap-2">\n                    <label class="form-label mb-0 text-nowrap" data-i18n="labelLanguage">🌐 ภาษา:</label>\n                    <select id="langSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">\n                        <option value="th">🇹🇭 ไทย (TH)</option>\n                        <option value="en">🇺🇸 English (EN)</option>\n                        <option value="ko">🇰🇷 한국어 (KO)</option>\n                    </select>\n                </div>\n                <div class="d-flex align-items-center gap-2">\n                    <label class="form-label mb-0 text-nowrap" data-i18n="labelTimezone">🌍 เขตเวลา (IANA):</label>\n                                        <select id="tzSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeTimezone(this.value)">\n                        <option value="auto" data-i18n="tzAuto">💻 อัตโนมัติ (ตามเครื่อง)</option>\n                        <option value="UTC">🌐 UTC (Universal Time)</option>\n                        <option value="Asia/Bangkok">🇹🇭 Bangkok, Thailand (UTC+7)</option>\n                        <option value="Asia/Jakarta">🇮🇩 Jakarta / Western Indonesia (UTC+7)</option>\n                        <option value="Asia/Makassar">🇮🇩 Makassar / Central Indonesia (UTC+8)</option>\n                        <option value="Asia/Jayapura">🇮🇩 Jayapura / Eastern Indonesia (UTC+9)</option>\n                        <option value="Asia/Manila">🇵🇭 Manila, Philippines (UTC+8)</option>\n                        <option value="Asia/Singapore">🇸🇬 Singapore (UTC+8)</option>\n                        <option value="Asia/Kuala_Lumpur">🇲🇾 Kuala Lumpur, Malaysia (UTC+8)</option>\n                        <option value="Asia/Ho_Chi_Minh">🇻🇳 Ho Chi Minh City, Vietnam (UTC+7)</option>\n                        <option value="Asia/Phnom_Penh">🇰🇭 Phnom Penh, Cambodia (UTC+7)</option>\n                        <option value="Asia/Vientiane">🇱🇦 Vientiane, Laos (UTC+7)</option>\n                        <option value="Asia/Hong_Kong">🇭🇰 Hong Kong (UTC+8)</option>\n                        <option value="Asia/Shanghai">🇨🇳 Shanghai / Beijing, China (UTC+8)</option>\n                        <option value="Asia/Taipei">🇹🇼 Taipei, Taiwan (UTC+8)</option>\n                        <option value="Asia/Tokyo">🇯🇵 Tokyo, Japan (UTC+9)</option>\n                        <option value="Asia/Seoul">🇰🇷 Seoul, South Korea (UTC+9)</option>\n                        <option value="Asia/Kolkata">🇮🇳 India / Mumbai / New Delhi (UTC+5:30)</option>\n                        <option value="Asia/Dhaka">🇧🇩 Dhaka, Bangladesh (UTC+6)</option>\n                        <option value="Asia/Kathmandu">🇳🇵 Kathmandu, Nepal (UTC+5:45)</option>\n                        <option value="Asia/Colombo">🇱🇰 Colombo, Sri Lanka (UTC+5:30)</option>\n                        <option value="Asia/Karachi">🇵🇰 Karachi, Pakistan (UTC+5)</option>\n                        <option value="Asia/Tashkent">🇺🇿 Tashkent, Uzbekistan (UTC+5)</option>\n                        <option value="Asia/Almaty">🇰🇿 Almaty, Kazakhstan (UTC+5)</option>\n                        <option value="Asia/Ulaanbaatar">🇲🇳 Ulaanbaatar, Mongolia (UTC+8)</option>\n                        <option value="Asia/Yangon">🇲🇲 Yangon, Myanmar (UTC+6:30)</option>\n                        <option value="Asia/Dubai">🇦🇪 Dubai, UAE (UTC+4)</option>\n                        <option value="Asia/Riyadh">🇸🇦 Riyadh, Saudi Arabia (UTC+3)</option>\n                        <option value="Asia/Baghdad">🇮🇶 Baghdad, Iraq (UTC+3)</option>\n                        <option value="Asia/Jerusalem">🇮🇱 Jerusalem, Israel (UTC+2/+3)</option>\n                        <option value="Europe/Istanbul">🇹🇷 Istanbul, Türkiye (UTC+3)</option>\n                        <option value="Europe/London">🇬🇧 London, UK (UTC+0/+1)</option>\n                        <option value="Europe/Paris">🇫🇷 Paris, France (UTC+1/+2)</option>\n                        <option value="Europe/Berlin">🇩🇪 Berlin, Germany (UTC+1/+2)</option>\n                        <option value="Europe/Rome">🇮🇹 Rome, Italy (UTC+1/+2)</option>\n                        <option value="Europe/Madrid">🇪🇸 Madrid, Spain (UTC+1/+2)</option>\n                        <option value="Europe/Amsterdam">🇳🇱 Amsterdam, Netherlands (UTC+1/+2)</option>\n                        <option value="Europe/Moscow">🇷🇺 Moscow, Russia (UTC+3)</option>\n                        <option value="Africa/Cairo">🇪🇬 Cairo, Egypt (UTC+2/+3)</option>\n                        <option value="Africa/Johannesburg">🇿🇦 Johannesburg, South Africa (UTC+2)</option>\n                        <option value="Africa/Nairobi">🇰🇪 Nairobi, Kenya (UTC+3)</option>\n                        <option value="Australia/Perth">🇦🇺 Perth, Australia (UTC+8)</option>\n                        <option value="Australia/Darwin">🇦🇺 Darwin, Australia (UTC+9:30)</option>\n                        <option value="Australia/Brisbane">🇦🇺 Brisbane, Australia (UTC+10)</option>\n                        <option value="Australia/Adelaide">🇦🇺 Adelaide, Australia (UTC+9:30/+10:30)</option>\n                        <option value="Australia/Sydney">🇦🇺 Sydney, Australia (UTC+10/+11)</option>\n                        <option value="Australia/Melbourne">🇦🇺 Melbourne, Australia (UTC+10/+11)</option>\n                        <option value="Pacific/Auckland">🇳🇿 Auckland, New Zealand (UTC+12/+13)</option>\n                        <option value="Pacific/Honolulu">🇺🇸 Honolulu, Hawaii (UTC-10)</option>\n                        <option value="America/Los_Angeles">🇺🇸 Los Angeles, USA (UTC-8/-7)</option>\n                        <option value="America/Denver">🇺🇸 Denver, USA (UTC-7/-6)</option>\n                        <option value="America/Chicago">🇺🇸 Chicago, USA (UTC-6/-5)</option>\n                        <option value="America/New_York">🇺🇸 New York, USA (UTC-5/-4)</option>\n                        <option value="America/Toronto">🇨🇦 Toronto, Canada (UTC-5/-4)</option>\n                        <option value="America/Vancouver">🇨🇦 Vancouver, Canada (UTC-8/-7)</option>\n                        <option value="America/Mexico_City">🇲🇽 Mexico City, Mexico (UTC-6)</option>\n                        <option value="America/Lima">🇵🇪 Lima, Peru (UTC-5)</option>\n                        <option value="America/Sao_Paulo">🇧🇷 São Paulo, Brazil (UTC-3)</option>\n                        <option value="America/Buenos_Aires">🇦🇷 Buenos Aires, Argentina (UTC-3)</option>\n                    </select>\n                </div>\n                <div class="d-flex align-items-center gap-2">\n                    <span class="badge bg-dark border border-secondary text-info px-3 py-2 fs-6" id="liveClockDisplay" style="letter-spacing: 1px;">00:00:00</span>\n                </div>\n            </div>\n            <div class="d-flex gap-2">\n                <button onclick="openBotSettingsModal()" class="btn btn-outline-info btn-sm fw-bold" data-i18n="btnBotSettings">⚙️ ตั้งค่าบอท</button>\n                <button id="notifyToggleBtn" onclick="toggleNotifications()" class="btn btn-warning btn-sm fw-bold" data-i18n="enableNotify">🔔 เปิดระบบเสียง & แจ้งเตือน</button>\n            </div>\n        </div>\n\n        <!-- 🔔 V125: Per-user Discord DM notification preferences -->\n        <div class="card p-3 mb-4 shadow-sm">\n            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">\n                <div>\n                    <h5 class="mb-1 text-info" data-i18n="discordUserNotifyTitle">💬 Discord DM แจ้งเตือนส่วนตัว</h5>\n                    <small class="text-white-50" data-i18n="discordUserNotifySubtitle">ตั้งค่าเฉพาะบัญชีนี้เท่านั้น • ไม่เปลี่ยนข้อความประกาศในห้อง Discord เดิม</small>\n                </div>\n                <span class="badge bg-secondary" data-i18n="discordUserNotifyOptIn">🔐 Opt-in</span>\n            </div>\n            <div class="row g-3 align-items-end">\n                <div class="col-md-4">\n                    <label class="form-label" for="discordUserIdInput" data-i18n="discordUserIdLabel">Discord User ID</label>\n                    <input id="discordUserIdInput" class="form-control" inputmode="numeric" autocomplete="off" placeholder="เช่น 123456789012345678" data-i18n-ph="discordUserIdPlaceholder">\n                </div>\n                <div class="col-md-3">\n                    <label class="form-label" for="discordUserLangSelect" data-i18n="discordUserLangLabel">ภาษาการแจ้งเตือนใน Discord</label>\n                    <select id="discordUserLangSelect" class="form-select">\n                        <option value="th">🇹🇭 ไทย</option>\n                        <option value="en">🇺🇸 English</option>\n                        <option value="ko">🇰🇷 한국어</option>\n                    </select>\n                </div>\n                <div class="col-md-3">\n                    <div class="form-check form-switch mb-2">\n                        <input class="form-check-input" type="checkbox" id="discordUserNotifyEnabled">\n                        <label class="form-check-label text-white" for="discordUserNotifyEnabled" data-i18n="discordUserNotifyEnabledLabel">เปิดรับ DM จาก Boss Timer</label>\n                    </div>\n                    <small class="text-white-50" data-i18n="discordUserNotifyNote">ระบบจะส่งเฉพาะเมื่อเปิดใช้งานและมี Discord User ID</small>\n                </div>\n                <div class="col-md-2">\n                    <button class="btn btn-outline-info w-100" onclick="saveDiscordUserNotifySettings()" data-i18n="discordUserNotifySave">💾 บันทึก</button>\n                </div>\n            </div>\n            <div id="discordUserNotifyStatus" class="small mt-2 text-white-50"></div>\n        </div>\n\n        <!-- 🔐 Admin User Management -->\n        <div id="adminPanel" class="card p-4 mb-4 shadow-sm" style="display:none;">\n            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">\n                <div>\n                    <h4 class="card-title text-danger mb-1" data-i18n="adminPanelTitle">🛡️ Admin • จัดการผู้ใช้งาน</h4>\n                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติอยู่ในตารางด้านล่าง</small>\n                    <div id="adminDataStatus" class="small text-white-50 mt-1">กำลังตรวจสอบข้อมูลผู้ใช้งาน...</div>\n                </div>\n                <div class="d-flex gap-2">\n                    <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>\n                    <button id="adminCollapseBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleAdminPanel()">▼ เปิด</button>\n                </div>\n            </div>\n\n            <div id="adminPanelContent" style="display:none;">\n            <div class="row g-3 mb-3">\n                <div class="col-md-4">\n                    <div class="card p-3 h-100">\n                        <div class="text-warning small" data-i18n="adminPending">รออนุมัติ</div>\n                        <div class="fs-3 fw-bold" id="adminPendingCount">0</div>\n                    </div>\n                </div>\n                <div class="col-md-4">\n                    <div class="card p-3 h-100">\n                        <div class="text-success small" data-i18n="adminActive">กำลังใช้งาน</div>\n                        <div class="fs-3 fw-bold" id="adminActiveCount">0</div>\n                    </div>\n                </div>\n                <div class="col-md-4">\n                    <div class="card p-3 h-100">\n                        <div class="text-info small" data-i18n="adminTotal">ผู้ใช้ทั้งหมด</div>\n                        <div class="fs-3 fw-bold" id="adminTotalCount">0</div>\n                    </div>\n                </div>\n            </div>\n\n            <div class="table-responsive">\n                <table class="table table-dark table-hover align-middle mb-0">\n                    <thead>\n                        <tr>\n                            <th data-i18n="adminThUser">ผู้ใช้</th>\n                            <th data-i18n="adminThStatus">สถานะ</th>\n                            <th data-i18n="adminThCreated">สมัครเมื่อ</th>\n                            <th data-i18n="adminThLastLogin">เข้าสู่ระบบล่าสุด</th>\n                            <th data-i18n="adminThLastSeen">ใช้งานล่าสุด</th>\n                            <th data-i18n="adminThLogins">จำนวนครั้ง</th>\n                            <th data-i18n="adminThDiscord">Discord DM</th>\n                            <th data-i18n="adminThAction">จัดการ</th>\n                        </tr>\n                    </thead>\n                    <tbody id="adminUsersBody"></tbody>\n                </table>\n            </div>\n            </div>\n        </div>\n\n        <div class="card p-4 mb-4 shadow-sm">\n            <h4 class="card-title text-warning mb-3" data-i18n="formTitle">⏱️ บันทึกเวลาบอสตาย</h4>\n            <form id="bossForm" class="row g-3" autocomplete="off">\n                <div class="col-md-3">\n                    <label class="form-label" data-i18n="labelBoss">เลือก หรือ พิมพ์ชื่อบอส</label>\n                    <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." data-i18n-ph="phBoss" required autocomplete="off">\n                    <datalist id="bossOptions"></datalist>\n                </div>\n                <div class="col-md-3">\n                    <label class="form-label" data-i18n="labelKillDate">วันที่(วัน/เดือน/ปี)</label>\n                    <input type="text" id="killDate" class="form-control" placeholder="เช่น 14/09/2026 หรือ 14092026" data-i18n-ph="phKillDate" maxlength="10" autocomplete="off" inputmode="numeric">\n                    <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่างไว้หากใช้วันที่ปัจจุบัน</small>\n                </div>\n                <div class="col-md-3">\n                    <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>\n                    <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">\n                    <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>\n                </div>\n                <div class="col-md-2">\n                    <label class="form-label" data-i18n="labelSpTime">เพิ่มเวลาพิเศษ (นาที)</label>\n                    <input type="number" id="spTime" class="form-control" min="0" placeholder="0">\n                </div>\n                <div class="col-md-2">\n                    <label class="form-label" data-i18n="labelNotice">แจ้งเตือนล่วงหน้า (นาที)</label>\n                    <input type="number" id="noticeMinutes" class="form-control" min="1" value="5">\n                </div>\n                <div class="col-md-2 d-flex align-items-end">\n                    <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnSave">⚔️ บันทึกเวลา</button>\n                </div>\n            </form>\n        </div>\n\n        <div class="card p-4 shadow-sm">\n            <div class="d-flex justify-content-between align-items-center mb-3">\n                <h4 class="card-title text-info mb-0" data-i18n="tableTitle">📜 ตารางเวลาบอสล่าสุด</h4>\n                <button id="clearAllBtn" class="btn btn-outline-danger btn-sm" data-admin-only="true" data-i18n="btnClear">ล้างตารางทั้งหมด</button>\n            </div>\n            \n            <div class="table-responsive">\n                <table class="table table-dark table-hover align-middle mb-0">\n                    <thead>\n                        <tr>\n                            <th data-i18n="thBoss">ชื่อบอส</th>\n                            <th data-i18n="thKillDate">วันที่</th>\n                            <th data-i18n="thKillTime">เวลาตาย (24 ชม.)</th>\n                            <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>\n                            <th data-i18n="thCountdown">นับถอยหลัง</th>\n                            <th data-i18n="thNotice">เตือนล่วงหน้า</th>\n                            <th data-i18n="thRecordedBy">ผู้บันทึก</th>\n                            <th data-i18n="thAction">จัดการ</th>\n                        </tr>\n                    </thead>\n                    <tbody id="bossTableBody"></tbody>\n                </table>\n            </div>\n        </div>\n\n        <!-- 🛡️ Weekly Guild Siege fixed schedule (display-only; does not alter boss_schedule) -->\n        <div class="card p-4 mb-4 shadow-sm" id="weeklyEventsSection">\n            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">\n                <div>\n                    <h4 class="card-title text-primary mb-1" data-i18n="weeklyEventsTitle">🛡️ ตารางกิจกรรมประจำสัปดาห์</h4>\n                </div>\n                <span id="weeklyEventsTimezoneBadge" class="badge bg-secondary">Asia/Bangkok</span>\n            </div>\n            <div class="table-responsive">\n                <table class="table table-dark table-hover align-middle mb-0">\n                    <thead>\n                        <tr>\n                            <th data-i18n="weeklyEventName">กิจกรรม</th>\n                            <th data-i18n="weeklyEventDay">วัน</th>\n                            <th data-i18n="weeklyEventTime">เวลา</th>\n                            <th data-i18n="weeklyEventNext">ครั้งถัดไป</th>\n                            <th data-i18n="weeklyEventCountdown">นับถอยหลัง</th>\n                        </tr>\n                    </thead>\n                    <tbody id="weeklyEventsBody"></tbody>\n                </table>\n            </div>\n        </div>\n\n        <!-- ⚔️ Boss Raid Attendance -->\n        <div class="card p-4 mb-4 shadow-sm" id="attendanceDashboardSection">\n            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">\n                <div>\n                    <h4 class="card-title text-warning mb-1" data-i18n="attendanceTitle">⚔️ Boss Raid Attendance</h4>\n                    <small class="text-white-50" data-i18n="attendanceSubtitle">เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord</small>\n                </div>\n                <div class="d-flex align-items-center gap-2">\n                    <span class="badge bg-success status-badge" id="attendanceRealtimeStatus" data-i18n="attendanceRealtime">🟢 Realtime</span>\n                    <button id="attendanceCollapseBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendancePanel()">▼ เปิด</button>\n                </div>\n            </div>\n            <div id="attendancePanelContent" style="display:none;">\n            <div class="row g-3 mb-3">\n                <div class="col-md-4">\n                    <div class="card p-3 attendance-stat h-100">\n                        <div class="text-info small" data-i18n="attendanceTotalRaids">กิจกรรมทั้งหมด</div>\n                        <div class="fs-3 fw-bold" id="attendanceTotalRaidsCount" class="attendance-stat-value fs-3 fw-bold">0</div>\n                    </div>\n                </div>\n                <div class="col-md-4">\n                    <div class="card p-3 attendance-stat h-100">\n                        <div class="text-success small" data-i18n="attendanceUniqueMembers">สมาชิกที่เข้าร่วม</div>\n                        <div class="fs-3 fw-bold" id="attendanceUniqueMembersCount" class="attendance-stat-value fs-3 fw-bold">0</div>\n                    </div>\n                </div>\n                <div class="col-md-4">\n                    <div class="card p-3 attendance-stat h-100">\n                        <div class="text-warning small" data-i18n="attendanceTotalCheckins">เช็คชื่อรวม</div>\n                        <div class="fs-3 fw-bold" id="attendanceTotalCheckinsCount" class="attendance-stat-value fs-3 fw-bold">0</div>\n                    </div>\n                </div>\n            </div>\n\n            <h5 class="text-info mt-3" data-i18n="attendanceCurrent">กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม</h5>\n            <div class="table-responsive mb-4">\n                <table class="table table-dark table-hover align-middle attendance-table mb-0">\n                    <thead><tr>\n                        <th data-i18n="attendanceBoss">บอส</th>\n                        <th data-i18n="attendanceDate">วันที่</th>\n                        <th data-i18n="attendanceAttackTime">เวลาโจมตี</th>\n                        <th data-i18n="attendanceOpenClose">เปิด–ปิด</th>\n                        <th data-i18n="attendanceCount">ผู้เข้าร่วม</th>\n                        <th data-i18n="attendanceStatus">สถานะ</th>\n                    </tr></thead>\n                    <tbody id="attendanceCurrentBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>\n                </table>\n            </div>\n\n            <div class="d-flex align-items-center justify-content-between gap-2 mt-3 mb-2">\n                <h5 class="text-info mb-0" data-i18n="attendanceHistory">ประวัติย้อนหลัง</h5>\n                <button id="attendanceHistoryCollapseBtn" type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendanceHistoryPanel()">▼ เปิด</button>\n            </div>\n            <div id="attendanceHistoryPanelContent" style="display:none;">\n            <div class="table-responsive mb-4">\n                <table class="table table-dark table-hover align-middle attendance-table mb-0">\n                    <thead><tr>\n                        <th data-i18n="attendanceBoss">บอส</th>\n                        <th data-i18n="attendanceDate">วันที่</th>\n                        <th data-i18n="attendanceAttackTime">เวลาโจมตี</th>\n                        <th data-i18n="attendanceCount">ผู้เข้าร่วม</th>\n                        <th data-i18n="attendanceCreatedBy">สร้างโดย</th>\n                        <th data-i18n="attendanceStatus">สถานะ</th>\n                    </tr></thead>\n                    <tbody id="attendanceHistoryBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>\n                </table>\n                <div id="attendanceHistoryPagination" class="attendance-pagination" aria-label="Attendance History pagination"></div>\n            </div>\n\n            </div>\n\n            <h5 class="text-warning" data-i18n="attendanceMonthly">📊 รายงานประจำเดือน</h5>\n            <div class="table-responsive">\n                <table class="table table-dark table-hover align-middle attendance-table mb-0">\n                    <thead><tr>\n                        <th data-i18n="attendanceMonth">เดือน</th>\n                        <th data-i18n="attendanceRaids">กิจกรรม</th>\n                        <th data-i18n="attendanceMembers">สมาชิก</th>\n                        <th data-i18n="attendanceChecks">เช็คชื่อ</th>\n                    </tr></thead>\n                    <tbody id="attendanceMonthlyBody"><tr><td colspan="4" class="text-center text-muted">-</td></tr></tbody>\n                </table>\n            </div>\n            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-4">\n                <div class="d-flex align-items-center gap-2">\n                    <h5 class="text-warning mb-0" data-i18n="attendanceMemberMonthly">👤 สรุปรายสมาชิกสะสมรายเดือน</h5>\n                    <button id="attendanceMemberMonthlyCollapseBtn" type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendanceMemberMonthlyPanel()">▼ เปิด</button>\n                </div>\n                <select id="attendanceMemberMonthSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">\n                    <option value="all" data-i18n="attendanceAllMonths">ทุกเดือน</option>\n                </select>\n            </div>\n            <div id="attendanceMemberMonthlyPanelContent" style="display:none;">\n            <div class="table-responsive mt-2">\n                <table class="table table-dark table-hover align-middle attendance-table mb-0">\n                    <thead><tr>\n                        <th>#</th>\n                        <th data-i18n="attendanceMemberName">สมาชิก</th>\n                        <th data-i18n="attendanceRole">Role</th>\n                        <th data-i18n="attendanceMemberCount">จำนวนเข้าร่วม</th>\n                        <th data-i18n="attendanceMemberRaids">จำนวนกิจกรรม</th>\n                        <th data-i18n="attendanceLastCheckin">เช็คชื่อล่าสุด</th>\n                    </tr></thead>\n                    <tbody id="attendanceMemberMonthlyBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>\n                </table>\n                <div id="attendanceMemberMonthlyPagination" class="attendance-pagination" aria-label="Monthly Member Totals pagination"></div>\n            </div>\n            </div>\n\n            <!-- 👤 Individual Attendance Detail -->\n            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-4 mb-2">\n                <div class="d-flex align-items-center gap-2">\n                    <h5 class="text-info mb-0" data-i18n="attendanceIndividual">👤 ข้อมูลการเข้าร่วมรายบุคคล</h5>\n                    <button id="attendanceIndividualCollapseBtn" type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendanceIndividualPanel()">▼ เปิด</button>\n                </div>\n                <div class="d-flex flex-wrap gap-2">\n                    <select id="attendanceIndividualRoleSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:150px;">\n                        <option value="all" data-i18n="attendanceAllRoles">ทุก Role</option>\n                    </select>\n                    <select id="attendanceIndividualMemberSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:220px;">\n                        <option value="" data-i18n="attendanceSelectMember">เลือกสมาชิก</option>\n                    </select>\n                    <select id="attendanceIndividualMonthSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="min-width:160px;">\n                        <option value="all" data-i18n="attendanceAllMonths">ทุกเดือน</option>\n                    </select>\n                </div>\n            </div>\n            <div id="attendanceIndividualPanelContent" style="display:none;">\n                <div class="row g-3 mb-3">\n                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualName">สมาชิก</div><div class="fw-bold text-white" id="attendanceIndividualNameValue">-</div></div></div>\n                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualCheckins">เช็คชื่อ</div><div class="attendance-stat-value fs-4 fw-bold" id="attendanceIndividualCheckinsValue">0</div></div></div>\n                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualRaids">กิจกรรม</div><div class="attendance-stat-value fs-4 fw-bold" id="attendanceIndividualRaidsValue">0</div></div></div>\n                    <div class="col-md-3"><div class="card p-3 attendance-stat h-100"><div class="text-info small" data-i18n="attendanceIndividualLast">เช็คชื่อล่าสุด</div><div class="fw-bold text-white" id="attendanceIndividualLastValue">-</div></div></div>\n                </div>\n                <div class="table-responsive">\n                    <table class="table table-dark table-hover align-middle attendance-table mb-0">\n                        <thead><tr>\n                            <th data-i18n="attendanceIndividualDate">วันที่</th>\n                            <th data-i18n="attendanceIndividualBoss">บอส</th>\n                            <th data-i18n="attendanceIndividualAttack">เวลาโจมตี</th>\n                            <th data-i18n="attendanceIndividualCheckedAt">เวลาที่เช็คชื่อ</th>\n                            <th data-i18n="attendanceIndividualStatus">สถานะ</th>\n                        </tr></thead>\n                        <tbody id="attendanceIndividualBody"><tr><td colspan="5" class="text-center text-muted">-</td></tr></tbody>\n                    </table>\n                </div>\n            </div>\n            </div>\n        </div>\n\n        <footer class="text-center text-white mt-4">\n            <small data-i18n="footer">ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ</small>\n        </footer>\n    </div>\n\n    <!-- Modal เปลี่ยนรหัสผ่าน -->\n    <div class="modal fade" id="changeCodeModal" tabindex="-1" aria-hidden="true">\n        <div class="modal-dialog modal-dialog-centered">\n            <div class="modal-content p-3">\n                <div class="modal-header border-secondary">\n                    <h5 class="modal-title text-warning" data-i18n="modalChangeCodeTitle">🔑 เปลี่ยนโค้ดสำหรับสมัคร</h5>\n                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>\n                </div>\n                <div class="modal-body">\n                    <form id="changeCodeForm">\n                        <div class="mb-3">\n                            <label class="form-label" data-i18n="labelNewRegCode">โค้ดสมัครใหม่</label>\n                            <input type="text" id="newRegCodeInput" class="form-control" placeholder="กรอกโค้ดสำหรับสมัครใหม่" data-i18n-ph="phNewRegCode" required>\n                        </div>\n                        <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnSaveCode">💾 บันทึกโค้ดใหม่</button>\n                    </form>\n                </div>\n            </div>\n        </div>\n    </div>\n\n    <!-- Modal ตั้งค่า Bot Notification -->\n    <div class="modal fade" id="botSettingsModal" tabindex="-1" aria-hidden="true">\n        <div class="modal-dialog modal-dialog-centered">\n            <div class="modal-content p-3">\n                <div class="modal-header border-secondary">\n                    <h5 class="modal-title text-info" data-i18n="modalBotSettingsTitle">⚙️ ตั้งค่าแจ้งเตือนบอท</h5>\n                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>\n                </div>\n                <div class="modal-body">\n                    <h6 class="text-warning mb-3" data-i18n="labelVoiceLang">🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)</h6>\n                    <div class="form-check form-switch mb-2">\n                        <input class="form-check-input" type="checkbox" id="ttsThToggle">\n                        <label class="form-check-label" for="ttsThToggle">🇹🇭 ภาษาไทย (TH)</label>\n                    </div>\n                    <div class="form-check form-switch mb-2">\n                        <input class="form-check-input" type="checkbox" id="ttsEnToggle">\n                        <label class="form-check-label" for="ttsEnToggle">🇺🇸 ภาษาอังกฤษ (EN)</label>\n                    </div>\n                    <div class="form-check form-switch mb-3">\n                        <input class="form-check-input" type="checkbox" id="ttsKoToggle">\n                        <label class="form-check-label" for="ttsKoToggle">🇰🇷 ภาษาเกาหลี (KO)</label>\n                    </div>\n                    <h6 class="text-info mb-3" data-i18n="labelDiscordLang">💬 ภาษาที่ใช้แจ้งเตือนใน Discord</h6>\n                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="discordThToggle"><label class="form-check-label" for="discordThToggle">🇹🇭 ภาษาไทย (TH)</label></div>\n                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="discordEnToggle"><label class="form-check-label" for="discordEnToggle">🇺🇸 ภาษาอังกฤษ (EN)</label></div>\n                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="discordKoToggle"><label class="form-check-label" for="discordKoToggle">🇰🇷 ภาษาเกาหลี (KO)</label></div>\n                </div>\n            </div>\n        </div>\n    </div>\n\n    <!-- V8: GitHub Pages loads the authoritative Firebase Web config from Render.\n         Render reads FIREBASE_WEB_CONFIG_JSON, including the real apiKey.\n         The script tag is intentionally before Firebase initialization so the config\n         is available before signInWithEmailAndPassword() can ever run. -->\n    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>\n    <script>\n        (function bootstrapSkynetDashboard() {\n        // --- V8: FIREBASE CONFIG FROM RENDER ---\n        // Do NOT hard-code an API key in GitHub Pages. Render is the source of truth.\n        const firebaseConfig = window.SKYNET_FIREBASE_CONFIG || {};\n        const requiredFirebaseFields = [\'apiKey\',\'authDomain\',\'databaseURL\',\'projectId\',\'storageBucket\',\'messagingSenderId\',\'appId\'];\n        const missingFirebaseFields = requiredFirebaseFields.filter(k => !firebaseConfig[k]);\n        if (missingFirebaseFields.length) {\n            console.error(\'[SKYNET V8] Missing Firebase Web config:\', missingFirebaseFields);\n            const bootError = document.getElementById(\'loginDebug\');\n            if (bootError) {\n                bootError.style.display = \'block\';\n                bootError.textContent = \'❌ Firebase Config จาก Render ไม่ครบ: \' + missingFirebaseFields.join(\', \') +\n                    \'\\n\\nตรวจ Render Environment Variable: FIREBASE_WEB_CONFIG_JSON\';\n            }\n            throw new Error(\'FIREBASE_WEB_CONFIG_MISSING:\' + missingFirebaseFields.join(\',\'));\n        }\n\n        if (firebaseConfig.projectId !== \'skynet-3ad44\') {\n            console.error(\'[SKYNET V8] Wrong Firebase project:\', firebaseConfig.projectId);\n            throw new Error(\'FIREBASE_WRONG_PROJECT:\' + firebaseConfig.projectId);\n        }\n\n        // Initialize Firebase only after the authoritative Render config is loaded.\n        firebase.initializeApp(firebaseConfig);\n        const db = firebase.database();\n        const auth = firebase.auth();\n        const bossRef = db.ref(\'boss_schedule\');\n        const usersRef = db.ref(\'users\');\n        const settingsRef = db.ref(\'app_settings\');\n        const botSettingsRef = db.ref(\'bot_settings\'); // เพิ่ม Reference สำหรับการตั้งค่าบอท\n        const sessionsRef = db.ref(\'dashboard_sessions\');\n        const raidAttendanceRef = db.ref(\'raid_attendance\');\n        const monthlyReportsRef = db.ref(\'monthly_reports\');\n\n        // V5: bounded Firebase operations so the Login button can never remain stuck on loading.\n        function withTimeout(promise, ms, label) {\n            let timer;\n            const timeout = new Promise((_, reject) => {\n                timer = setTimeout(() => {\n                    const err = new Error(label || \'TIMEOUT\');\n                    err.code = \'SKYNET_TIMEOUT\';\n                    reject(err);\n                }, ms);\n            });\n            return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));\n        }\n\n        // 🔐 Admin account\n        // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด\n        // users/<ADMIN_UID> เป็น role=admin และ status=approved ใน Realtime Database\n        // ไม่มีการสร้าง Admin อัตโนมัติจากหน้าเว็บ เพื่อป้องกันผู้ใช้ทั่วไปยกระดับสิทธิ์\n        const ADMIN_DEFAULT_USERNAME = "admin";\n        const ACTIVE_SESSION_TIMEOUT_MS = 90000;\n\n        // โค้ดสมัครเริ่มต้น\n        let currentRegCode = "1234";\n        settingsRef.child(\'register_code\').on(\'value\', (snap) => {\n            if (snap.exists() && snap.val()) {\n                currentRegCode = snap.val();\n            } else {\n                settingsRef.child(\'register_code\').set("1234");\n            }\n        });\n\n        // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน\n        botSettingsRef.on(\'value\', (snap) => {\n            const data = snap.val() || {};\n            // Firebase is authoritative. Missing values remain OFF until explicitly enabled.\n            document.getElementById(\'ttsThToggle\').checked = data.tts_th_enabled === true;\n            document.getElementById(\'ttsEnToggle\').checked = data.tts_en_enabled === true;\n            document.getElementById(\'ttsKoToggle\').checked = data.tts_ko_enabled === true;\n            document.getElementById(\'discordThToggle\').checked = data.discord_notify_th_enabled !== false;\n            document.getElementById(\'discordEnToggle\').checked = data.discord_notify_en_enabled !== false;\n            document.getElementById(\'discordKoToggle\').checked = data.discord_notify_ko_enabled !== false;\n        });\n\n        // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา\n        [\'ttsThToggle\', \'ttsEnToggle\', \'ttsKoToggle\', \'discordThToggle\', \'discordEnToggle\', \'discordKoToggle\'].forEach(id => {\n            document.getElementById(id).addEventListener(\'change\', async (e) => {\n                if (!await requireApprovedUser()) {\n                    e.target.checked = !e.target.checked;\n                    return;\n                }\n                const keyMap = {\n                    ttsThToggle: \'tts_th_enabled\', ttsEnToggle: \'tts_en_enabled\', ttsKoToggle: \'tts_ko_enabled\',\n                    discordThToggle: \'discord_notify_th_enabled\', discordEnToggle: \'discord_notify_en_enabled\', discordKoToggle: \'discord_notify_ko_enabled\'\n                };\n                await botSettingsRef.child(keyMap[id]).set(e.target.checked);\n            });\n        });\n\n        // ฟังก์ชันเปิด Modal ตั้งค่า Bot\n        async function openBotSettingsModal() {\n            if (!await requireApprovedUser()) return;\n            const modalEl = document.getElementById(\'botSettingsModal\');\n            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);\n            modal.show();\n        }\n\n        // --- 2. ฐานข้อมูลภาษา (i18n) ---\n        const TRANSLATIONS = {\n            th: {\n                authTitle: "⚔️ Boss Timer Access",\n                tabLogin: "เข้าสู่ระบบ",\n                tabRegister: "ลงทะเบียน",\n                labelUsername: "ชื่อผู้ใช้",\n                labelPassword: "รหัสผ่าน",\n                labelRegCode: "โค้ดสำหรับสมัคร",\n                rememberMe: "จำชื่อผู้ใช้",\n                btnLogin: "🔑 เข้าสู่ระบบ",\n                btnRegister: "📝 ลงทะเบียน",\n                btnLogout: "🚪 ออกจากระบบ",\n                btnConfigCode: "🔑 เปลี่ยนโค้ดสมัคร",\n                modalChangeCodeTitle: "🔑 เปลี่ยนโค้ดสำหรับสมัคร",\n                labelNewRegCode: "โค้ดสมัครใหม่",\n                btnSaveCode: "💾 บันทึกโค้ดใหม่",\n                btnBotSettings: "⚙️ ตั้งค่าบอท",\n                modalBotSettingsTitle: "⚙️ ตั้งค่าแจ้งเตือนบอท",\n                labelVoiceLang: "🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)",\n                labelDiscordLang: "💬 ภาษาที่ใช้แจ้งเตือนใน Discord",\n                phLoginUser: "กรอกชื่อผู้ใช้",\n                phLoginPass: "กรอกรหัสผ่าน",\n                phRegUser: "ตั้งชื่อผู้ใช้",\n                phRegPass: "ตั้งรหัสผ่าน",\n                phRegCode: "กรอกโค้ดสำหรับสมัคร",\n                phNewRegCode: "กรอกโค้ดสำหรับสมัครใหม่",\n                title: "⚔️ Boss Timer Dashboard",\n                online: "🟢 Realtime Sync Active",\n                labelLanguage: "🌐 ภาษา:",\n                labelTimezone: "🌍 เขตเวลา (IANA):",\n                tzAuto: "💻 อัตโนมัติ (ตามเครื่อง)",\n                enableNotify: "🔔 เปิดระบบเสียง & แจ้งเตือน",\n                disableNotify: "🔕 ปิดระบบเสียง & แจ้งเตือน",\n                formTitle: "⏱️ บันทึกเวลาบอสตาย",\n                labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",\n                phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",\n                labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",\n                labelKillDate: "วันที่(วัน/เดือน/ปี)",\n                phKillDate: "เช่น 14/09/2026 หรือ 14092026",\n                hintKillDate: "*เว้นว่างได้ หรือใช้รูปแบบ 14/09/2026 หรือ 14092026",\n                labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",\n                phKillTime: "เช่น 17:30 หรือ 1730",\n                hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",\n                labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",\n                btnSave: "⚔️ บันทึกเวลา",\n                tableTitle: "📜 ตารางเวลาบอสล่าสุด",\n                weeklyEventsTitle: "🛡️ ตารางกิจกรรมประจำสัปดาห์",\n                weeklyEventName: "กิจกรรม", weeklyEventDay: "วัน", weeklyEventTime: "เวลา",\n                weeklyEventNext: "ครั้งถัดไป", weeklyEventCountdown: "นับถอยหลัง",\n                guildSiegeName: "Guild Siege", dayWednesday: "วันพุธ", daySunday: "วันอาทิตย์",\n                weeklyNow: "กำลังถึงเวลา", weeklyHours: "ชม.", weeklyMinutes: "นาที", weeklySeconds: "วินาที",\n                btnClear: "ล้างข้อมูลทั้งหมด",\n                thBoss: "ชื่อบอส",\n                thKillDate: "วันที่",\n                thKillTime: "เวลาตาย (24 ชม.)",\n                thSpawnTime: "เวลาเกิด (24 ชม.)",\n                thCountdown: "นับถอยหลัง",\n                thNotice: "เตือนล่วงหน้า",\n                thRecordedBy: "ผู้บันทึก",\n                thAction: "จัดการ",\n                emptyMsg: "📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ",\n                spawned: "⚔️ เกิดแล้ว!",\n                btnDelete: "ลบ",\n                hourUnit: "ชม.",\n                minUnit: "นาที",\n                secUnit: "วินาที",\n                footer: "ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ",\n                invalidTimeAlert: "กรุณากรอกเวลาให้ถูกต้องตามระบบ 24 ชั่วโมง (เช่น 08:30 หรือ 17:45)",\n                confirmClear: "คุณต้องการล้างตารางบอสทั้งหมดใช่หรือไม่?",\n                confirmDelete: "คุณต้องการลบบอส {boss} ใช่หรือไม่?",\n                notifyReadyTitle: "⚔️ ระบบแจ้งเตือนพร้อมทำงาน",\n                notifyReadyBody: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว",\n                noNotifySupport: "เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือนแบบ Pop-up",\n                grantNotifyPrompt: "กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ",\n                errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",\n                errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",\n                regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",\n                errLoginFailed: "เข้าสู่ระบบไม่สำเร็จ",\n                codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",\n                spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",\n                spawnNotifyBody: "บอส {boss} ได้เกิดแล้วในขณะนี้",\n                noticeNotifyTitle: "⏳ {boss} ใกล้เกิด!",\n                noticeNotifyBody: "บอส {boss} จะเกิดในอีก {min} นาที",\n                regPending: "ลงทะเบียนสำเร็จ แต่บัญชียังรอ Admin อนุมัติ จึงยังเข้าใช้งานไม่ได้",\n                errPendingApproval: "บัญชีนี้กำลังรอ Admin อนุมัติ",\n                errAccountRejected: "บัญชีนี้ถูกปฏิเสธหรือปิดการใช้งานโดย Admin",\n                errAccountNotApproved: "บัญชีนี้ยังไม่ได้รับอนุมัติจาก Admin",\n                errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",\n                errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",\n                attendanceTitle: "⚔️ Boss Raid Attendance",\n                attendanceSubtitle: "เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord",\n                attendanceRealtime: "🟢 Real-time",\n                attendanceTotalRaids: "กิจกรรมทั้งหมด", attendanceUniqueMembers: "สมาชิกที่เข้าร่วม", attendanceTotalCheckins: "เช็คชื่อรวม",\n                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน", attendanceMemberMonthly: "👤 สรุปรายสมาชิกสะสมรายเดือน", attendanceAllMonths: "ทุกเดือน", attendanceMemberName: "สมาชิก", attendanceMemberCount: "จำนวนเข้าร่วม", attendanceMemberRaids: "จำนวนกิจกรรม", attendanceLastCheckin: "เช็คชื่อล่าสุด", attendanceIndividual: "👤 ข้อมูลการเข้าร่วมรายบุคคล", attendanceSelectMember: "เลือกสมาชิก", attendanceIndividualName: "สมาชิก", attendanceIndividualCheckins: "เช็คชื่อ", attendanceIndividualRaids: "กิจกรรม", attendanceIndividualLast: "เช็คชื่อล่าสุด", attendanceIndividualDate: "วันที่", attendanceIndividualBoss: "บอส", attendanceIndividualAttack: "เวลาโจมตี", attendanceIndividualCheckedAt: "เวลาที่เช็คชื่อ", attendanceIndividualStatus: "สถานะ", attendanceRole: "Role", attendanceAllRoles: "ทุก Role", attendanceRoleEternal: "Eternal", attendanceRoleMeaw: "Meaw", attendanceRoleAnti: "Anti",\n                attendanceBoss: "บอส", attendanceDate: "วันที่", attendanceAttackTime: "เวลาโจมตี", attendanceOpenClose: "เปิด–ปิด",\n                attendanceCount: "ผู้เข้าร่วม", attendanceCreatedBy: "สร้างโดย", attendanceStatus: "สถานะ", attendanceMonth: "เดือน",\n                attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ", attendanceCollapseOpen: "▼ เปิด", attendanceCollapseClose: "▲ ปิด",\n                adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",\n                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติอยู่ในตารางด้านล่าง",\n                adminRefresh: "🔄 รีเฟรช",\n                adminPending: "รออนุมัติ",\n                adminActive: "กำลังใช้งาน",\n                adminTotal: "ผู้ใช้ทั้งหมด",\n                adminThUser: "ผู้ใช้",\n                adminThStatus: "สถานะ",\n                adminThCreated: "สมัครเมื่อ",\n                adminThLastLogin: "เข้าสู่ระบบล่าสุด",\n                adminThLastSeen: "ใช้งานล่าสุด",\n                adminThLogins: "จำนวนครั้ง",\n                adminThDiscord: "Discord DM",\n                adminThAction: "จัดการ",\n                discordUserNotifyTitle: "💬 Discord DM แจ้งเตือนส่วนตัว",\n                discordUserNotifySubtitle: "ตั้งค่าเฉพาะบัญชีนี้เท่านั้น • ไม่เปลี่ยนข้อความประกาศในห้อง Discord เดิม",\n                discordUserNotifyOptIn: "🔐 เปิดใช้งานเอง",\n                discordUserIdLabel: "Discord User ID",\n                discordUserIdPlaceholder: "เช่น 123456789012345678",\n                discordUserLangLabel: "ภาษาการแจ้งเตือนใน Discord",\n                discordUserNotifyEnabledLabel: "เปิดรับ DM จาก Boss Timer",\n                discordUserNotifyNote: "ระบบจะส่งเฉพาะเมื่อเปิดใช้งานและมี Discord User ID",\n                discordUserNotifySave: "💾 บันทึก",\n                discordUserNotifySaved: "✅ บันทึกการตั้งค่า Discord DM แล้ว",\n                discordUserNotifyNeedId: "⚠️ กรุณากรอก Discord User ID ให้ถูกต้อง หรือปิดการแจ้งเตือน",\n                discordUserNotifyInvalidLang: "⚠️ ภาษาที่เลือกไม่ถูกต้อง",\n                discordUserNotifyDisabled: "ปิดรับ Discord DM แล้ว",\n                adminApprove: "อนุมัติ",\n                adminReject: "ปฏิเสธ",\n                adminDisable: "ปิดใช้งาน",\n                adminActivate: "เปิดใช้งาน",\n                adminNoUsers: "ยังไม่มีผู้ใช้งาน",\n                adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",\n                adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"\n            },\n            en: {\n                authTitle: "⚔️ Boss Timer Access",\n                tabLogin: "Login",\n                tabRegister: "Register",\n                labelUsername: "Username",\n                labelPassword: "Password",\n                labelRegCode: "Registration Code",\n                rememberMe: "Remember Username",\n                btnLogin: "🔑 Login",\n                btnRegister: "📝 Register",\n                btnLogout: "🚪 Logout",\n                btnConfigCode: "🔑 Change Reg Code",\n                modalChangeCodeTitle: "🔑 Change Registration Code",\n                labelNewRegCode: "New Registration Code",\n                btnSaveCode: "💾 Save New Code",\n                btnBotSettings: "⚙️ Bot Settings",\n                modalBotSettingsTitle: "⚙️ Bot Notification Settings",\n                labelVoiceLang: "🔊 Voice Notification Languages",\n                labelDiscordLang: "💬 Discord Notification Languages",\n                phLoginUser: "Enter username",\n                phLoginPass: "Enter password",\n                phRegUser: "Set username",\n                phRegPass: "Set password",\n                phRegCode: "Enter registration code",\n                phNewRegCode: "Enter new registration code",\n                title: "⚔️ Boss Timer Dashboard",\n                online: "🟢 Realtime Sync Active",\n                labelLanguage: "🌐 Language:",\n                labelTimezone: "🌍 Timezone (IANA):",\n                tzAuto: "💻 Auto (Device Local)",\n                enableNotify: "🔔 Enable Sound & Alerts",\n                disableNotify: "🔕 Disable Sound & Alerts",\n                formTitle: "⏱️ Record Boss Kill Time",\n                labelBoss: "Select or Type Boss Name",\n                phBoss: "Type to search or select...",\n                labelKillTime: "Kill Time (24h Format)",\n                labelKillDate: "Date (Day/Month/Year)",\n                phKillDate: "e.g. 14/09/2026 or 14092026",\n                hintKillDate: "*Optional: 14/09/2026 or 14092026; blank = today",\n                labelSpTime: "Special Time (mins)",\n                phKillTime: "e.g. 17:30 or 1730",\n                hintKillTime: "*Leave blank to use current time",\n                labelNotice: "Advance Notice (Mins)",\n                btnSave: "⚔️ Save Time",\n                tableTitle: "📜 Boss Schedule Table",\n                weeklyEventsTitle: "🛡️ Weekly Guild Events",\n                weeklyEventName: "Event", weeklyEventDay: "Day", weeklyEventTime: "Time",\n                weeklyEventNext: "Next", weeklyEventCountdown: "Countdown",\n                guildSiegeName: "Guild Siege", dayWednesday: "Wednesday", daySunday: "Sunday",\n                weeklyNow: "Now", weeklyHours: "h", weeklyMinutes: "m", weeklySeconds: "s",\n                btnClear: "Clear All Data",\n                thBoss: "Boss Name",\n                thKillDate: "Date",\n                thKillTime: "Kill Time (24h)",\n                thSpawnTime: "Spawn Time (24h)",\n                thCountdown: "Countdown",\n                thNotice: "Notice",\n                thRecordedBy: "Recorded By",\n                thAction: "Action",\n                emptyMsg: "📌 No boss times recorded in the system",\n                spawned: "⚔️ Spawned!",\n                btnDelete: "Delete",\n                hourUnit: "h",\n                minUnit: "m",\n                secUnit: "s",\n                footer: "Real-time Boss Countdown System • Synced with Cloud Database",\n                invalidTimeAlert: "Please enter time in valid 24-hour format (e.g. 08:30 or 17:45)",\n                confirmClear: "Are you sure you want to clear all boss timers?",\n                confirmDelete: "Are you sure you want to delete boss {boss}?",\n                notifyReadyTitle: "⚔️ Notifications Active",\n                notifyReadyBody: "You will be alerted before boss spawns and when spawned.",\n                noNotifySupport: "This browser does not support Pop-up notifications.",\n                grantNotifyPrompt: "Please grant notification permissions in your browser.",\n                errRegCodeInvalid: "Invalid Registration Code!",\n                errUserExists: "Username already exists!",\n                regSuccess: "Registration successful! Please login.",\n                errLoginFailed: "Login failed",\n                codeChangedSuccess: "Registration code updated successfully!",\n                spawnNotifyTitle: "⚔️ {boss} Spawned!",\n                spawnNotifyBody: "Boss {boss} has spawned!",\n                noticeNotifyTitle: "⏳ {boss} Spawning Soon!",\n                noticeNotifyBody: "Boss {boss} will spawn in {min} minutes",\n                regPending: "Registration submitted. Your account is pending Admin approval.",\n                errPendingApproval: "This account is waiting for Admin approval.",\n                errAccountRejected: "This account was rejected or disabled by Admin.",\n                errAccountNotApproved: "This account has not been approved by Admin.",\n                errWeakAccount: "Username must be at least 3 characters and password at least 6 characters.",\n                errAdminUsername: "The admin username is reserved.",\n                attendanceTitle: "⚔️ Boss Raid Attendance",\n                attendanceSubtitle: "Real-time boss raid check-in from Discord",\n                attendanceRealtime: "🟢 Realtime",\n                attendanceTotalRaids: "Total Raids", attendanceUniqueMembers: "Unique Members", attendanceTotalCheckins: "Total Check-ins",\n                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports", attendanceMemberMonthly: "👤 Monthly Member Totals", attendanceAllMonths: "All months", attendanceMemberName: "Member", attendanceMemberCount: "Check-ins", attendanceMemberRaids: "Raids", attendanceLastCheckin: "Last Check-in", attendanceIndividual: "👤 Individual Attendance", attendanceSelectMember: "Select member", attendanceIndividualName: "Member", attendanceIndividualCheckins: "Check-ins", attendanceIndividualRaids: "Raids", attendanceIndividualLast: "Last Check-in", attendanceIndividualDate: "Date", attendanceIndividualBoss: "Boss", attendanceIndividualAttack: "Attack Time", attendanceIndividualCheckedAt: "Checked At", attendanceIndividualStatus: "Status", attendanceRole: "Role", attendanceAllRoles: "All Roles", attendanceRoleEternal: "Eternal", attendanceRoleMeaw: "Meaw", attendanceRoleAnti: "Anti",\n                attendanceBoss: "Boss", attendanceDate: "Date", attendanceAttackTime: "Attack Time", attendanceOpenClose: "Open–Close",\n                attendanceCount: "Participants", attendanceCreatedBy: "Created By", attendanceStatus: "Status", attendanceMonth: "Month",\n                attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins", attendanceCollapseOpen: "▼ Open", attendanceCollapseClose: "▲ Close",\n                adminPanelTitle: "🛡️ Admin • User Management",\n                adminPanelSubtitle: "Approve registrations, review history, and see active users. Approval buttons are in the table below.",\n                adminRefresh: "🔄 Refresh",\n                adminPending: "Pending",\n                adminActive: "Active Now",\n                adminTotal: "Total Users",\n                adminThUser: "User",\n                adminThStatus: "Status",\n                adminThCreated: "Registered",\n                adminThLastLogin: "Last Login",\n                adminThLastSeen: "Last Seen",\n                adminThLogins: "Logins",\n                adminThDiscord: "Discord DM",\n                adminThAction: "Action",\n                discordUserNotifyTitle: "💬 Personal Discord DM Alerts",\n                discordUserNotifySubtitle: "Only this account is affected • Existing public Discord channel messages remain unchanged",\n                discordUserNotifyOptIn: "🔐 Opt-in",\n                discordUserIdLabel: "Discord User ID",\n                discordUserIdPlaceholder: "e.g. 123456789012345678",\n                discordUserLangLabel: "Discord notification language",\n                discordUserNotifyEnabledLabel: "Receive Boss Timer DMs",\n                discordUserNotifyNote: "DMs are sent only when enabled and a Discord User ID is set",\n                discordUserNotifySave: "💾 Save",\n                discordUserNotifySaved: "✅ Discord DM settings saved",\n                discordUserNotifyNeedId: "⚠️ Enter a valid Discord User ID or turn notifications off",\n                discordUserNotifyInvalidLang: "⚠️ Invalid notification language",\n                discordUserNotifyDisabled: "Discord DMs disabled",\n                adminApprove: "Approve",\n                adminReject: "Reject",\n                adminDisable: "Disable",\n                adminActivate: "Activate",\n                adminNoUsers: "No users found.",\n                adminOnly: "Admin only.",\n                adminCannotChangeAdmin: "The Admin account cannot be changed."\n            },\n            ko: {\n                authTitle: "⚔️ Boss Timer Access",\n                tabLogin: "로그인",\n                tabRegister: "회원가입",\n                labelUsername: "사용자 이름",\n                labelPassword: "비밀번호",\n                labelRegCode: "가입 코드",\n                rememberMe: "사용자 이름 저장",\n                btnLogin: "🔑 로그인",\n                btnRegister: "📝 회원가입",\n                btnLogout: "🚪 로그아웃",\n                btnConfigCode: "🔑 가입 코드 변경",\n                modalChangeCodeTitle: "🔑 가입 코드 변경",\n                labelNewRegCode: "새 가입 코드",\n                btnSaveCode: "💾 새 코드 저장",\n                btnBotSettings: "⚙️ 봇 설정",\n                modalBotSettingsTitle: "⚙️ 봇 알림 설정",\n                labelVoiceLang: "🔊 음성 알림 언어",\n                labelDiscordLang: "💬 Discord 알림 언어",\n                phLoginUser: "사용자 이름을 입력하세요",\n                phLoginPass: "비밀번호를 입력하세요",\n                phRegUser: "사용자 이름 설정",\n                phRegPass: "비밀번호 설정",\n                phRegCode: "가입 코드를 입력하세요",\n                phNewRegCode: "새 가입 코드를 입력하세요",\n                title: "⚔️ Boss Timer Dashboard",\n                online: "🟢 실시간 동기화 활성화",\n                labelLanguage: "🌐 언어:",\n                labelTimezone: "🌍 시간대 (IANA):",\n                tzAuto: "💻 자동 (기기 설정)",\n                enableNotify: "🔔 소리 및 알림 켜기",\n                disableNotify: "🔕 소리 및 알림 끄기",\n                formTitle: "⏱️ 보스 처치 시간 기록",\n                labelBoss: "보스 선택 또는 입력",\n                phBoss: "검색 또는 선택...",\n                labelKillTime: "처치 시간 (24시간 형식)",\n                labelKillDate: "날짜 (일/월/년)",\n                phKillDate: "예: 14/09/2026 또는 14092026",\n                hintKillDate: "*선택: 14/09/2026 또는 14092026; 비우면 오늘",\n                labelSpTime: "추가 시간 (분)",\n                phKillTime: "예: 17:30 또는 1730",\n                hintKillTime: "*현재 시간을 사용하려면 비워두세요",\n                labelNotice: "사전 알림 (분)",\n                btnSave: "⚔️ 시간 저장",\n                tableTitle: "📜 최근 보스 시간표",\n                weeklyEventsTitle: "🛡️ 주간 길드 이벤트",\n                weeklyEventName: "이벤트", weeklyEventDay: "요일", weeklyEventTime: "시간",\n                weeklyEventNext: "다음 일정", weeklyEventCountdown: "카운트다운",\n                guildSiegeName: "Guild Siege", dayWednesday: "수요일", daySunday: "일요일",\n                weeklyNow: "지금", weeklyHours: "시간", weeklyMinutes: "분", weeklySeconds: "초",\n                btnClear: "전체 목록 삭제",\n                thBoss: "보스 이름",\n                thKillDate: "날짜",\n                thKillTime: "처치 시간 (24h)",\n                thSpawnTime: "젠 시간 (24h)",\n                thCountdown: "카운트다운",\n                thNotice: "사전 알림",\n                thRecordedBy: "기록자",\n                thAction: "관리",\n                emptyMsg: "📌 시스템에 기록된 보스 시간이 없습니다",\n                spawned: "⚔️ 젠 완료!",\n                btnDelete: "삭제",\n                hourUnit: "시간",\n                minUnit: "분",\n                secUnit: "초",\n                footer: "실시간 보스 카운트다운 시스템 • 클라우드 자동 동기화",\n                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 หรือ 17:45)",\n                confirmClear: "모든 보스 타이머를 삭제하시겠습니까?",\n                confirmDelete: "보스 {boss}을(를) 삭제하시겠습니까?",\n                notifyReadyTitle: "⚔️ 알림 시스템 준비 완료",\n                notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",\n                noNotifySupport: "이 브라우저는 팝업 알림을 지원하지 않습니다.",\n                grantNotifyPrompt: "브라우저에서 알림 권한을 허용해주세요.",\n                errRegCodeInvalid: "가입 코드가 올바르지 않습니다!",\n                errUserExists: "이미 존재하는 사용자 이름입니다!",\n                regSuccess: "회원가입 성공! 로그인해주세요.",\n                errLoginFailed: "로그인에 실패했습니다",\n                codeChangedSuccess: "가입 코드가 성공적으로 변경되었습니다!",\n                spawnNotifyTitle: "⚔️ {boss} 젠 완료!",\n                spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",\n                noticeNotifyTitle: "⏳ {boss} 젠 임박!",\n                noticeNotifyBody: "보스 {boss}(이)가 {min}분 후에 젠됩니다.",\n                regPending: "회원가입이 완료되었습니다. Admin 승인을 기다려 주세요.",\n                errPendingApproval: "이 계정은 Admin 승인을 기다리고 있습니다.",\n                errAccountRejected: "이 계정은 Admin에 의해 거부되었거나 비활성화되었습니다.",\n                errAccountNotApproved: "이 계정은 아직 Admin의 승인을 받지 못했습니다.",\n                errWeakAccount: "사용자 이름은 3자 이상, 비밀번호는 6자 이상이어야 합니다.",\n                errAdminUsername: "admin 사용자 이름은 일반 가입에 사용할 수 없습니다.",\n                attendanceTitle: "⚔️ 보스 레이드 출석",\n                attendanceSubtitle: "Discord에서 실시간 보스 레이드 출석 확인",\n                attendanceRealtime: "🟢 실시간",\n                attendanceTotalRaids: "전체 활동", attendanceUniqueMembers: "참여 회원", attendanceTotalCheckins: "총 출석",\n                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서", attendanceMemberMonthly: "👤 월별 회원 누적", attendanceAllMonths: "전체 월", attendanceMemberName: "회원", attendanceMemberCount: "참여 횟수", attendanceMemberRaids: "활동 수", attendanceLastCheckin: "최근 출석", attendanceIndividual: "👤 개인 출석 정보", attendanceSelectMember: "회원 선택", attendanceIndividualName: "회원", attendanceIndividualCheckins: "출석", attendanceIndividualRaids: "활동", attendanceIndividualLast: "최근 출석", attendanceIndividualDate: "날짜", attendanceIndividualBoss: "보스", attendanceIndividualAttack: "공격 시간", attendanceIndividualCheckedAt: "출석 확인 시간", attendanceIndividualStatus: "상태", attendanceRole: "역할", attendanceAllRoles: "전체 역할", attendanceRoleEternal: "Eternal", attendanceRoleMeaw: "Meaw", attendanceRoleAnti: "Anti",\n                attendanceBoss: "보스", attendanceDate: "날짜", attendanceAttackTime: "공격 시간", attendanceOpenClose: "시작–마감",\n                attendanceCount: "참여자", attendanceCreatedBy: "생성자", attendanceStatus: "상태", attendanceMonth: "월",\n                attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석", attendanceCollapseOpen: "▼ 열기", attendanceCollapseClose: "▲ 닫기",\n                adminPanelTitle: "🛡️ Admin • 사용자 관리",\n                adminPanelSubtitle: "가입 승인, 이용 기록 및 현재 접속 사용자를 확인합니다.",\n                adminRefresh: "🔄 새로고침",\n                adminPending: "승인 대기",\n                adminActive: "현재 접속",\n                adminTotal: "전체 사용자",\n                adminThUser: "사용자",\n                adminThStatus: "상태",\n                adminThCreated: "가입일",\n                adminThLastLogin: "최근 로그인",\n                adminThLastSeen: "최근 활동",\n                adminThLogins: "로그인 횟수",\n                adminThDiscord: "Discord DM",\n                adminThAction: "관리",\n                discordUserNotifyTitle: "💬 개인 Discord DM 알림",\n                discordUserNotifySubtitle: "이 계정에만 적용됩니다 • 기존 공개 Discord 채널 공지는 변경되지 않습니다",\n                discordUserNotifyOptIn: "🔐 옵트인",\n                discordUserIdLabel: "Discord User ID",\n                discordUserIdPlaceholder: "예: 123456789012345678",\n                discordUserLangLabel: "Discord 알림 언어",\n                discordUserNotifyEnabledLabel: "Boss Timer DM 받기",\n                discordUserNotifyNote: "활성화하고 Discord User ID를 입력한 경우에만 DM을 보냅니다",\n                discordUserNotifySave: "💾 저장",\n                discordUserNotifySaved: "✅ Discord DM 설정이 저장되었습니다",\n                discordUserNotifyNeedId: "⚠️ 올바른 Discord User ID를 입력하거나 알림을 꺼주세요",\n                discordUserNotifyInvalidLang: "⚠️ 잘못된 알림 언어입니다",\n                discordUserNotifyDisabled: "Discord DM 알림이 꺼졌습니다",\n                adminApprove: "อนุมัติ",\n                adminReject: "ปฏิเสธ",\n                adminDisable: "ปิดใช้งาน",\n                adminActivate: "เปิดใช้งาน",\n                adminNoUsers: "ยังไม่มีผู้ใช้งาน",\n                adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",\n                adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"\n            }\n        };\n\n        let currentLang = localStorage.getItem(\'app_lang\') || \'th\';\n        let currentTz = localStorage.getItem(\'app_tz\') || \'auto\';\n        let isNotifyEnabled = localStorage.getItem(\'notify_enabled\') === \'true\';\n        let webPushEnabled = localStorage.getItem(\'web_push_enabled\') === \'true\';\n        let webPushMessaging = null;\n        let webPushRegistration = null;\n        let webPushToken = localStorage.getItem(\'web_push_token\') || \'\';\n        let activeBosses = {};\n        // V175: use absolute epoch-based browser timers in addition to the existing\n        // 250ms watchdog. Timers only wake the existing local notification path;\n        // they do not make any new network/API request.\n        const browserBossNotifyTimers = new Map();\n        const BROWSER_BOSS_NOTIFY_KEY_PREFIX = \'skynet_browser_boss_notify_v165_\';\n        const BROWSER_BOSS_NOTIFY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;\n\n        function getBrowserBossNotifyKey(bossName, stage, spawnTimeMs) {\n            return `${BROWSER_BOSS_NOTIFY_KEY_PREFIX}${encodeURIComponent(String(bossName || \'\'))}:${String(stage || \'\')}:${Number(spawnTimeMs || 0)}`;\n        }\n\n        function browserBossNotificationAlreadySent(bossName, stage, spawnTimeMs) {\n            return localStorage.getItem(getBrowserBossNotifyKey(bossName, stage, spawnTimeMs)) === \'1\';\n        }\n\n        function markBrowserBossNotificationSent(bossName, stage, spawnTimeMs) {\n            try {\n                localStorage.setItem(getBrowserBossNotifyKey(bossName, stage, spawnTimeMs), \'1\');\n            } catch (err) {\n                console.warn(\'[SKYNET] Could not persist local boss notification state:\', err);\n            }\n        }\n\n        function scheduleBrowserBossNotificationTimers() {\n            const liveKeys = new Set();\n\n            Object.entries(activeBosses).forEach(([bossName, data]) => {\n                const spawnMs = Number(data && data.spawnTimeMs || 0);\n                if (!Number.isFinite(spawnMs) || spawnMs <= 0) return;\n\n                const key = `${bossName}|${spawnMs}`;\n                liveKeys.add(key);\n                if (browserBossNotifyTimers.has(key)) return;\n\n                const noticeMs = Math.max(1, Number(data.noticeMinutes || 5)) * 60 * 1000;\n                const now = Date.now();\n                const noticeDelay = Math.max(0, spawnMs - noticeMs - now);\n                const spawnDelay = Math.max(0, spawnMs - now);\n                const timers = [\n                    setTimeout(() => updateCountdowns(), Math.min(noticeDelay, 2147483647)),\n                    setTimeout(() => updateCountdowns(), Math.min(spawnDelay, 2147483647))\n                ];\n                browserBossNotifyTimers.set(key, timers);\n            });\n\n            for (const [key, timers] of browserBossNotifyTimers.entries()) {\n                if (liveKeys.has(key)) continue;\n                (timers || []).forEach(timerId => {\n                    try { clearTimeout(timerId); } catch (_) {}\n                });\n                browserBossNotifyTimers.delete(key);\n            }\n        }\n\n        function cleanupOldBrowserBossNotificationKeys() {\n            try {\n                const cutoff = Date.now() - BROWSER_BOSS_NOTIFY_RETENTION_MS;\n                const staleKeys = [];\n                for (let i = 0; i < localStorage.length; i++) {\n                    const key = localStorage.key(i);\n                    if (!key || !key.startsWith(BROWSER_BOSS_NOTIFY_KEY_PREFIX)) continue;\n                    const parts = key.split(\':\');\n                    const spawnMs = Number(parts[parts.length - 1]);\n                    if (Number.isFinite(spawnMs) && spawnMs > 0 && spawnMs < cutoff) staleKeys.push(key);\n                }\n                staleKeys.forEach(key => localStorage.removeItem(key));\n            } catch (err) {\n                console.warn(\'[SKYNET] Browser notification state cleanup skipped:\', err);\n            }\n        }\n\n        const BOSS_DATABASE = {\n            "Wadangka": { cd: 9000, notice: 30 },\n            "Elemental Queen": { cd: 9000, notice: 5 },\n            "Tank": { cd: 3500, notice: 5 },\n            "Swirl Flame": { cd: 3500, notice: 5 },\n            "Maelstrom": { cd: 3500, notice: 5 },\n            "Twister": { cd: 3500, notice: 5 },\n            "Bigmama": { cd: 172800, notice: 30 },\n            "Chief Magief": { cd: 1800, notice: 5 },\n            "Faith": { cd: 21180, notice: 30 },\n            "Apapa": { cd: 900, notice: 5 },\n            "Corrupt Forest Keeper": { cd: 3480, notice: 5 },\n            "Recluse": { cd: 40980, notice: 30 },\n            "Blackskull": { cd: 3410, notice: 5 },\n            "Sleepy Kooii": { cd: 1200, notice: 5 },\n            "Awaken Kooii": { cd: 3780, notice: 5 },\n            "Eeheehee": { cd: 4008, notice: 5 },\n            "Ooheeheek": { cd: 4083, notice: 5 },\n            "Oohehe": { cd: 3908, notice: 5 },\n            "Guardian Imp": { cd: 3780, notice: 5 },\n            "Devilang": { cd: 19980, notice: 30 },\n            "Blackjuno": { cd: 2100, notice: 5 },\n            "Blacksky": { cd: 2100, notice: 5 },\n            "Red Fox": { cd: 1200, notice: 5 },\n            "7tailfox": { cd: 1200, notice: 5 },\n            "777Tailfox": { cd: 1800, notice: 5 },\n            "Sunrise Flower": { cd: 1200, notice: 5 },\n            "Magma Senior Thief": { cd: 1200, notice: 5 },\n            "Bbinikjoe": { cd: 1200, notice: 5 },\n            "Bigmouse": { cd: 1200, notice: 5 },\n            "Caligo": { cd: 604800, notice: 60 },\n            "Poison Root Flower": { cd: 1690, notice: 5 },\n            "Contaminated Queen Bee": { cd: 1680, notice: 5 },\n            "Rotten Pudding": { cd: 1800, notice: 5 },\n            "Swamp Flower Monster": { cd: 1800, notice: 5 },\n            "Ukpana": { cd: 172800, notice: 30 },\n            "Darlene the Witch": { cd: 259200, notice: 30 },\n            "Illust": { cd: 259200, notice: 30 },\n            "Actaemon": { cd: 21600, notice: 30 },\n            "Aiyo\'s Protector": { cd: 259200, notice: 30 },\n            "Glucose": { cd: 1800, notice: 5 },\n            "Overload": { cd: 1792, notice: 5 },\n            "Soul Lich": { cd: 87300, notice: 30 },\n            "Platanista": { cd: 604800, notice: 60 },\n            "Barslaf": { cd: 172800, notice: 30 },\n            "Billiard": { cd: 28503, notice: 5 },\n            "Shaaack": { cd: 1800, notice: 5 },\n            "Suuuk": { cd: 1200, notice: 5 },\n            "Sususuk": { cd: 1200, notice: 5 },\n            "sandgrave": { cd: 1200, notice: 5 },\n            "Elder Beholder": { cd: 1200, notice: 5 }\n        };\n\n        // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---\n        const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";\n        // Real Firebase Authentication email for the existing Admin account\n        // UID: cplvow7Vr6TAd62hREJYuX2w5e73\n        const ADMIN_AUTH_EMAIL = "m4ge999@gmail.com";\n        settingsRef.child(\'register_code\').on(\'value\', (snap) => {\n            if (snap.exists() && snap.val()) currentRegCode = snap.val();\n            else settingsRef.child(\'register_code\').set("1234");\n        });\n\n        function makeUserKey(username) {\n            return username.toLowerCase().replace(/[.#$\\[\\]\\/]/g, \'_\');\n        }\n\n        function usernameToAuthEmail(username) {\n            const key = makeUserKey(username);\n            if (key === makeUserKey(ADMIN_DEFAULT_USERNAME)) return ADMIN_AUTH_EMAIL;\n            return `${key}${AUTH_EMAIL_DOMAIN}`;\n        }\n\n        function formatAdminDate(value) {\n            if (!value) return \'-\';\n            const d = new Date(value);\n            if (isNaN(d.getTime())) return \'-\';\n            return d.toLocaleString(\'th-TH\', { year:\'numeric\', month:\'2-digit\', day:\'2-digit\', hour:\'2-digit\', minute:\'2-digit\', second:\'2-digit\' });\n        }\n\n        let currentSessionId = null;\n        let currentUserKey = null;\n        let currentUserData = null;\n        let heartbeatTimer = null;\n        let adminUsersListenerAttached = false;\n        let adminSessionsListenerAttached = false;\n        let adminRefreshTimer = null;\n\n        async function createUserSession(userKey, userData) {\n            currentUserKey = userKey;\n            currentUserData = userData;\n            const now = new Date().toISOString();\n            // Use a Firebase push id instead of crypto.randomUUID so every browser is supported.\n            const sessionRef = sessionsRef.push();\n            currentSessionId = sessionRef.key;\n            const sessionData = {\n                userKey, username:userData.username || \'\', loginAt:now, lastSeenAt:now, active:true\n            };\n            await withTimeout(sessionRef.set(sessionData), 8000, \'SESSION_WRITE_TIMEOUT\');\n            // Let Firebase mark this session inactive if the browser disconnects unexpectedly.\n            try {\n                sessionRef.onDisconnect().update({\n                    lastSeenAt: new Date().toISOString(), active:false, logoutAt:new Date().toISOString()\n                });\n            } catch (e) { console.warn(\'[SKYNET] onDisconnect setup failed:\', e); }\n            await withTimeout(usersRef.child(userKey).update({\n                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null, online:true,\n                loginCount:(Number(userData.loginCount)||0)+1\n            }), 8000, \'USER_WRITE_TIMEOUT\');\n            localStorage.setItem(\'logged_user\', userData.username || \'\');\n            localStorage.setItem(\'logged_user_key\', userKey);\n            localStorage.setItem(\'logged_session_id\', currentSessionId);\n            localStorage.setItem(\'logged_role\', userData.role || \'user\');\n            startSessionHeartbeat();\n        }\n\n        function startSessionHeartbeat() {\n            if (heartbeatTimer) clearInterval(heartbeatTimer);\n            heartbeatTimer = setInterval(async () => {\n                const sessionId=localStorage.getItem(\'logged_session_id\');\n                const userKey=localStorage.getItem(\'logged_user_key\');\n                if (!sessionId || !userKey || !auth.currentUser) return;\n                const now=new Date().toISOString();\n                try {\n                    await sessionsRef.child(sessionId).update({lastSeenAt:now,active:true});\n                    await usersRef.child(userKey).update({lastSeenAt:now,online:true});\n                } catch(err) { console.warn(\'Session heartbeat error:\',err); }\n            },30000);\n        }\n\n        async function endUserSession(signOutAuth=true) {\n            const sessionId=localStorage.getItem(\'logged_session_id\');\n            const userKey=localStorage.getItem(\'logged_user_key\');\n            const now=new Date().toISOString();\n            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer=null; }\n            try {\n                if (sessionId) await sessionsRef.child(sessionId).update({lastSeenAt:now,logoutAt:now,active:false});\n                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now,online:false});\n            } catch(err) { console.warn(\'Session logout update error:\',err); }\n            if (signOutAuth) { try { await auth.signOut(); } catch(err) {} }\n            [\'logged_user\',\'logged_user_key\',\'logged_session_id\',\'logged_role\'].forEach(k=>localStorage.removeItem(k));\n            stopAttendanceRealtimeListener();\n            currentSessionId=null; currentUserKey=null; currentUserData=null;\n        }\n\n        async function checkAuthSession(firebaseUserOverride=null) {\n            const savedUser=localStorage.getItem(\'saved_username\');\n            if(savedUser){document.getElementById(\'loginUser\').value=savedUser;document.getElementById(\'rememberMe\').checked=true;}\n\n            const firebaseUser=firebaseUserOverride || auth.currentUser;\n            if(firebaseUser){\n                try{\n                    const snap=await withTimeout(usersRef.child(firebaseUser.uid).once(\'value\'), 10000, \'USER_READ_TIMEOUT\');\n                    if(!snap.exists()) throw new Error(\'USER_NOT_FOUND\');\n                    const userData=snap.val();\n                    if(userData.status!==\'approved\'){\n                        await endUserSession(true);\n                        throw new Error(userData.status===\'pending\'?\'ACCOUNT_PENDING\':\'ACCOUNT_NOT_APPROVED\');\n                    }\n\n                    currentUserData=userData;\n                    currentUserKey=firebaseUser.uid;\n                    document.getElementById(\'authContainer\').style.display=\'none\';\n                    document.getElementById(\'mainDashboard\').style.display=\'block\';\n                    document.getElementById(\'userBadge\').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role===\'admin\'?\' • 🛡️ Admin\':\'\'}`;\n                    startAttendanceRealtimeListener();\n                    syncExistingWebPushSubscription().catch(() => {});\n                    syncDiscordUserNotifySettingsFromApi(userData).catch(() => {});\n                    const adminPanel=document.getElementById(\'adminPanel\');\n                    const adminOnlyButtons=document.querySelectorAll(\'[data-admin-only]\');\n                    const adminMenu=document.getElementById(\'adminPanelMenuBtn\');\n                    if(userData.role===\'admin\'){\n                        adminPanel.style.display=\'block\';\n                        startAdminRealtimeListeners();\n                        adminOnlyButtons.forEach(el=>el.style.display=\'\');\n                        if(adminMenu) adminMenu.style.display=\'inline-block\';\n                        // Never block login on the admin list. It is non-critical UI data.\n                        loadAdminUsers().catch(err => { console.error(\'[SKYNET] Admin list load failed:\', err); const el=document.getElementById(\'adminDataStatus\'); if(el){el.className=\'small text-danger mt-1\';el.textContent=`❌ ${err.code || err.message || err}`;} });\n                    }else{\n                        adminPanel.style.display=\'none\';\n                        adminOnlyButtons.forEach(el=>el.style.display=\'none\');\n                        if(adminMenu) adminMenu.style.display=\'none\';\n                    }\n                    if(!currentSessionId) {\n                        createUserSession(firebaseUser.uid,userData).catch(err => console.warn(\'[SKYNET] Session sync skipped:\', err));\n                    } else startSessionHeartbeat();\n                    return true;\n                }catch(err){\n                    if(err.message===\'ACCOUNT_PENDING\') alert(TRANSLATIONS[currentLang].errPendingApproval);\n                    else if(err.message===\'ACCOUNT_NOT_APPROVED\') alert(TRANSLATIONS[currentLang].errAccountNotApproved);\n                }\n            }\n            document.getElementById(\'authContainer\').style.display=\'block\';\n            document.getElementById(\'mainDashboard\').style.display=\'none\';\n            const adminPanel=document.getElementById(\'adminPanel\'); if(adminPanel) adminPanel.style.display=\'none\';\n            const adminMenu=document.getElementById(\'adminPanelMenuBtn\'); if(adminMenu) adminMenu.style.display=\'none\';\n            document.querySelectorAll(\'[data-admin-only]\').forEach(el=>el.style.display=\'none\');\n            return false;\n        }\n\n        function scrollToAdminPanel(){\n            const panel=document.getElementById(\'adminPanel\');\n            if(panel) panel.scrollIntoView({behavior:\'smooth\',block:\'start\'});\n        }\n\n        document.getElementById(\'registerForm\').addEventListener(\'submit\',async(e)=>{\n            e.preventDefault();\n            const username=document.getElementById(\'regUser\').value.trim();\n            const password=document.getElementById(\'regPass\').value;\n            const regCode=document.getElementById(\'regCode\').value.trim();\n            if(username.length<1 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}\n            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}\n            if(regCode!==currentRegCode){alert(TRANSLATIONS[currentLang].errRegCodeInvalid);return;}\n            try{\n                const cred=await auth.createUserWithEmailAndPassword(usernameToAuthEmail(username),password);\n                const now=new Date().toISOString();\n                await usersRef.child(cred.user.uid).set({\n                    username, usernameKey:makeUserKey(username), role:\'user\', status:\'pending\', createdAt:now,\n                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0,\n                    discordUserId:\'\',discordNotificationLanguage:\'th\',discordNotificationEnabled:false,discordNotificationUpdatedAt:null\n                });\n                await auth.signOut();\n                alert(TRANSLATIONS[currentLang].regPending);\n                document.getElementById(\'registerForm\').reset();\n                new bootstrap.Tab(document.getElementById(\'login-tab\')).show();\n            }catch(err){\n                console.error(err);\n                if(err.code===\'auth/email-already-in-use\') alert(TRANSLATIONS[currentLang].errUserExists);\n                else alert(TRANSLATIONS[currentLang].errLoginFailed);\n            }\n        });\n\n        document.getElementById(\'loginForm\').addEventListener(\'submit\', async (e) => {\n            e.preventDefault();\n            e.stopPropagation();\n            const username = document.getElementById(\'loginUser\').value.trim();\n            const password = document.getElementById(\'loginPass\').value;\n            const rememberMe = document.getElementById(\'rememberMe\').checked;\n            const submitBtn = e.currentTarget.querySelector(\'button[type=submit]\');\n            const debug = document.getElementById(\'loginDebug\');\n            const show = (msg) => {\n                if (debug) { debug.textContent = msg; debug.style.display = \'block\'; }\n                console.log(\'[SKYNET LOGIN]\', msg);\n            };\n            const fail = (msg) => {\n                show(\'❌ \' + msg);\n                alert(msg);\n                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = \'🔑 เข้าสู่ระบบ\'; }\n            };\n            if (!username || !password) { fail(\'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน\'); return; }\n            if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = \'⏳ กำลังเข้าสู่ระบบ...\'; }\n            let authEmail = username.includes(\'@\') ? username.toLowerCase() : usernameToAuthEmail(username);\n            if (makeUserKey(username) === \'admin\') authEmail = ADMIN_AUTH_EMAIL;\n            show(\'1/4 Firebase Config จาก Render พร้อม — กำลังเชื่อมต่อ Authentication: \' + authEmail);\n\n            try {\n                // Verify that the Firebase Auth SDK is actually ready before sending credentials.\n                if (!window.firebase || !firebase.auth) throw new Error(\'Firebase Authentication SDK โหลดไม่สำเร็จ\');\n                if (!firebase.apps || !firebase.apps.length) throw new Error(\'Firebase App ยังไม่ได้ initialize\');\n\n                // Important: use a real timer race. This prevents a browser/network hang from leaving the button stuck.\n                const loginPromise = auth.signInWithEmailAndPassword(authEmail, password);\n                const cred = await Promise.race([\n                    loginPromise,\n                    new Promise((_, reject) => setTimeout(() => {\n                        const er = new Error(\'Firebase Auth request timeout\'); er.code = \'AUTH_TIMEOUT\'; reject(er);\n                    }, 8000))\n                ]);\n\n                show(\'2/4 Firebase Authentication สำเร็จ — UID: \' + cred.user.uid);\n                const snap = await Promise.race([\n                    usersRef.child(cred.user.uid).once(\'value\'),\n                    new Promise((_, reject) => setTimeout(() => {\n                        const er = new Error(\'Database user read timeout\'); er.code = \'DB_TIMEOUT\'; reject(er);\n                    }, 8000))\n                ]);\n                if (!snap.exists()) {\n                    await auth.signOut().catch(() => {});\n                    fail(\'ล็อกอิน Firebase สำเร็จ แต่ไม่พบ users/\' + cred.user.uid + \' ใน Realtime Database\');\n                    return;\n                }\n                const userData = snap.val() || {};\n                show(\'3/4 ตรวจสอบสิทธิ์: username=\' + (userData.username || \'-\') + \' | role=\' + (userData.role || \'-\') + \' | status=\' + (userData.status || \'-\'));\n                if (userData.status !== \'approved\') {\n                    await auth.signOut().catch(() => {});\n                    fail(\'บัญชีนี้ยังไม่ได้รับอนุมัติ (status=\' + (userData.status || \'ไม่มี\') + \')\');\n                    return;\n                }\n                if (userData.role !== \'admin\' && makeUserKey(username) === \'admin\') {\n                    await auth.signOut().catch(() => {});\n                    fail(\'บัญชี Firebase นี้ไม่ใช่ Admin (role=\' + (userData.role || \'ไม่มี\') + \')\');\n                    return;\n                }\n                if (rememberMe) localStorage.setItem(\'saved_username\', username); else localStorage.removeItem(\'saved_username\');\n                currentUserData = userData;\n                currentUserKey = cred.user.uid;\n                localStorage.setItem(\'logged_user\', userData.username || username);\n                localStorage.setItem(\'logged_user_key\', cred.user.uid);\n                localStorage.setItem(\'logged_role\', userData.role || \'user\');\n                show(\'4/4 เข้าสู่ Dashboard สำเร็จ\');\n                document.getElementById(\'authContainer\').style.display = \'none\';\n                document.getElementById(\'mainDashboard\').style.display = \'block\';\n                syncExistingWebPushSubscription().catch(() => {});\n                syncDiscordUserNotifySettingsFromApi(userData).catch(() => {});\n                document.getElementById(\'userBadge\').innerText = `👤 ${userData.username || cred.user.email}${userData.role === \'admin\' ? \' • 🛡️ Admin\' : \'\'}`;\n                const adminPanel = document.getElementById(\'adminPanel\');\n                const adminMenu = document.getElementById(\'adminPanelMenuBtn\');\n                if (userData.role === \'admin\') {\n                    if (adminPanel) adminPanel.style.display = \'block\';\n                    startAdminRealtimeListeners();\n                    document.querySelectorAll(\'[data-admin-only]\').forEach(el => el.style.display = \'\');\n                    if (adminMenu) adminMenu.style.display = \'inline-block\';\n                    loadAdminUsers().catch(err => console.warn(\'[SKYNET] admin list:\', err));\n                }\n                createUserSession(cred.user.uid, userData).catch(err => console.warn(\'[SKYNET] session sync:\', err));\n                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = \'🔑 เข้าสู่ระบบ\'; }\n            } catch (err) {\n                console.error(\'[SKYNET] Login error\', err);\n                let msg = \'เข้าสู่ระบบไม่สำเร็จ\';\n                if (err.code === \'auth/invalid-credential\') msg = \'Email หรือรหัสผ่านไม่ถูกต้อง (Firebase: auth/invalid-credential)\';\n                else if (err.code === \'auth/wrong-password\') msg = \'รหัสผ่านไม่ถูกต้อง\';\n                else if (err.code === \'auth/user-not-found\') msg = \'ไม่พบบัญชี \' + authEmail + \' ใน Firebase Authentication\';\n                else if (err.code === \'auth/too-many-requests\') msg = \'Firebase ล็อกการลอง Login ชั่วคราว เพราะลองหลายครั้งเกินไป\';\n                else if (err.code === \'auth/operation-not-allowed\') msg = \'Firebase ยังไม่ได้เปิด Email/Password Authentication\';\n                else if (err.code === \'auth/network-request-failed\') msg = \'เชื่อมต่อ Firebase ไม่สำเร็จ\';\n                else if (err.code === \'auth/api-key-not-valid\' || /api-key-not-valid/i.test(err.message || \'\')) msg = \'Firebase API Key จาก Render ไม่ถูกต้อง — ตรวจ FIREBASE_WEB_CONFIG_JSON บน Render\';\n                else if (err.code === \'auth/requests-from-referer-https://iahcatan.github.io-are-blocked\') msg = \'Firebase API Key ยังบล็อก iahcatan.github.io\';\n                else if (err.code === \'AUTH_TIMEOUT\') msg = \'Firebase Authentication ไม่ตอบภายใน 8 วินาที — ปัญหาอยู่ที่การเชื่อมต่อ/API Key ไม่ใช่ฐานข้อมูล\';\n                else if (err.code === \'DB_TIMEOUT\') msg = \'Authentication ผ่านแล้ว แต่ Realtime Database ไม่ตอบภายใน 8 วินาที\';\n                else if (err.message) msg += \': \' + err.message;\n                fail(msg + \'\\n\\nบัญชีที่ใช้: \' + authEmail);\n            }\n        });\n\n        async function logout(){await endUserSession(true);checkAuthSession();}\n\n        function openChangeCodeModal(){\n            const modalEl=document.getElementById(\'changeCodeModal\');\n            const modal=bootstrap.Modal.getOrCreateInstance(modalEl);\n            document.getElementById(\'newRegCodeInput\').value=currentRegCode; modal.show();\n        }\n\n        document.getElementById(\'changeCodeForm\').addEventListener(\'submit\',async(e)=>{\n            e.preventDefault();\n            if(!await requireAdmin())return;\n            const newCode=document.getElementById(\'newRegCodeInput\').value.trim();\n            if(newCode){await settingsRef.child(\'register_code\').set(newCode);alert(TRANSLATIONS[currentLang].codeChangedSuccess);const modal=bootstrap.Modal.getInstance(document.getElementById(\'changeCodeModal\'));if(modal)modal.hide();}\n        });\n\n        async function fetchDiscordUserNotifySettings(targetUid = currentUserKey) {\n            if (!auth.currentUser || !targetUid) return null;\n            const idToken = await auth.currentUser.getIdToken(false);\n            const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n            const response = await fetch(`${apiOrigin}/api/discord-user-notify?targetUid=${encodeURIComponent(targetUid)}`, {\n                method: \'GET\',\n                headers: { \'Authorization\': `Bearer ${idToken}` },\n                cache: \'no-store\'\n            });\n            const result = await response.json().catch(() => ({}));\n            if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);\n            return result.settings || null;\n        }\n\n        async function syncDiscordUserNotifySettingsFromApi(userData = currentUserData) {\n            try {\n                const settings = await fetchDiscordUserNotifySettings(currentUserKey);\n                if (!settings) {\n                    applyDiscordUserNotifySettingsToUI(userData);\n                    return null;\n                }\n                currentUserData = {...(userData || {}), ...settings};\n                applyDiscordUserNotifySettingsToUI(currentUserData);\n                return settings;\n            } catch (err) {\n                console.warn(\'[SKYNET] Discord per-user notification settings read failed:\', err);\n                applyDiscordUserNotifySettingsToUI(userData);\n                return null;\n            }\n        }\n\n        async function fetchAllDiscordUserNotifySettings() {\n            if (!auth.currentUser) return {};\n            const idToken = await auth.currentUser.getIdToken(false);\n            const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n            const response = await fetch(`${apiOrigin}/api/discord-user-notify?all=1`, {\n                method: \'GET\',\n                headers: { \'Authorization\': `Bearer ${idToken}` },\n                cache: \'no-store\'\n            });\n            const result = await response.json().catch(() => ({}));\n            if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);\n            return (result.preferences && typeof result.preferences === \'object\') ? result.preferences : {};\n        }\n\n        function applyDiscordUserNotifySettingsToUI(userData = currentUserData) {\n            const data = userData || {};\n            const idEl = document.getElementById(\'discordUserIdInput\');\n            const langEl = document.getElementById(\'discordUserLangSelect\');\n            const enabledEl = document.getElementById(\'discordUserNotifyEnabled\');\n            if (idEl) idEl.value = data.discordUserId || \'\';\n            if (langEl) langEl.value = [\'th\', \'en\', \'ko\'].includes(String(data.discordNotificationLanguage || \'\')) ? data.discordNotificationLanguage : \'th\';\n            if (enabledEl) enabledEl.checked = data.discordNotificationEnabled === true || data.discordNotificationEnabled === \'true\';\n            const statusEl = document.getElementById(\'discordUserNotifyStatus\');\n            if (statusEl) statusEl.textContent = enabledEl && enabledEl.checked ? \'🟢 Discord DM: ON\' : \'🔕 Discord DM: OFF\';\n        }\n\n        async function saveDiscordUserNotifySettings() {\n            if (!await requireApprovedUser()) return;\n            const idEl = document.getElementById(\'discordUserIdInput\');\n            const langEl = document.getElementById(\'discordUserLangSelect\');\n            const enabledEl = document.getElementById(\'discordUserNotifyEnabled\');\n            const statusEl = document.getElementById(\'discordUserNotifyStatus\');\n            const discordUserId = String(idEl?.value || \'\').trim();\n            const language = String(langEl?.value || \'th\').trim().toLowerCase();\n            const enabled = !!enabledEl?.checked;\n            if (![\'th\', \'en\', \'ko\'].includes(language)) {\n                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyInvalidLang;\n                return;\n            }\n            if (enabled && !/^\\d{15,22}$/.test(discordUserId)) {\n                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyNeedId;\n                return;\n            }\n            const updates = {\n                discordUserId: discordUserId,\n                discordNotificationLanguage: language,\n                discordNotificationEnabled: enabled\n            };\n            try {\n                const idToken = await auth.currentUser.getIdToken(false);\n                const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n                const response = await fetch(`${apiOrigin}/api/discord-user-notify`, {\n                    method: \'POST\',\n                    headers: {\n                        \'Authorization\': `Bearer ${idToken}`,\n                        \'Content-Type\': \'application/json\'\n                    },\n                    body: JSON.stringify({targetUid: currentUserKey, ...updates})\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) {\n                    throw new Error(result.error || `HTTP ${response.status}`);\n                }\n                const savedUpdates = {\n                    ...updates,\n                    discordNotificationUpdatedAt: result.discordNotificationUpdatedAt || new Date().toISOString()\n                };\n                currentUserData = {...(currentUserData || {}), ...savedUpdates};\n                applyDiscordUserNotifySettingsToUI(currentUserData);\n                if (statusEl) statusEl.textContent = enabled ? TRANSLATIONS[currentLang].discordUserNotifySaved : TRANSLATIONS[currentLang].discordUserNotifyDisabled;\n                console.info(\'[SKYNET] Discord per-user notification settings saved via Admin SDK API\', savedUpdates);\n                if (currentUserData.role === \'admin\') loadAdminUsers().catch(() => {});\n            } catch (err) {\n                if (statusEl) statusEl.textContent = `❌ ${err.message || err}`;\n                console.error(\'[SKYNET] Discord per-user notification settings save failed:\', err);\n            }\n        }\n\n        async function saveAdminDiscordUserSettings(userKey) {\n            if (!await requireAdmin()) return;\n            const root = document.getElementById(`admin-discord-${userKey}`);\n            if (!root) return;\n            const idInput = root.querySelector(\'[data-role="discord-id"]\');\n            const langSelect = root.querySelector(\'[data-role="discord-lang"]\');\n            const enabledInput = root.querySelector(\'[data-role="discord-enabled"]\');\n            const statusEl = root.querySelector(\'[data-role="discord-status"]\');\n            const discordUserId = String(idInput?.value || \'\').trim();\n            const language = String(langSelect?.value || \'th\').trim().toLowerCase();\n            const enabled = !!enabledInput?.checked;\n            if (![\'th\', \'en\', \'ko\'].includes(language)) {\n                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyInvalidLang;\n                return;\n            }\n            if (enabled && !/^\\d{15,22}$/.test(discordUserId)) {\n                if (statusEl) statusEl.textContent = TRANSLATIONS[currentLang].discordUserNotifyNeedId;\n                return;\n            }\n            const updates = {\n                discordUserId,\n                discordNotificationLanguage: language,\n                discordNotificationEnabled: enabled\n            };\n            try {\n                const idToken = await auth.currentUser.getIdToken(false);\n                const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n                const response = await fetch(`${apiOrigin}/api/discord-user-notify`, {\n                    method: \'POST\',\n                    headers: {\n                        \'Authorization\': `Bearer ${idToken}`,\n                        \'Content-Type\': \'application/json\'\n                    },\n                    body: JSON.stringify({targetUid: userKey, ...updates})\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) {\n                    throw new Error(result.error || `HTTP ${response.status}`);\n                }\n                if (statusEl) statusEl.textContent = enabled ? `✅ ${TRANSLATIONS[currentLang].discordUserNotifySaved}` : `🔕 ${TRANSLATIONS[currentLang].discordUserNotifyDisabled}`;\n            } catch (err) {\n                if (statusEl) statusEl.textContent = `❌ ${err.message || err}`;\n                console.error(\'[SKYNET] Admin Discord per-user settings failed:\', err);\n            }\n        }\n\n        // --- Admin User Management ---\n        async function requireAdmin(){\n            const uid=auth.currentUser && auth.currentUser.uid;\n            if(!uid)return false;\n            const snap=await usersRef.child(uid).once(\'value\'); const user=snap.val();\n            if(!user||user.role!==\'admin\'||user.status!==\'approved\'){alert(TRANSLATIONS[currentLang].adminOnly);return false;}\n            currentUserKey=uid; currentUserData=user; return true;\n        }\n\n        async function loadAdminUsers() {\n            const uid = auth.currentUser && auth.currentUser.uid;\n            if (!uid) return;\n            currentUserKey = uid;\n\n            const adminSnap = await withTimeout(usersRef.child(uid).once(\'value\'), 8000, \'ADMIN_SELF_READ_TIMEOUT\');\n            const adminData = adminSnap.val();\n            if (!adminData || adminData.role !== \'admin\' || adminData.status !== \'approved\') {\n                const panel=document.getElementById(\'adminPanel\'); if(panel) panel.style.display=\'none\';\n                return;\n            }\n            currentUserData = adminData;\n\n            const [usersSnap, sessionsSnap, discordPrefsResult] = await Promise.all([\n                withTimeout(usersRef.once(\'value\'), 8000, \'ADMIN_USERS_READ_TIMEOUT\'),\n                withTimeout(sessionsRef.once(\'value\'), 8000, \'ADMIN_SESSIONS_READ_TIMEOUT\'),\n                fetchAllDiscordUserNotifySettings().catch(err => {\n                    console.warn(\'[SKYNET] Admin Discord preference read failed:\', err);\n                    return {};\n                })\n            ]);\n            const users = usersSnap.val() || {};\n            const sessions = sessionsSnap.val() || {};\n            const discordPrefs = discordPrefsResult || {};\n            const nowMs = Date.now();\n            const statusEl = document.getElementById(\'adminDataStatus\');\n            if (statusEl) {\n                statusEl.className = \'small text-success mt-1\';\n                statusEl.textContent = `🟢 Firebase Users: ${Object.keys(users).length} | Sessions: ${Object.keys(sessions).length} | อัปเดต ${new Date().toLocaleTimeString(\'th-TH\')}`;\n            }\n\n            const userRows = Object.entries(users).map(([key, user]) => {\n                const discordPref = (discordPrefs[key] && typeof discordPrefs[key] === \'object\') ? discordPrefs[key] : {};\n                const mergedUser = {...(user || {}), ...discordPref};\n                const userSessions = Object.values(sessions).filter(s => s && s.userKey === key);\n                const latestSession = userSessions.slice().sort((a,b) =>\n                    new Date(b.lastSeenAt || b.loginAt || 0) - new Date(a.lastSeenAt || a.loginAt || 0)\n                )[0];\n                const lastSeen = user.lastSeenAt || (latestSession && latestSession.lastSeenAt);\n                const userOnline = user.online === true || user.online === \'true\';\n                const userSeenMs = new Date(user.lastSeenAt || 0).getTime();\n                const userHeartbeatActive = userOnline && Number.isFinite(userSeenMs) && (nowMs - userSeenMs) >= 0 && (nowMs - userSeenMs) <= ACTIVE_SESSION_TIMEOUT_MS;\n                const sessionActive = userSessions.some(session => {\n                    if (!session || session.active === false || !session.lastSeenAt) return false;\n                    const seenMs = new Date(session.lastSeenAt).getTime();\n                    return Number.isFinite(seenMs) && (nowMs - seenMs) >= 0 && (nowMs - seenMs) <= ACTIVE_SESSION_TIMEOUT_MS;\n                });\n                const active = userHeartbeatActive || sessionActive;\n                return {key, user: mergedUser, active, lastSeen};\n            });\n\n            const pendingCount = userRows.filter(x => x.user.status === \'pending\').length;\n            const activeCount = userRows.filter(x => x.active && x.user.status === \'approved\').length;\n            document.getElementById(\'adminPendingCount\').innerText = pendingCount;\n            document.getElementById(\'adminActiveCount\').innerText = activeCount;\n            document.getElementById(\'adminTotalCount\').innerText = userRows.length;\n\n            const tbody = document.getElementById(\'adminUsersBody\');\n            tbody.innerHTML = \'\';\n            userRows.sort((a,b) => {\n                const order={pending:0,approved:1,rejected:2,disabled:3};\n                return (order[a.user.status] ?? 9)-(order[b.user.status] ?? 9) ||\n                    (new Date(b.lastSeen || b.user.createdAt || 0)-new Date(a.lastSeen || a.user.createdAt || 0));\n            });\n            userRows.forEach(({key,user,active,lastSeen}) => {\n                const statusBadge = user.role === \'admin\'\n                    ? \'<span class="badge bg-danger">🛡️ ADMIN</span>\'\n                    : user.status === \'pending\'\n                        ? \'<span class="badge bg-warning text-dark">⏳ Pending</span>\'\n                        : user.status === \'approved\'\n                            ? `<span class="badge ${active ? \'bg-success\' : \'bg-primary\'}">${active ? \'🟢 Active\' : \'✅ Approved\'}</span>`\n                            : user.status === \'rejected\'\n                                ? \'<span class="badge bg-danger">❌ Rejected</span>\'\n                                : \'<span class="badge bg-secondary">⛔ Disabled</span>\';\n                let actionHtml=\'-\';\n                if(user.role!==\'admin\'){\n                    if(user.status===\'pending\') actionHtml=`<div class="d-flex gap-1 flex-wrap"><button class="btn btn-sm btn-success" onclick="setUserStatus(\'${key}\',\'approved\')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button><button class="btn btn-sm btn-danger" onclick="setUserStatus(\'${key}\',\'rejected\')">❌ ${TRANSLATIONS[currentLang].adminReject}</button></div>`;\n                    else if(user.status===\'approved\') actionHtml=`<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus(\'${key}\',\'disabled\')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;\n                    else actionHtml=`<button class="btn btn-sm btn-outline-success" onclick="setUserStatus(\'${key}\',\'approved\')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;\n                }\n                const discordEnabled = user.discordNotificationEnabled === true || user.discordNotificationEnabled === \'true\';\n                const discordLang = [\'th\',\'en\',\'ko\'].includes(String(user.discordNotificationLanguage || \'\')) ? String(user.discordNotificationLanguage) : \'th\';\n                const discordId = escapeHtml(user.discordUserId || \'\');\n                const discordCell = `\n                    <div id="admin-discord-${key}" class="d-flex flex-column gap-1" style="min-width:240px;">\n                        <input class="form-control form-control-sm" data-role="discord-id" inputmode="numeric" value="${discordId}" placeholder="Discord User ID">\n                        <div class="d-flex gap-1 align-items-center">\n                            <select class="form-select form-select-sm" data-role="discord-lang" style="max-width:115px;">\n                                <option value="th" ${discordLang===\'th\'?\'selected\':\'\'}>🇹🇭 TH</option>\n                                <option value="en" ${discordLang===\'en\'?\'selected\':\'\'}>🇺🇸 EN</option>\n                                <option value="ko" ${discordLang===\'ko\'?\'selected\':\'\'}>🇰🇷 KO</option>\n                            </select>\n                            <div class="form-check form-switch mb-0">\n                                <input class="form-check-input" type="checkbox" data-role="discord-enabled" ${discordEnabled?\'checked\':\'\'}>\n                            </div>\n                            <button class="btn btn-sm btn-outline-info" onclick="saveAdminDiscordUserSettings(\'${key}\')">💾</button>\n                        </div>\n                        <small class="text-white-50" data-role="discord-status">${discordEnabled ? \'🟢 ON\' : \'🔕 OFF\'}</small>\n                    </div>`;\n                const tr=document.createElement(\'tr\');\n                tr.innerHTML=`<td><div class="fw-bold text-info">${escapeHtml(user.username||key)}</div><small class="text-white-50">${user.role===\'admin\'?\'Admin\':\'User\'}</small></td><td>${statusBadge}</td><td><small>${formatAdminDate(user.createdAt)}</small></td><td><small>${formatAdminDate(user.lastLoginAt)}</small></td><td><small>${formatAdminDate(lastSeen)}</small></td><td>${Number(user.loginCount)||0}</td><td>${discordCell}</td><td>${actionHtml}</td>`;\n                tbody.appendChild(tr);\n            });\n            if(!userRows.length) tbody.innerHTML=`<tr><td colspan="9" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;\n        }\n\n        function startAdminRealtimeListeners(){\n            if(adminUsersListenerAttached || adminSessionsListenerAttached) return;\n            const refresh=()=>{\n                if(currentUserData && currentUserData.role===\'admin\' && auth.currentUser){\n                    loadAdminUsers().catch(err=>{\n                        console.error(\'[SKYNET] Admin realtime refresh:\',err);\n                        const el=document.getElementById(\'adminDataStatus\');\n                        if(el){el.className=\'small text-danger mt-1\';el.textContent=`❌ อ่านข้อมูลผู้ใช้ไม่สำเร็จ: ${err.code || err.message || err}`;}\n                    });\n                }\n            };\n            usersRef.on(\'value\', refresh);\n            sessionsRef.on(\'value\', refresh);\n            adminUsersListenerAttached=true;\n            adminSessionsListenerAttached=true;\n            if(adminRefreshTimer) clearInterval(adminRefreshTimer);\n            adminRefreshTimer=setInterval(refresh,15000);\n        }\n\n        const ATTENDANCE_DISPLAY_ROLES = [\'Eternal\', \'Meaw\', \'Anti\'];\n\n        function normalizeAttendanceRoles(raw) {\n            const list = Array.isArray(raw) ? raw : (raw ? String(raw).split(/[,|]/) : []);\n            const seen = new Set();\n            return list.map(v => String(v || \'\').trim()).filter(v => {\n                const found = ATTENDANCE_DISPLAY_ROLES.find(r => r.toLowerCase() === v.toLowerCase());\n                if (!found || seen.has(found)) return false;\n                seen.add(found); return true;\n            });\n        }\n\n        function attendanceDateTimeLocale() {\n            return currentLang === \'ko\' ? \'ko-KR\' : currentLang === \'en\' ? \'en-GB\' : \'th-TH\';\n        }\n\n        function formatAttendanceDateTime(value) {\n            if (!value) return \'-\';\n            const d = new Date(value);\n            if (isNaN(d.getTime())) return \'-\';\n            try { return d.toLocaleString(attendanceDateTimeLocale(), {hour12:false}); }\n            catch (_) { return d.toLocaleString(); }\n        }\n\n        function refreshAttendanceIndividualSelectors() {\n            const members = window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ || {};\n            const roleSelect = document.getElementById(\'attendanceIndividualRoleSelect\');\n            const memberSelect = document.getElementById(\'attendanceIndividualMemberSelect\');\n            const monthSelect = document.getElementById(\'attendanceIndividualMonthSelect\');\n            const oldRole = roleSelect ? (roleSelect.value || \'all\') : \'all\';\n            const oldMember = memberSelect ? (memberSelect.value || \'\') : \'\';\n            const allowedRoles = new Set(ATTENDANCE_DISPLAY_ROLES);\n            if (roleSelect) {\n                roleSelect.innerHTML = `<option value="all">${escapeHtml(TRANSLATIONS[currentLang].attendanceAllRoles || \'All Roles\')}</option>` +\n                    ATTENDANCE_DISPLAY_ROLES.map(r => `<option value="${r}">${escapeHtml(TRANSLATIONS[currentLang][\'attendanceRole\'+r] || r)}</option>`).join(\'\');\n                roleSelect.value = allowedRoles.has(oldRole) ? oldRole : \'all\';\n            }\n            const selectedRole = roleSelect ? String(roleSelect.value || \'all\') : \'all\';\n            const rows = Object.values(members)\n                .filter(r => selectedRole === \'all\' || normalizeAttendanceRoles(r.roles || r.role).includes(selectedRole))\n                .sort((a,b)=>String(a.name).localeCompare(String(b.name)));\n            if (memberSelect) {\n                memberSelect.innerHTML = `<option value="">${escapeHtml(TRANSLATIONS[currentLang].attendanceSelectMember || \'Select member\')}</option>` +\n                    rows.map(r => `<option value="${escapeHtml(r.uid)}">${escapeHtml(r.name)}${normalizeAttendanceRoles(r.roles || r.role).length ? \' • \' + escapeHtml(normalizeAttendanceRoles(r.roles || r.role).join(\', \')) : \'\'}</option>`).join(\'\');\n                if (oldMember && rows.some(r => String(r.uid) === oldMember)) memberSelect.value = oldMember;\n                else memberSelect.value = \'\';\n            }\n            if (monthSelect) {\n                const oldMonth = monthSelect.value || \'all\';\n                const months = new Set([\'all\']);\n                Object.values(members).forEach(m => (m.entries || []).forEach(e => { if (e.monthKey) months.add(e.monthKey); }));\n                const sorted = Array.from(months).filter(x=>x!==\'all\').sort().reverse();\n                monthSelect.innerHTML = `<option value="all">${escapeHtml(TRANSLATIONS[currentLang].attendanceAllMonths || \'All months\')}</option>` + sorted.map(m => `<option value="${m}">${m}</option>`).join(\'\');\n                monthSelect.value = (oldMonth === \'all\' || sorted.includes(oldMonth)) ? oldMonth : \'all\';\n            }\n        }\n\n        function renderAttendanceIndividual() {\n            const members = window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ || {};\n            const memberSelect = document.getElementById(\'attendanceIndividualMemberSelect\');\n            const roleSelect = document.getElementById(\'attendanceIndividualRoleSelect\');\n            const monthSelect = document.getElementById(\'attendanceIndividualMonthSelect\');\n            const body = document.getElementById(\'attendanceIndividualBody\');\n            const nameEl = document.getElementById(\'attendanceIndividualNameValue\');\n            const checksEl = document.getElementById(\'attendanceIndividualCheckinsValue\');\n            const raidsEl = document.getElementById(\'attendanceIndividualRaidsValue\');\n            const lastEl = document.getElementById(\'attendanceIndividualLastValue\');\n            if (!body || !nameEl || !checksEl || !raidsEl || !lastEl) return;\n            const uid = memberSelect ? String(memberSelect.value || \'\') : \'\';\n            const role = roleSelect ? String(roleSelect.value || \'all\') : \'all\';\n            const month = monthSelect ? String(monthSelect.value || \'all\') : \'all\';\n            const member = uid ? members[uid] : null;\n            if (!member || (role !== \'all\' && !normalizeAttendanceRoles(member.roles || member.role).includes(role))) {\n                nameEl.textContent = \'-\'; checksEl.textContent=\'0\'; raidsEl.textContent=\'0\'; lastEl.textContent=\'-\';\n                body.innerHTML=\'<tr><td colspan="5" class="text-center text-muted">-</td></tr>\';\n                return;\n            }\n            const entries = (member.entries || []).filter(e => month === \'all\' || e.monthKey === month).slice().sort((a,b)=>String(b.checkedAt).localeCompare(String(a.checkedAt)));\n            nameEl.textContent = member.name || uid;\n            checksEl.textContent = String(entries.length);\n            raidsEl.textContent = String(new Set(entries.map(e=>e.activityId || `${e.activityDate}|${e.bossName}|${e.attackTime}`)).size);\n            lastEl.textContent = entries[0] && entries[0].checkedAt ? formatAttendanceDateTime(entries[0].checkedAt) : \'-\';\n            body.innerHTML = entries.length ? entries.map(e => {\n                const checkedAt = e.checkedAt ? formatAttendanceDateTime(e.checkedAt) : \'-\';\n                const status = e.status === \'checked_in\' ? (currentLang===\'en\'?\'Checked in\':currentLang===\'ko\'?\'출석 완료\':\'เช็คชื่อแล้ว\') : escapeHtml(e.status || \'-\');\n                return `<tr><td>${escapeHtml(e.activityDate)}</td><td class="fw-bold text-warning">${escapeHtml(e.bossName)}</td><td>${escapeHtml(e.attackTime)}</td><td>${escapeHtml(checkedAt)}</td><td>${status}</td></tr>`;\n            }).join(\'\') : \'<tr><td colspan="5" class="text-center text-muted">-</td></tr>\';\n        }\n\n        document.getElementById(\'attendanceIndividualRoleSelect\')?.addEventListener(\'change\', () => { refreshAttendanceIndividualSelectors(); renderAttendanceIndividual(); });\n        document.getElementById(\'attendanceIndividualMemberSelect\')?.addEventListener(\'change\', renderAttendanceIndividual);\n        document.getElementById(\'attendanceIndividualMonthSelect\')?.addEventListener(\'change\', renderAttendanceIndividual);\n\n        function toggleAttendanceHistoryPanel(forceOpen=null) {\n            const content = document.getElementById(\'attendanceHistoryPanelContent\');\n            const btn = document.getElementById(\'attendanceHistoryCollapseBtn\');\n            if (!content) return;\n            const shouldOpen = forceOpen === null ? content.style.display !== \'block\' : !!forceOpen;\n            content.style.display = shouldOpen ? \'block\' : \'none\';\n            if (btn) {\n                const key = shouldOpen ? \'attendanceCollapseClose\' : \'attendanceCollapseOpen\';\n                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? \'▲ ปิด\' : \'▼ เปิด\');\n            }\n            localStorage.setItem(\'attendance_history_open\', shouldOpen ? \'1\' : \'0\');\n        }\n\n        function toggleAttendanceIndividualPanel(forceOpen=null) {\n            const content = document.getElementById(\'attendanceIndividualPanelContent\');\n            const btn = document.getElementById(\'attendanceIndividualCollapseBtn\');\n            if (!content) return;\n            const shouldOpen = forceOpen === null ? content.style.display !== \'block\' : !!forceOpen;\n            content.style.display = shouldOpen ? \'block\' : \'none\';\n            if (btn) {\n                const key = shouldOpen ? \'attendanceCollapseClose\' : \'attendanceCollapseOpen\';\n                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? \'▲ ปิด\' : \'▼ เปิด\');\n            }\n            localStorage.setItem(\'attendance_individual_open\', shouldOpen ? \'1\' : \'0\');\n        }\n\n        function escapeHtml(value) {\n            return String(value ?? \'\').replace(/[&<>"\']/g, ch => ({\n                \'&\': \'&amp;\', \'<\': \'&lt;\', \'>\': \'&gt;\', \'"\': \'&quot;\', "\'": \'&#039;\'\n            }[ch]));\n        }\n\n        async function setUserStatus(userKey, newStatus) {\n            if (!currentUserKey) return;\n\n            const adminSnap = await withTimeout(usersRef.child(currentUserKey).once(\'value\'), 8000, \'ADMIN_SELF_READ_TIMEOUT\');\n            const adminData = adminSnap.val();\n            if (!adminData || adminData.role !== \'admin\' || adminData.status !== \'approved\') {\n                alert(TRANSLATIONS[currentLang].adminOnly);\n                return;\n            }\n\n            const targetSnap = await usersRef.child(userKey).once(\'value\');\n            if (!targetSnap.exists()) return;\n            const target = targetSnap.val();\n\n            if (target.role === \'admin\') {\n                alert(TRANSLATIONS[currentLang].adminCannotChangeAdmin);\n                return;\n            }\n\n            const now = new Date().toISOString();\n            const updates = { status: newStatus };\n\n            if (newStatus === \'approved\') {\n                updates.approvedAt = now;\n                updates.approvedBy = adminData.username;\n                updates.rejectedAt = null;\n                updates.rejectedBy = null;\n            } else if (newStatus === \'rejected\') {\n                updates.rejectedAt = now;\n                updates.rejectedBy = adminData.username;\n            }\n\n            await usersRef.child(userKey).update(updates);\n\n            // หากถูกปิดการใช้งาน ให้ปิด session ที่กำลัง active ของ user นั้นด้วย\n            if (newStatus === \'disabled\' || newStatus === \'rejected\') {\n                const sessionsSnap = await sessionsRef.once(\'value\');\n                const sessions = sessionsSnap.val() || {};\n                const sessionUpdates = {};\n                Object.entries(sessions).forEach(([sessionId, session]) => {\n                    if (session && session.userKey === userKey && session.active !== false) {\n                        sessionUpdates[`${sessionId}/active`] = false;\n                        sessionUpdates[`${sessionId}/logoutAt`] = now;\n                    }\n                });\n                if (Object.keys(sessionUpdates).length) {\n                    await sessionsRef.update(sessionUpdates);\n                }\n            }\n\n            await loadAdminUsers();\n        }\n\n        async function requireApprovedUser(){\n            const uid=auth.currentUser && auth.currentUser.uid;\n            if(!uid){await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}\n            const snap=await usersRef.child(uid).once(\'value\'); const user=snap.val();\n            if(!user||user.status!==\'approved\'){await endUserSession(true);await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}\n            currentUserKey=uid;currentUserData=user;return true;\n        }\n\n        // Firebase Authentication session listener\n        auth.onAuthStateChanged(async (firebaseUser) => {\n            if (firebaseUser) {\n                await checkAuthSession(firebaseUser);\n            } else {\n                const dashboard=document.getElementById(\'mainDashboard\');\n                if(dashboard && dashboard.style.display===\'block\') await checkAuthSession(null);\n            }\n        });\n\n        // --- 4. ระบบ Real-time Sync จาก Firebase ---\n\n        let userNameCache = {};\n        let attendanceRealtimeListenerAttached = false;\n        let attendanceRealtimeTimer = null;\n        let attendanceRealtimeAbortController = null;\n        let attendanceRealtimePollTimer = null;\n        let attendanceRealtimeBusy = false;\n        let attendanceRealtimeUnauthorized = false;\n        usersRef.on(\'value\', (snapshot) => {\n            const users = snapshot.val() || {};\n            userNameCache = {};\n            Object.entries(users).forEach(([uid, u]) => {\n                if (u && typeof u === \'object\') userNameCache[uid] = u.username || u.email || uid;\n            });\n        });\n\n        bossRef.on(\'value\', (snapshot) => {\n            const rawData = snapshot.val() || {};\n            activeBosses = {};\n            \n            Object.keys(rawData).forEach(bossName => {\n                const item = rawData[bossName];\n                let spawnMs = item.spawnTimeMs;\n                if (!spawnMs && item.spawn_time) {\n                    spawnMs = new Date(item.spawn_time).getTime();\n                }\n                const cdSec = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;\n                let killMs = item.killTimeMs || (spawnMs - (cdSec * 1000));\n                \n                activeBosses[bossName] = {\n                    spawnTimeMs: spawnMs,\n                    killTimeMs: killMs,\n                    noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),\n                    browserNoticeSent: browserBossNotificationAlreadySent(bossName, \'notice\', spawnMs),\n                    browserSpawnSent: browserBossNotificationAlreadySent(bossName, \'spawn\', spawnMs),\n                    killDate: item.killDate || (item.killTimeMs ? new Date(item.killTimeMs).toLocaleDateString(\'th-TH\') : \'\'),\n                    recordedBy: (item.recordedBy && item.recordedBy !== \'Unknown\' ? item.recordedBy : (item.recordedByUserId && userNameCache[item.recordedByUserId]) || item.recorded_by || item.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || \'ไม่ระบุ\')\n                };\n            });\n            renderTable();\n            scheduleBrowserBossNotificationTimers();\n            toggleAttendancePanel(localStorage.getItem(\'attendance_panel_open\') === \'1\');\n            toggleAttendanceHistoryPanel(localStorage.getItem(\'attendance_history_open\') === \'1\');\n            toggleAttendanceMemberMonthlyPanel(localStorage.getItem(\'attendance_member_monthly_open\') === \'1\');\n            toggleAttendanceIndividualPanel(localStorage.getItem(\'attendance_individual_open\') === \'1\');\n        });\n\n        // --- UI & Control Functions ---\n        function applyKillDateLanguage() {\n            const langData = TRANSLATIONS[currentLang];\n            if (!langData) return;\n            const label = document.querySelector(\'label[data-i18n="labelKillDate"]\');\n            const input = document.getElementById(\'killDate\');\n            const hint = document.querySelector(\'[data-i18n="hintKillDate"]\');\n            if (label && langData.labelKillDate) label.textContent = langData.labelKillDate;\n            if (input && langData.phKillDate) input.placeholder = langData.phKillDate;\n            if (hint && langData.hintKillDate) hint.textContent = langData.hintKillDate;\n        }\n\n        const ATTENDANCE_PAGE_SIZE = 20;\n        window.__SKYNET_ATTENDANCE_HISTORY_ROWS__ = [];\n        window.__SKYNET_ATTENDANCE_HISTORY_PAGE__ = 1;\n        window.__SKYNET_ATTENDANCE_MEMBER_ROWS__ = [];\n        window.__SKYNET_ATTENDANCE_MEMBER_PAGE__ = 1;\n\n        function renderAttendancePagination(containerId, currentPage, totalPages, onPageChange) {\n            const container = document.getElementById(containerId);\n            if (!container) return;\n            if (!totalPages || totalPages <= 1) {\n                container.innerHTML = \'\';\n                return;\n            }\n\n            const safePage = Math.min(Math.max(1, Number(currentPage) || 1), totalPages);\n            const buttons = [];\n            const addButton = (label, page, disabled=false, active=false, title=\'\') => {\n                const classes = `btn btn-sm ${active ? \'btn-info text-dark\' : \'btn-outline-secondary\'}`;\n                buttons.push(`<button type="button" class="${classes}" ${disabled ? \'disabled\' : \'\'} data-page="${page}" title="${escapeHtml(title || label)}">${label}</button>`);\n            };\n\n            addButton(\'‹\', safePage - 1, safePage <= 1, false, \'Previous page\');\n            for (let page = 1; page <= totalPages; page++) {\n                const near = page === 1 || page === totalPages || Math.abs(page - safePage) <= 2;\n                if (!near) {\n                    if (page === 2 && safePage > 4) buttons.push(\'<span class="page-info">…</span>\');\n                    if (page === totalPages - 1 && safePage < totalPages - 3) buttons.push(\'<span class="page-info">…</span>\');\n                    continue;\n                }\n                addButton(String(page), page, false, page === safePage, `Page ${page}`);\n            }\n            addButton(\'›\', safePage + 1, safePage >= totalPages, false, \'Next page\');\n            container.innerHTML = buttons.join(\'\');\n            container.querySelectorAll(\'button[data-page]\').forEach(btn => {\n                btn.addEventListener(\'click\', () => onPageChange(Number(btn.dataset.page)));\n            });\n        }\n\n        function renderAttendanceHistoryPage(page=1) {\n            const body = document.getElementById(\'attendanceHistoryBody\');\n            if (!body) return;\n            const rows = window.__SKYNET_ATTENDANCE_HISTORY_ROWS__ || [];\n            const totalPages = Math.max(1, Math.ceil(rows.length / ATTENDANCE_PAGE_SIZE));\n            const safePage = Math.min(Math.max(1, Number(page) || 1), totalPages);\n            window.__SKYNET_ATTENDANCE_HISTORY_PAGE__ = safePage;\n            const start = (safePage - 1) * ATTENDANCE_PAGE_SIZE;\n            const pageRows = rows.slice(start, start + ATTENDANCE_PAGE_SIZE);\n            body.innerHTML = pageRows.length ? pageRows.map(x => {\n                const a=x.a;\n                return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||\'-\'))}</td><td>${escapeHtml(String(a.activity_date||\'-\'))}</td><td>${escapeHtml(String(a.attack_time||\'-\'))}</td><td>${x.checked.length}</td><td>${escapeHtml(String(a.created_by_name||a.created_by||\'-\'))}</td><td>${currentLang===\'ko\'?\'마감\':currentLang===\'en\'?\'CLOSED\':\'ปิดแล้ว\'}</td></tr>`;\n            }).join(\'\') : \'<tr><td colspan="6" class="text-center text-muted">-</td></tr>\';\n            renderAttendancePagination(\'attendanceHistoryPagination\', safePage, totalPages, renderAttendanceHistoryPage);\n        }\n\n        function renderAttendanceMemberMonthlyPage(page=1) {\n            const body=document.getElementById(\'attendanceMemberMonthlyBody\');\n            if(!body) return;\n            const rows=window.__SKYNET_ATTENDANCE_MEMBER_ROWS__ || [];\n            const totalPages=Math.max(1, Math.ceil(rows.length / ATTENDANCE_PAGE_SIZE));\n            const safePage=Math.min(Math.max(1, Number(page) || 1), totalPages);\n            window.__SKYNET_ATTENDANCE_MEMBER_PAGE__=safePage;\n            const start=(safePage - 1) * ATTENDANCE_PAGE_SIZE;\n            const pageRows=rows.slice(start, start + ATTENDANCE_PAGE_SIZE);\n            body.innerHTML=pageRows.length ? pageRows.map((r,i)=>{\n                const absoluteIndex=start+i;\n                const last=r.lastCheckin ? formatAttendanceDateTime(r.lastCheckin) : \'-\';\n                const roleHtml=(r.roles||[]).length ? r.roles.map(role => `<span class="badge bg-secondary me-1">${escapeHtml(role)}</span>`).join(\'\') : \'-\';\n                return `<tr><td>${absoluteIndex+1}</td><td>${escapeHtml(r.name)}</td><td>${roleHtml}</td><td><strong>${r.checkins}</strong></td><td>${r.raids}</td><td>${escapeHtml(last)}</td></tr>`;\n            }).join(\'\') : \'<tr><td colspan="6" class="text-center text-muted">-</td></tr>\';\n            renderAttendancePagination(\'attendanceMemberMonthlyPagination\', safePage, totalPages, renderAttendanceMemberMonthlyPage);\n        }\n\n        function renderAttendanceDashboard(rootData) {\n            try {\n                const all = [];\n                const monthlyMembers = {};\n                const individualMembers = {};\n                const nowMs = Date.now();\n                const unique = new Set();\n                let totalCheckins = 0;\n                Object.entries(rootData || {}).forEach(([guildId, acts]) => {\n                    if (!acts || typeof acts !== \'object\') return;\n                    Object.entries(acts).forEach(([activityId, a]) => {\n                        if (!a || typeof a !== \'object\') return;\n                        const participants = a.participants && typeof a.participants === \'object\' ? Object.values(a.participants) : [];\n                        const checked = participants.filter(p => p && p.status === \'checked_in\');\n                        const attackAt = String(a.attack_at || a.created_at || \'\');\n                        const monthKey = /^\\d{4}-\\d{2}/.test(attackAt) ? attackAt.slice(0,7) : \'\';\n                        all.push({ guildId, activityId, a, checked, attackMs: Date.parse(attackAt) || 0, monthKey });\n                        checked.forEach(p => {\n                            totalCheckins++;\n                            const uid=String(p.user_id||\'\');\n                            if(uid) unique.add(uid);\n                            if(!uid || !monthKey) return;\n                            const bucket = monthlyMembers[monthKey] || (monthlyMembers[monthKey]={});\n                            const pRoles = normalizeAttendanceRoles(p.roles || p.role);\n                            const row = bucket[uid] || (bucket[uid]={uid, name:p.display_name||p.username||uid, roles:pRoles, checkins:0, raids:0, lastCheckin:\'\'});\n                            row.roles = normalizeAttendanceRoles([...(row.roles||[]), ...pRoles]);\n                            row.checkins += 1;\n                            row.raids += 1;\n                            const checkedAt=String(p.checked_in_at||\'\');\n                            if(checkedAt && (!row.lastCheckin || checkedAt > row.lastCheckin)) row.lastCheckin=checkedAt;\n\n                            const individual = individualMembers[uid] || (individualMembers[uid]={uid, name:p.display_name||p.username||uid, roles:pRoles, entries:[]});\n                            individual.roles = normalizeAttendanceRoles([...(individual.roles||[]), ...pRoles]);\n                            individual.entries.push({\n                                monthKey,\n                                bossName:String(a.boss_name||\'-\'),\n                                activityDate:String(a.activity_date||\'-\'),\n                                attackTime:String(a.attack_time||\'-\'),\n                                checkedAt,\n                                status:String(p.status||\'-\'),\n                                activityId:String(activityId||\'\')\n                            });\n                        });\n                    });\n                });\n                all.sort((x,y)=>(x.attackMs||0)-(y.attackMs||0));\n                document.getElementById(\'attendanceTotalRaidsCount\').innerText = all.length;\n                document.getElementById(\'attendanceUniqueMembersCount\').innerText = unique.size;\n                document.getElementById(\'attendanceTotalCheckinsCount\').innerText = totalCheckins;\n\n                const current = all.filter(x => x.a.status !== \'closed\');\n                const history = all.filter(x => x.a.status === \'closed\').slice().reverse();\n                window.__SKYNET_ATTENDANCE_HISTORY_ROWS__ = history;\n                window.__SKYNET_ATTENDANCE_HISTORY_PAGE__ = 1;\n                const currentBody = document.getElementById(\'attendanceCurrentBody\');\n                currentBody.innerHTML = current.length ? current.map(x => {\n                    const a=x.a; const status=a.status===\'open\' ? (currentLang===\'ko\'?\'진행 중\':currentLang===\'en\'?\'OPEN\':\'เปิด\') : (currentLang===\'ko\'?\'예정\':currentLang===\'en\'?\'SCHEDULED\':\'กำหนดการ\');\n                    return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||\'-\'))}</td><td>${escapeHtml(String(a.activity_date||\'-\'))}</td><td>${escapeHtml(String(a.attack_time||\'-\'))}</td><td>${escapeHtml(String(a.checkin_open||\'-\'))} – ${escapeHtml(String(a.checkin_close||\'-\'))}</td><td>${x.checked.length}</td><td>${status}</td></tr>`;\n                }).join(\'\') : \'<tr><td colspan="6" class="text-center text-muted">-</td></tr>\';\n                renderAttendanceHistoryPage(1);\n\n                const months = Object.keys(monthlyMembers).sort().reverse();\n                const monthlyBody = document.getElementById(\'attendanceMonthlyBody\');\n                monthlyBody.innerHTML = months.length ? months.map(m => {\n                    const members = Object.values(monthlyMembers[m]);\n                    const raids = all.filter(x => x.monthKey === m).length;\n                    const checks = members.reduce((n,row)=>n+row.checkins,0);\n                    return `<tr><td>${m}</td><td>${raids}</td><td>${members.length}</td><td>${checks}</td></tr>`;\n                }).join(\'\') : \'<tr><td colspan="4" class="text-center text-muted">-</td></tr>\';\n\n                const monthSelect = document.getElementById(\'attendanceMemberMonthSelect\');\n                const oldValue = monthSelect ? monthSelect.value : \'all\';\n                if (monthSelect) {\n                    monthSelect.innerHTML = `<option value="all">${escapeHtml(TRANSLATIONS[currentLang].attendanceAllMonths || \'All months\')}</option>` + months.map(m => `<option value="${m}">${m}</option>`).join(\'\');\n                    monthSelect.value = (oldValue === \'all\' || months.includes(oldValue)) ? oldValue : \'all\';\n                }\n                window.__SKYNET_ATTENDANCE_MONTHLY_MEMBERS__ = monthlyMembers;\n                window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ = individualMembers;\n                renderAttendanceMemberMonthly(monthSelect ? monthSelect.value : \'all\');\n                refreshAttendanceIndividualSelectors();\n                renderAttendanceIndividual();\n                toggleAttendanceMemberMonthlyPanel(localStorage.getItem(\'attendance_member_monthly_open\') === \'1\');\n                toggleAttendanceHistoryPanel(localStorage.getItem(\'attendance_history_open\') === \'1\');\n                toggleAttendanceIndividualPanel(localStorage.getItem(\'attendance_individual_open\') === \'1\');\n            } catch (e) { console.warn(\'[SKYNET] attendance dashboard render:\', e); }\n        }\n\n        function renderAttendanceMemberMonthly(selectedMonth=\'all\') {\n            const body=document.getElementById(\'attendanceMemberMonthlyBody\');\n            if(!body) return;\n            const source=window.__SKYNET_ATTENDANCE_MONTHLY_MEMBERS__ || {};\n            const merged={};\n            const buckets=selectedMonth===\'all\' ? Object.values(source) : [source[selectedMonth] || {}];\n            buckets.forEach(bucket => Object.values(bucket).forEach(row => {\n                const uid=String(row.uid||\'\');\n                if(!uid) return;\n                const out=merged[uid] || (merged[uid]={uid,name:row.name||uid,roles:normalizeAttendanceRoles(row.roles||row.role),checkins:0,raids:0,lastCheckin:\'\'});\n                out.checkins += Number(row.checkins||0);\n                out.raids += Number(row.raids||0);\n                if(row.roles || row.role) out.roles = normalizeAttendanceRoles([...(out.roles||[]), ...(normalizeAttendanceRoles(row.roles||row.role)||[])]);\n                if(row.lastCheckin && (!out.lastCheckin || row.lastCheckin > out.lastCheckin)) out.lastCheckin=row.lastCheckin;\n            }));\n            const rows=Object.values(merged).sort((a,b)=>b.checkins-a.checkins || String(a.name).localeCompare(String(b.name)));\n            window.__SKYNET_ATTENDANCE_MEMBER_ROWS__ = rows;\n            window.__SKYNET_ATTENDANCE_MEMBER_PAGE__ = 1;\n            renderAttendanceMemberMonthlyPage(1);\n        }\n\n        function escapeHtml(value) {\n            return String(value).replace(/[&<>\'"]/g, ch => ({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',"\'":\'&#39;\',\'"\':\'&quot;\'}[ch]));\n        }\n\n        async function fetchAttendanceServerSnapshot(){\n            if (!auth.currentUser || attendanceRealtimeUnauthorized) return;\n            if (attendanceRealtimeBusy) return;\n            attendanceRealtimeBusy = true;\n            try {\n                const idToken = await auth.currentUser.getIdToken(false);\n                const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n                const response = await fetch(`${apiOrigin}/api/attendance-data`, {\n                    method: \'GET\',\n                    headers: { \'Authorization\': `Bearer ${idToken}` },\n                    cache: \'no-store\'\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) {\n                    const err = new Error(result.error || `HTTP ${response.status}`);\n                    err.status = response.status;\n                    throw err;\n                }\n                window.__SKYNET_ATTENDANCE_ROOT__ = result.raid_attendance || {};\n                if (result.individual_members && typeof result.individual_members === \'object\') {\n                    window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ = result.individual_members;\n                }\n                renderAttendanceDashboard(window.__SKYNET_ATTENDANCE_ROOT__);\n                if (result.individual_members && typeof result.individual_members === \'object\') {\n                    refreshAttendanceIndividualSelectors();\n                    renderAttendanceIndividual();\n                }\n                window.__SKYNET_MONTHLY_REPORTS__ = result.monthly_reports || {};\n                const status = document.getElementById(\'attendanceRealtimeStatus\');\n                if (status) {\n                    status.className = \'badge bg-success status-badge\';\n                    status.textContent = TRANSLATIONS[currentLang].attendanceRealtime || \'🟢 Real-time\';\n                    status.title = \'Server-authoritative sync\';\n                }\n                attendanceRealtimeUnauthorized = false;\n            } catch (err) {\n                console.error(\'[SKYNET] Attendance server sync:\', err);\n                const status = document.getElementById(\'attendanceRealtimeStatus\');\n                if (status) {\n                    status.className = \'badge bg-danger status-badge\';\n                    status.textContent = err.status === 401 || err.status === 403 ? \'🔐 Attendance Auth Error\' : \'🔴 Attendance Sync Error\';\n                }\n                if (err.status === 401 || err.status === 403) attendanceRealtimeUnauthorized = true;\n            } finally {\n                attendanceRealtimeBusy = false;\n            }\n        }\n\n        document.getElementById(\'attendanceMemberMonthSelect\')?.addEventListener(\'change\', (e) => {\n            renderAttendanceMemberMonthly(e.target.value || \'all\');\n        });\n\n        function stopAttendanceRealtimeListener(){\n            if (attendanceRealtimeTimer) {\n                clearTimeout(attendanceRealtimeTimer);\n                attendanceRealtimeTimer = null;\n            }\n            if (attendanceRealtimePollTimer) {\n                clearInterval(attendanceRealtimePollTimer);\n                attendanceRealtimePollTimer = null;\n            }\n            if (attendanceRealtimeAbortController) {\n                attendanceRealtimeAbortController.abort();\n                attendanceRealtimeAbortController = null;\n            }\n            attendanceRealtimeListenerAttached = false;\n            attendanceRealtimeBusy = false;\n        }\n\n        function applyAttendanceServerResult(result){\n            window.__SKYNET_ATTENDANCE_ROOT__ = result.raid_attendance || {};\n            if (result.individual_members && typeof result.individual_members === \'object\') {\n                window.__SKYNET_ATTENDANCE_INDIVIDUAL_MEMBERS__ = result.individual_members;\n            }\n            window.__SKYNET_MONTHLY_REPORTS__ = result.monthly_reports || {};\n            renderAttendanceDashboard(window.__SKYNET_ATTENDANCE_ROOT__);\n            if (result.individual_members && typeof result.individual_members === \'object\') {\n                refreshAttendanceIndividualSelectors();\n                renderAttendanceIndividual();\n            }\n            const status = document.getElementById(\'attendanceRealtimeStatus\');\n            if (status) {\n                status.className = \'badge bg-success status-badge\';\n                status.textContent = TRANSLATIONS[currentLang].attendanceRealtime || \'🟢 Real-time\';\n                status.title = `Event sync v${result.attendance_version || 0}`;\n            }\n        }\n\n        async function fetchAttendanceServerSnapshot(){\n            if (!auth.currentUser || attendanceRealtimeUnauthorized || attendanceRealtimeBusy) return null;\n            attendanceRealtimeBusy = true;\n            try {\n                const idToken = await auth.currentUser.getIdToken(false);\n                const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n                const response = await fetch(`${apiOrigin}/api/attendance-data`, {\n                    method: \'GET\',\n                    headers: { \'Authorization\': `Bearer ${idToken}` },\n                    cache: \'no-store\'\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) {\n                    const err = new Error(result.error || `HTTP ${response.status}`);\n                    err.status = response.status;\n                    throw err;\n                }\n                applyAttendanceServerResult(result);\n                attendanceRealtimeUnauthorized = false;\n                return result;\n            } catch (err) {\n                console.error(\'[SKYNET] Attendance initial sync:\', err);\n                const status = document.getElementById(\'attendanceRealtimeStatus\');\n                if (status) {\n                    status.className = \'badge bg-danger status-badge\';\n                    status.textContent = err.status === 401 || err.status === 403 ? \'🔐 Attendance Auth Error\' : \'🔴 Attendance Sync Error\';\n                }\n                if (err.status === 401 || err.status === 403) attendanceRealtimeUnauthorized = true;\n                return null;\n            } finally {\n                attendanceRealtimeBusy = false;\n            }\n        }\n\n        async function startAttendanceRealtimeStream(){\n            // V115: intentionally no long-lived SSE connection. Waitress workers on the\n            // single-instance Render service must not be held by open streaming responses.\n            return fetchAttendanceServerSnapshot();\n        }\n\n        function startAttendanceRealtimeListener(){\n            if (attendanceRealtimeListenerAttached || !auth.currentUser) return;\n            attendanceRealtimeListenerAttached = true;\n            attendanceRealtimeUnauthorized = false;\n\n            fetchAttendanceServerSnapshot().then(() => {\n                if (!attendanceRealtimeListenerAttached || attendanceRealtimeUnauthorized) return;\n                if (attendanceRealtimePollTimer) clearInterval(attendanceRealtimePollTimer);\n                attendanceRealtimePollTimer = setInterval(() => {\n                    if (!attendanceRealtimeListenerAttached || !auth.currentUser || attendanceRealtimeUnauthorized) return;\n                    fetchAttendanceServerSnapshot().catch(() => {});\n                }, 15000);\n            });\n        }\n\n        function toggleAttendancePanel(forceOpen=null) {\n            const content = document.getElementById(\'attendancePanelContent\');\n            const btn = document.getElementById(\'attendanceCollapseBtn\');\n            if (!content) return;\n            const shouldOpen = forceOpen === null ? content.style.display !== \'block\' : !!forceOpen;\n            content.style.display = shouldOpen ? \'block\' : \'none\';\n            if (btn) {\n                const key = shouldOpen ? \'attendanceCollapseClose\' : \'attendanceCollapseOpen\';\n                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? \'▲ ปิด\' : \'▼ เปิด\');\n            }\n            localStorage.setItem(\'attendance_panel_open\', shouldOpen ? \'1\' : \'0\');\n        }\n\n        function toggleAttendanceMemberMonthlyPanel(forceOpen=null) {\n            const content = document.getElementById(\'attendanceMemberMonthlyPanelContent\');\n            const btn = document.getElementById(\'attendanceMemberMonthlyCollapseBtn\');\n            if (!content) return;\n            const shouldOpen = forceOpen === null ? content.style.display !== \'block\' : !!forceOpen;\n            content.style.display = shouldOpen ? \'block\' : \'none\';\n            if (btn) {\n                const key = shouldOpen ? \'attendanceCollapseClose\' : \'attendanceCollapseOpen\';\n                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? \'▲ ปิด\' : \'▼ เปิด\');\n            }\n            localStorage.setItem(\'attendance_member_monthly_open\', shouldOpen ? \'1\' : \'0\');\n        }\n\n        function applyLanguage() {\n            const langData = TRANSLATIONS[currentLang];\n            document.querySelectorAll(\'[data-i18n]\').forEach(el => {\n                const key = el.getAttribute(\'data-i18n\');\n                if (langData[key]) el.innerText = langData[key];\n            });\n            document.querySelectorAll(\'[data-i18n-ph]\').forEach(el => {\n                const key = el.getAttribute(\'data-i18n-ph\');\n                if (langData[key]) el.placeholder = langData[key];\n            });\n            \n            updateNotifyButtonUI();\n            applyKillDateLanguage();\n            renderTable();\n            if (window.__SKYNET_ATTENDANCE_ROOT__) {\n                renderAttendanceDashboard(window.__SKYNET_ATTENDANCE_ROOT__);\n            } else {\n                refreshAttendanceIndividualSelectors();\n                renderAttendanceIndividual();\n            }\n            updateWeeklyEvents();\n        }\n\n        function changeLanguage(lang) {\n            currentLang = lang;\n            localStorage.setItem(\'app_lang\', lang);\n\n            const authLangSelect = document.getElementById(\'authLangSelect\');\n            const langSelect = document.getElementById(\'langSelect\');\n            if (authLangSelect) authLangSelect.value = lang;\n            if (langSelect) langSelect.value = lang;\n\n            applyLanguage();\n            if (webPushEnabled && auth.currentUser && Notification.permission === \'granted\') {\n                syncPushPreferences().catch(err => console.warn(\'[SKYNET] Push language sync skipped:\', err));\n            }\n        }\n\n        function changeTimezone(tz) {\n            currentTz = tz;\n            localStorage.setItem(\'app_tz\', tz);\n            renderTable();\n            if (webPushEnabled && auth.currentUser && Notification.permission === \'granted\') {\n                syncPushPreferences().catch(err => console.warn(\'[SKYNET] Push timezone sync skipped:\', err));\n            }\n        }\n\n        // V107: Resolve the IANA timezone used for typed boss times.\n        // \'auto\' follows the browser/device timezone.\n        function getSelectedInputTimezone() {\n            if (currentTz && currentTz !== \'auto\') return currentTz;\n            try {\n                const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;\n                return detected || \'Asia/Bangkok\';\n            } catch (_) {\n                return \'Asia/Bangkok\';\n            }\n        }\n\n        function syncPushPreferences() {\n            if (!auth.currentUser || !webPushEnabled) return Promise.resolve();\n            webPushPreferenceSyncDirty = true;\n            const promise = new Promise((resolve, reject) => {\n                webPushPreferenceSyncWaiters.push({ resolve, reject });\n            });\n            if (!webPushPreferenceSyncInFlight) {\n                if (webPushPreferenceSyncTimer) clearTimeout(webPushPreferenceSyncTimer);\n                webPushPreferenceSyncTimer = setTimeout(runQueuedPushPreferenceSync, 750);\n            }\n            return promise;\n        }\n\n        async function runQueuedPushPreferenceSync() {\n            webPushPreferenceSyncTimer = null;\n            if (webPushPreferenceSyncInFlight || !webPushPreferenceSyncDirty) return;\n            webPushPreferenceSyncInFlight = true;\n            webPushPreferenceSyncDirty = false;\n            const waiters = webPushPreferenceSyncWaiters;\n            webPushPreferenceSyncWaiters = [];\n            try {\n                const result = await syncPushPreferencesNow();\n                waiters.forEach(({ resolve }) => resolve(result));\n            } catch (err) {\n                waiters.forEach(({ reject }) => reject(err));\n            } finally {\n                webPushPreferenceSyncInFlight = false;\n                if (webPushPreferenceSyncDirty) {\n                    webPushPreferenceSyncTimer = setTimeout(runQueuedPushPreferenceSync, 250);\n                }\n            }\n        }\n\n        async function syncPushPreferencesNow() {\n            if (!auth.currentUser || !webPushEnabled) return;\n            const apiOrigin = getPushApiOrigin();\n            const timezone = getSelectedInputTimezone();\n            const language = [\'th\', \'en\', \'ko\'].includes(currentLang) ? currentLang : \'th\';\n            const token = webPushToken || localStorage.getItem(\'web_push_token\') || \'\';\n            let endpoint = localStorage.getItem(\'web_push_endpoint\') || \'\';\n            try {\n                if (isIOSDevice()) {\n                    const registration = webPushRegistration || await navigator.serviceWorker.getRegistration(\'/SKYNET/\');\n                    if (registration && registration.pushManager) {\n                        const subscription = await registration.pushManager.getSubscription();\n                        endpoint = subscription ? subscription.endpoint : endpoint;\n                    }\n                }\n                if (!token && !endpoint) return;\n                const idToken = await auth.currentUser.getIdToken(false);\n                const response = await fetch(`${apiOrigin}/api/push/preferences`, {\n                    method: \'POST\',\n                    headers: {\n                        \'Content-Type\': \'application/json\',\n                        \'Authorization\': `Bearer ${idToken}`\n                    },\n                    body: JSON.stringify({ token, endpoint, language, timezone })\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) throw new Error(result.error || `Push preference HTTP ${response.status}`);\n                localStorage.setItem(\'web_push_language\', language);\n                localStorage.setItem(\'web_push_timezone\', timezone);\n                webPushLastRegisteredLanguage = language;\n                webPushLastRegisteredTimezone = timezone;\n                console.info(\'[SKYNET] Push language/timezone synced:\', language, timezone);\n            } catch (err) {\n                console.warn(\'[SKYNET] Push preference sync skipped:\', err);\n            }\n        }\n\n        function updateNotifyButtonUI() {\n            const notifyBtn = document.getElementById(\'notifyToggleBtn\');\n            const langData = TRANSLATIONS[currentLang];\n            \n            if (isNotifyEnabled) {\n                notifyBtn.className = "btn btn-outline-success btn-sm fw-bold";\n                notifyBtn.setAttribute(\'data-i18n\', \'disableNotify\');\n                notifyBtn.innerText = langData.disableNotify;\n            } else {\n                notifyBtn.className = "btn btn-warning btn-sm fw-bold";\n                notifyBtn.setAttribute(\'data-i18n\', \'enableNotify\');\n                notifyBtn.innerText = langData.enableNotify;\n            }\n        }\n\n        // --- Audio System ---\n        let audioCtx = null;\n        function playAlertSound(type) {\n            if (!isNotifyEnabled) return;\n            \n            try {\n                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();\n                if (audioCtx.state === \'suspended\') audioCtx.resume();\n\n                const osc = audioCtx.createOscillator();\n                const gain = audioCtx.createGain();\n                osc.connect(gain);\n                gain.connect(audioCtx.destination);\n\n                if (type === \'notice\') {\n                    osc.type = \'sine\';\n                    osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);\n                    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);\n                    osc.start();\n                    osc.stop(audioCtx.currentTime + 0.15);\n                    setTimeout(() => {\n                        const osc2 = audioCtx.createOscillator();\n                        const gain2 = audioCtx.createGain();\n                        osc2.connect(gain2);\n                        gain2.connect(audioCtx.destination);\n                        osc2.type = \'sine\';\n                        osc2.frequency.setValueAtTime(880, audioCtx.currentTime);\n                        gain2.gain.setValueAtTime(0.2, audioCtx.currentTime);\n                        osc2.start();\n                        osc2.stop(audioCtx.currentTime + 0.2);\n                    }, 200);\n                } else if (type === \'spawn\') {\n                    osc.type = \'sawtooth\';\n                    osc.frequency.setValueAtTime(880, audioCtx.currentTime);\n                    osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.4);\n                    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);\n                    osc.start();\n                    osc.stop(audioCtx.currentTime + 0.4);\n                }\n            } catch (e) {\n                console.log("Audio play error:", e);\n            }\n        }\n\n        function getPushApiOrigin() {\n            return window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n        }\n\n        function isIOSDevice() {\n            const ua = navigator.userAgent || navigator.vendor || window.opera || \'\';\n            return /iPad|iPhone|iPod/i.test(ua) || (navigator.platform === \'MacIntel\' && navigator.maxTouchPoints > 1);\n        }\n\n        function isIOSStandaloneWebApp() {\n            try {\n                const standaloneMeta = Boolean(window.navigator.standalone);\n                const standaloneMode = window.matchMedia(\'(display-mode: standalone)\').matches;\n                const fullscreenMode = window.matchMedia(\'(display-mode: fullscreen)\').matches;\n                const minimalUiMode = window.matchMedia(\'(display-mode: minimal-ui)\').matches;\n                return standaloneMeta || standaloneMode || fullscreenMode || minimalUiMode;\n            } catch (err) {\n                return Boolean(window.navigator.standalone);\n            }\n        }\n\n        function getIOSWebPushDiagnostics() {\n            return {\n                standaloneMeta: Boolean(window.navigator.standalone),\n                standaloneMode: (() => { try { return window.matchMedia(\'(display-mode: standalone)\').matches; } catch (_) { return false; } })(),\n                fullscreenMode: (() => { try { return window.matchMedia(\'(display-mode: fullscreen)\').matches; } catch (_) { return false; } })(),\n                notification: \'Notification\' in window,\n                pushManager: \'PushManager\' in window,\n                serviceWorker: \'serviceWorker\' in navigator,\n                secureContext: window.isSecureContext === true,\n                userAgent: navigator.userAgent\n            };\n        }\n\n        function base64UrlToUint8Array(base64UrlData) {\n            const padding = \'=\'.repeat((4 - (base64UrlData.length % 4)) % 4);\n            const base64 = (base64UrlData + padding).replace(/-/g, \'+\').replace(/_/g, \'/\');\n            const rawData = window.atob(base64);\n            return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));\n        }\n\n        async function registerDashboardServiceWorker() {\n            if (!(\'serviceWorker\' in navigator)) throw new Error(\'Browser นี้ไม่รองรับ Service Worker\');\n            const swUrl = new URL(\'/SKYNET/firebase-messaging-sw.js?v=v110\', window.location.origin).toString();\n            webPushRegistration = await navigator.serviceWorker.register(swUrl, { scope: \'/SKYNET/\', updateViaCache: \'none\' });\n            await navigator.serviceWorker.ready;\n            return webPushRegistration;\n        }\n\n        async function prepareIOSWebPushSupport() {\n            if (!isIOSDevice() || !isIOSStandaloneWebApp()) return;\n            try {\n                const apiOrigin = getPushApiOrigin();\n                if (!window._skynetIosPushPublicKey) {\n                    const keyResponse = await fetch(`${apiOrigin}/api/push/ios-public-key`, { cache: \'no-store\' });\n                    const keyPayload = await keyResponse.json().catch(() => ({}));\n                    if (keyResponse.ok && keyPayload.publicKey) window._skynetIosPushPublicKey = keyPayload.publicKey;\n                }\n                await registerDashboardServiceWorker();\n            } catch (err) {\n                console.warn(\'[SKYNET] iPhone Web Push preparation skipped:\', err);\n            }\n        }\n\n        async function ensureIOSWebPushSubscription() {\n            if (!auth.currentUser) throw new Error(\'กรุณาเข้าสู่ระบบก่อนเปิด Push Notification\');\n            if (!isIOSDevice()) throw new Error(\'This function is intended for iPhone/iPad Web Push\');\n            const capability = getIOSWebPushDiagnostics();\n            console.info(\'[SKYNET iPhone Push] capability:\', capability);\n            if (!capability.serviceWorker || !capability.notification || !capability.pushManager || !capability.secureContext) {\n                throw new Error(\'iPhone/iPad เครื่องนี้ยังไม่พร้อมสำหรับ Web Push: ต้องใช้ HTTPS + Service Worker + Notifications + Push API\');\n            }\n            if (!isIOSStandaloneWebApp()) {\n                throw new Error(currentLang === \'en\'\n                    ? \'On iPhone/iPad, first choose “Add to Home Screen” in Safari, open the SKYNET app from Home Screen, then enable Push Notification there.\'\n                    : currentLang === \'ko\'\n                        ? \'iPhone/iPad에서는 먼저 Safari에서 “홈 화면에 추가”한 뒤 홈 화면의 SKYNET 앱을 열고 Push Notification을 켜세요.\'\n                        : \'บน iPhone/iPad ต้องกด “เพิ่มไปยังหน้าจอโฮม” ใน Safari ก่อน แล้วเปิด SKYNET จากไอคอนบนหน้าจอโฮม จากนั้นจึงเปิด Push Notification\');\n            }\n\n            const apiOrigin = getPushApiOrigin();\n            if (!window._skynetIosPushPublicKey) {\n                const keyResponse = await fetch(`${apiOrigin}/api/push/ios-public-key`, { cache: \'no-store\' });\n                const keyPayload = await keyResponse.json().catch(() => ({}));\n                if (!keyResponse.ok || !keyPayload.publicKey) {\n                    throw new Error(keyPayload.error || `Render iPhone VAPID public key HTTP ${keyResponse.status}`);\n                }\n                window._skynetIosPushPublicKey = keyPayload.publicKey;\n                console.info(\'[SKYNET iPhone Push] VAPID public key loaded\');\n            }\n\n            const registration = await registerDashboardServiceWorker();\n            console.info(\'[SKYNET iPhone Push] service worker ready:\', registration.scope);\n            let subscription = await registration.pushManager.getSubscription();\n            console.info(\'[SKYNET iPhone Push] existing subscription:\', Boolean(subscription));\n            if (!subscription) {\n                try {\n                    subscription = await registration.pushManager.subscribe({\n                        userVisibleOnly: true,\n                        applicationServerKey: base64UrlToUint8Array(window._skynetIosPushPublicKey)\n                    });\n                } catch (subscribeErr) {\n                    console.error(\'[SKYNET iPhone Push] PushManager.subscribe failed:\', subscribeErr);\n                    throw new Error(`iPhone Push subscribe ไม่สำเร็จ: ${subscribeErr && subscribeErr.message ? subscribeErr.message : subscribeErr}`);\n                }\n            }\n\n            const idToken = await auth.currentUser.getIdToken(true);\n            const response = await fetch(`${apiOrigin}/api/push/web-subscribe`, {\n                method: \'POST\',\n                headers: {\n                    \'Content-Type\': \'application/json\',\n                    \'Authorization\': `Bearer ${idToken}`\n                },\n                body: JSON.stringify({\n                    subscription: subscription.toJSON ? subscription.toJSON() : subscription,\n                    language: ([\'th\', \'en\', \'ko\'].includes(currentLang) ? currentLang : \'th\'),\n                    timezone: getSelectedInputTimezone()\n                })\n            });\n            const result = await response.json().catch(() => ({}));\n            if (!response.ok || !result.success) {\n                throw new Error(result.error || `iPhone Push registration HTTP ${response.status}`);\n            }\n            webPushEnabled = true;\n            localStorage.setItem(\'web_push_enabled\', \'true\');\n            localStorage.setItem(\'web_push_mode\', \'ios-webpush\');\n            localStorage.setItem(\'web_push_endpoint\', subscription.endpoint);\n            console.info(\'[SKYNET iPhone Push] server registration successful:\', result);\n            return subscription;\n        }\n\n        let webPushRegistrationPromise = null;\n        let webPushLastRegisteredToken = localStorage.getItem(\'web_push_token\') || \'\';\n        let webPushLastRegisteredLanguage = localStorage.getItem(\'web_push_language\') || \'\';\n        let webPushLastRegisteredTimezone = localStorage.getItem(\'web_push_timezone\') || \'\';\n        let webPushPreferenceSyncTimer = null;\n        let webPushPreferenceSyncInFlight = false;\n        let webPushPreferenceSyncDirty = false;\n        let webPushPreferenceSyncWaiters = [];\n\n        async function ensureWebPushSubscription() {\n            if (webPushRegistrationPromise) return webPushRegistrationPromise;\n            webPushRegistrationPromise = (async () => {\n                if (isIOSDevice()) return ensureIOSWebPushSubscription();\n                if (!auth.currentUser) throw new Error(\'กรุณาเข้าสู่ระบบก่อนเปิด Push Notification\');\n                if (!(\'serviceWorker\' in navigator) || !(\'Notification\' in window)) {\n                    throw new Error(\'Browser นี้ไม่รองรับ Web Push Notification\');\n                }\n                if (!firebase.messaging) throw new Error(\'Firebase Messaging SDK ยังไม่พร้อม\');\n\n                const apiOrigin = getPushApiOrigin();\n                const [keyResponse, diagResponse] = await Promise.all([\n                    fetch(`${apiOrigin}/api/push/public-key`, { cache: \'no-store\' }),\n                    fetch(`${apiOrigin}/api/push/diagnostics`, { cache: \'no-store\' }).catch(() => null)\n                ]);\n                const keyPayload = await keyResponse.json().catch(() => ({}));\n                const diagPayload = diagResponse ? await diagResponse.json().catch(() => ({})) : {};\n                if (!keyResponse.ok || !keyPayload.publicKey) {\n                    const reason = diagPayload.vapidConfigured === false\n                        ? \'Render ยังไม่ได้ตั้งค่า WEB_PUSH_VAPID_PUBLIC_KEY\'\n                        : (keyPayload.error || `โหลด VAPID public key ไม่สำเร็จ (HTTP ${keyResponse.status})`);\n                    throw new Error(reason);\n                }\n                if (diagPayload.vapidLength && (diagPayload.vapidLength < 80 || diagPayload.vapidLength > 120)) {\n                    throw new Error(`VAPID public key มีความยาวผิดปกติ (${diagPayload.vapidLength} ตัวอักษร)`);\n                }\n\n                await registerDashboardServiceWorker();\n                webPushMessaging = webPushMessaging || firebase.messaging();\n                const token = await webPushMessaging.getToken({\n                    vapidKey: keyPayload.publicKey,\n                    serviceWorkerRegistration: webPushRegistration\n                });\n                if (!token) throw new Error(\'FCM ไม่คืน registration token — ตรวจ Notification permission, FCM Registration API และ service worker\');\n\n                const language = [\'th\', \'en\', \'ko\'].includes(currentLang) ? currentLang : \'th\';\n                const timezone = getSelectedInputTimezone();\n                webPushToken = token;\n                webPushEnabled = true;\n                localStorage.setItem(\'web_push_token\', token);\n                localStorage.setItem(\'web_push_enabled\', \'true\');\n                localStorage.setItem(\'web_push_mode\', \'fcm-web\');\n\n                // The same browser/device token and language are already registered.\n                // Do not POST repeatedly on every auth-state callback or language render.\n                if (webPushLastRegisteredToken === token && webPushLastRegisteredLanguage === language && webPushLastRegisteredTimezone === timezone) {\n                    return token;\n                }\n\n                const idToken = await auth.currentUser.getIdToken(false);\n                const response = await fetch(`${apiOrigin}/api/push/subscribe`, {\n                    method: \'POST\',\n                    headers: {\n                        \'Content-Type\': \'application/json\',\n                        \'Authorization\': `Bearer ${idToken}`\n                    },\n                    body: JSON.stringify({ token, language, timezone })\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) throw new Error(result.error || `Push registration HTTP ${response.status}`);\n                webPushLastRegisteredToken = token;\n                webPushLastRegisteredLanguage = language;\n                webPushLastRegisteredTimezone = timezone;\n                localStorage.setItem(\'web_push_language\', language);\n                localStorage.setItem(\'web_push_timezone\', timezone);\n                return token;\n            })();\n            try {\n                return await webPushRegistrationPromise;\n            } finally {\n                webPushRegistrationPromise = null;\n            }\n        }\n\n        async function disableIOSWebPushSubscription() {\n            try {\n                if (!auth.currentUser) return;\n                let endpoint = localStorage.getItem(\'web_push_endpoint\') || \'\';\n                if (!endpoint && webPushRegistration && webPushRegistration.pushManager) {\n                    const sub = await webPushRegistration.pushManager.getSubscription();\n                    endpoint = sub ? sub.endpoint : \'\';\n                }\n                if (endpoint) {\n                    const idToken = await auth.currentUser.getIdToken(false);\n                    await fetch(`${getPushApiOrigin()}/api/push/web-unsubscribe`, {\n                        method: \'POST\',\n                        headers: {\n                            \'Content-Type\': \'application/json\',\n                            \'Authorization\': `Bearer ${idToken}`\n                        },\n                        body: JSON.stringify({ endpoint })\n                    });\n                }\n            } catch (err) {\n                console.warn(\'[SKYNET] iPhone Web Push unsubscribe failed:\', err);\n            }\n            try {\n                if (webPushRegistration && webPushRegistration.pushManager) {\n                    const sub = await webPushRegistration.pushManager.getSubscription();\n                    if (sub) await sub.unsubscribe();\n                }\n            } catch (err) {\n                console.warn(\'[SKYNET] iPhone Web Push local unsubscribe failed:\', err);\n            }\n            localStorage.removeItem(\'web_push_endpoint\');\n            localStorage.removeItem(\'web_push_mode\');\n            localStorage.removeItem(\'web_push_timezone\');\n        }\n\n        async function disableWebPushSubscription() {\n            if (isIOSDevice()) {\n                await disableIOSWebPushSubscription();\n            } else {\n                try {\n                    if (!auth.currentUser) return;\n                    const token = webPushToken || localStorage.getItem(\'web_push_token\') || \'\';\n                    if (!token) return;\n                    const idToken = await auth.currentUser.getIdToken(false);\n                    await fetch(`${getPushApiOrigin()}/api/push/unsubscribe`, {\n                        method: \'POST\',\n                        headers: {\n                            \'Content-Type\': \'application/json\',\n                            \'Authorization\': `Bearer ${idToken}`\n                        },\n                        body: JSON.stringify({ token })\n                    });\n                } catch (err) {\n                    console.warn(\'[SKYNET] Push unsubscribe failed:\', err);\n                }\n                webPushToken = \'\';\n                localStorage.removeItem(\'web_push_token\');\n                localStorage.removeItem(\'web_push_mode\');\n                localStorage.removeItem(\'web_push_language\');\n                localStorage.removeItem(\'web_push_timezone\');\n                webPushLastRegisteredToken = \'\';\n                webPushLastRegisteredLanguage = \'\';\n            }\n            webPushEnabled = false;\n            localStorage.setItem(\'web_push_enabled\', \'false\');\n        }\n\n        async function syncExistingWebPushSubscription() {\n            if (!auth.currentUser || Notification.permission !== \'granted\') return;\n            try {\n                if (isIOSDevice()) {\n                    if (!isIOSStandaloneWebApp()) return;\n                    const registration = webPushRegistration || await navigator.serviceWorker.getRegistration(\'/SKYNET/\');\n                    if (!registration) return;\n                    webPushRegistration = registration;\n                    const subscription = await registration.pushManager.getSubscription();\n                    if (!subscription) return; // iOS subscribe() must be initiated by a user gesture.\n                    const idToken = await auth.currentUser.getIdToken(true);\n                    const response = await fetch(`${getPushApiOrigin()}/api/push/web-subscribe`, {\n                        method: \'POST\',\n                        headers: {\n                            \'Content-Type\': \'application/json\',\n                            \'Authorization\': `Bearer ${idToken}`\n                        },\n                        body: JSON.stringify({\n                            subscription: subscription.toJSON ? subscription.toJSON() : subscription,\n                            language: ([\'th\', \'en\', \'ko\'].includes(currentLang) ? currentLang : \'th\'),\n                            timezone: getSelectedInputTimezone()\n                        })\n                    });\n                    const result = await response.json().catch(() => ({}));\n                    if (!response.ok || !result.success) throw new Error(result.error || `iPhone Push sync HTTP ${response.status}`);\n                    webPushEnabled = true;\n                    localStorage.setItem(\'web_push_enabled\', \'true\');\n                    localStorage.setItem(\'web_push_mode\', \'ios-webpush\');\n                    localStorage.setItem(\'web_push_endpoint\', subscription.endpoint);\n                    localStorage.setItem(\'web_push_language\', [\'th\', \'en\', \'ko\'].includes(currentLang) ? currentLang : \'th\');\n                    localStorage.setItem(\'web_push_timezone\', getSelectedInputTimezone());\n                } else {\n                    await ensureWebPushSubscription();\n                }\n                await syncPushPreferences();\n            } catch (err) {\n                console.warn(\'[SKYNET] Existing Web Push sync skipped:\', err);\n            }\n        }\n\n        function setupForegroundFCMNotificationHandler() {\n            try {\n                if (isIOSDevice() || !firebase.messaging) return;\n                webPushMessaging = webPushMessaging || firebase.messaging();\n                if (window._skynetForegroundFcmHandlerReady) return;\n                window._skynetForegroundFcmHandlerReady = true;\n                webPushMessaging.onMessage((payload) => {\n                    try {\n                        const notification = (payload && payload.notification) || {};\n                        const data = (payload && payload.data) || {};\n                        const eventKey = String(data.eventKey || notification.tag || "");\n                        if (!eventKey) return;\n                        const dedupKey = `skynet_foreground_push_${eventKey}`;\n                        if (sessionStorage.getItem(dedupKey) === "1") return;\n                        sessionStorage.setItem(dedupKey, "1");\n                        const title = notification.title || data.title || "SKYNET 2.0";\n                        const body = notification.body || data.body || "มีการแจ้งเตือนจาก Boss Timer";\n                        if (Notification.permission !== "granted") return;\n                        if (!webPushRegistration && "serviceWorker" in navigator) {\n                            navigator.serviceWorker.getRegistration("/SKYNET/").then((registration) => {\n                                webPushRegistration = registration || webPushRegistration;\n                                if (webPushRegistration && "showNotification" in webPushRegistration) {\n                                    return webPushRegistration.showNotification(title, {\n                                        body,\n                                        tag: `skynet-${eventKey}`,\n                                        renotify: false,\n                                        data: { url: data.url || "https://iahcatan.github.io/SKYNET/" }\n                                    });\n                                }\n                                return new Notification(title, { body });\n                            }).catch((err) => console.warn("[SKYNET] Foreground FCM notification failed:", err));\n                        } else if (webPushRegistration && "showNotification" in webPushRegistration) {\n                            webPushRegistration.showNotification(title, {\n                                body,\n                                tag: `skynet-${eventKey}`,\n                                renotify: false,\n                                data: { url: data.url || "https://iahcatan.github.io/SKYNET/" }\n                            }).catch((err) => console.warn("[SKYNET] Foreground FCM notification failed:", err));\n                        } else {\n                            new Notification(title, { body });\n                        }\n                    } catch (err) {\n                        console.warn("[SKYNET] Foreground FCM handler failed:", err);\n                    }\n                });\n            } catch (err) {\n                console.warn("[SKYNET] Foreground FCM setup skipped:", err);\n            }\n        }\n\n        async function toggleNotifications() {\n            const langData = TRANSLATIONS[currentLang];\n            if (isNotifyEnabled) {\n                isNotifyEnabled = false;\n                localStorage.setItem(\'notify_enabled\', \'false\');\n                updateNotifyButtonUI();\n                await disableWebPushSubscription();\n                return;\n            }\n\n            try {\n                const iosMode = isIOSDevice();\n                if (!(\'Notification\' in window)) throw new Error(langData.noNotifySupport || \'Notifications are not supported\');\n\n                // On iPhone/iPad, keep permission + PushManager.subscribe in the notification button flow.\n                // Do not initialize/resume AudioContext before the Web Push subscription attempt.\n                if (iosMode) {\n                    if (!isIOSStandaloneWebApp()) {\n                        throw new Error(currentLang === \'en\'\n                            ? \'Please add SKYNET to the Home Screen in Safari, open it from the Home Screen, and then enable Push Notification.\'\n                            : currentLang === \'ko\'\n                                ? \'Safari에서 SKYNET을 홈 화면에 추가한 뒤 홈 화면의 SKYNET 앱을 열고 Push Notification을 켜주세요.\'\n                                : \'กรุณาเพิ่ม SKYNET ไปยังหน้าจอโฮมใน Safari แล้วเปิด SKYNET จากหน้าจอโฮม ก่อนเปิด Push Notification\');\n                    }\n                    const permission = Notification.permission === \'granted\'\n                        ? \'granted\'\n                        : await Notification.requestPermission();\n                    if (permission !== \'granted\') {\n                        alert(langData.grantNotifyPrompt);\n                        return;\n                    }\n                    isNotifyEnabled = true;\n                    localStorage.setItem(\'notify_enabled\', \'true\');\n                    updateNotifyButtonUI();\n                    try {\n                        await ensureIOSWebPushSubscription();\n                    } catch (pushErr) {\n                        webPushEnabled = false;\n                        localStorage.setItem(\'web_push_enabled\', \'false\');\n                        console.error(\'[SKYNET iPhone Push] registration failed:\', pushErr);\n                        const detail = pushErr && pushErr.message ? pushErr.message : String(pushErr);\n                        alert(`เปิดสิทธิ์แจ้งเตือนแล้ว แต่ iPhone Web Push ยังสมัครไม่สำเร็จ\\n\\n${detail}\\n\\nเปิด SKYNET จาก Home Screen และกดปุ่มแจ้งเตือนจากหน้านั้นอีกครั้ง`);\n                        return;\n                    }\n                    try {\n                        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();\n                        if (audioCtx.state === \'suspended\') await audioCtx.resume();\n                        playAlertSound(\'notice\');\n                    } catch (_) {}\n                } else {\n                    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();\n                    if (audioCtx.state === \'suspended\') await audioCtx.resume();\n                    const permission = Notification.permission === \'granted\'\n                        ? \'granted\'\n                        : await Notification.requestPermission();\n                    if (permission !== \'granted\') {\n                        alert(langData.grantNotifyPrompt);\n                        return;\n                    }\n                    isNotifyEnabled = true;\n                    localStorage.setItem(\'notify_enabled\', \'true\');\n                    updateNotifyButtonUI();\n                    playAlertSound(\'notice\');\n                    try {\n                        await ensureWebPushSubscription();\n                    } catch (pushErr) {\n                        webPushEnabled = false;\n                        localStorage.setItem(\'web_push_enabled\', \'false\');\n                        console.error(\'[SKYNET] Web Push registration failed:\', pushErr);\n                        const detail = pushErr && pushErr.message ? pushErr.message : String(pushErr);\n                        const prompt = `${detail}\\n\\nให้ตรวจ WEB_PUSH_VAPID_PUBLIC_KEY และ Firebase Cloud Messaging > Web Push certificates บน Firebase ก่อนลองใหม่`;\n                        alert(`เปิดแจ้งเตือนหน้าเว็บแล้ว แต่ Push เบื้องหลังยังไม่พร้อม\\n\\n${prompt}`);\n                    }\n                }\n\n                if (webPushRegistration && \'showNotification\' in webPushRegistration) {\n                    await webPushRegistration.showNotification(langData.notifyReadyTitle, {\n                        body: webPushEnabled\n                            ? (isIOSDevice() ? `${langData.notifyReadyBody} • iPhone Web Push พร้อมใช้งาน` : `${langData.notifyReadyBody} • Push พร้อมใช้งานแม้ปิด Chrome`)\n                            : langData.notifyReadyBody,\n                        tag: \'skynet-notify-ready\',\n                        data: { url: \'https://iahcatan.github.io/SKYNET/\' }\n                    });\n                } else {\n                    new Notification(langData.notifyReadyTitle, { body: langData.notifyReadyBody });\n                }\n            } catch (err) {\n                console.error(\'[SKYNET] Notification setup failed:\', err);\n                alert(err.message || err);\n            }\n        }\n\n        async function sendBrowserNotification(title, body) {\n            if (!isNotifyEnabled) return;\n            // V113: prevent duplicate foreground notifications when server Push is enabled.\n            // FCM/iPhone Web Push owns the notification; local browser notification remains\n            // available only when Push is disabled.\n            if (webPushEnabled) return;\n            try {\n                if (Notification.permission !== \'granted\') return;\n                if (!webPushRegistration && \'serviceWorker\' in navigator) {\n                    webPushRegistration = await navigator.serviceWorker.getRegistration(\'/SKYNET/\');\n                }\n                if (webPushRegistration && \'showNotification\' in webPushRegistration) {\n                    await webPushRegistration.showNotification(title, {\n                        body,\n                        requireInteraction: true,\n                        tag: `skynet-${Date.now()}`,\n                        data: { url: \'https://iahcatan.github.io/SKYNET/\' }\n                    });\n                } else {\n                    new Notification(title, { body, requireInteraction: true });\n                }\n            } catch (err) {\n                console.warn(\'[SKYNET] Browser notification failed:\', err);\n            }\n        }\n\n        function format24h(dateObj) {\n            if (!dateObj || isNaN(dateObj.getTime())) return "00:00:00";\n            const options = { hour: \'2-digit\', minute: \'2-digit\', second: \'2-digit\', hour12: false, hourCycle: \'h23\' };\n            if (currentTz && currentTz !== \'auto\') options.timeZone = currentTz;\n\n            const formatter = new Intl.DateTimeFormat(\'en-GB\', options);\n            const parts = formatter.formatToParts(dateObj);\n            let h = \'00\', m = \'00\', s = \'00\';\n            for (const part of parts) {\n                if (part.type === \'hour\') h = part.value;\n                if (part.type === \'minute\') m = part.value;\n                if (part.type === \'second\') s = part.value;\n            }\n            return `${h}:${m}:${s}`;\n        }\n\n        function parseInputTime(timeStr) {\n            if (!timeStr) return new Date();\n            let h, m;\n            if (timeStr.includes(\':\')) {\n                const parts = timeStr.split(\':\');\n                h = parseInt(parts[0], 10);\n                m = parseInt(parts[1], 10);\n            } else if (timeStr.length === 3) {\n                h = parseInt(timeStr.substring(0, 1), 10);\n                m = parseInt(timeStr.substring(1, 3), 10);\n            } else if (timeStr.length === 4) {\n                h = parseInt(timeStr.substring(0, 2), 10);\n                m = parseInt(timeStr.substring(2, 4), 10);\n            } else {\n                return null;\n            }\n\n            if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;\n\n            const now = new Date();\n            let d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);\n            \n            if (d.getTime() > now.getTime() + 60000) {\n                d.setDate(d.getDate() - 1);\n            }\n            return d;\n        }\n\n        function parseInputDate(dateStr) {\n            const raw = (dateStr || \'\').trim();\n            const now = new Date();\n            if (!raw) return { year: now.getFullYear(), month: now.getMonth()+1, day: now.getDate() };\n            const m = raw.match(/^(\\d{1,2})\\/?(\\d{1,2})\\/?(\\d{4})$/);\n            if (!m) return null;\n            const day = parseInt(m[1],10), month = parseInt(m[2],10), year = parseInt(m[3],10);\n            const test = new Date(year, month-1, day);\n            if (test.getFullYear() !== year || test.getMonth() !== month-1 || test.getDate() !== day) return null;\n            return { year, month, day };\n        }\n\n        document.getElementById(\'bossForm\').addEventListener(\'submit\', async (e) => {\n            e.preventDefault();\n            if (!await requireApprovedUser()) return;\n            const bossInput = document.getElementById(\'bossSelect\').value.trim();\n            const timeInput = document.getElementById(\'killTime\').value.trim();\n            const dateInput = document.getElementById(\'killDate\').value.trim();\n            const noticeMin = parseInt(document.getElementById(\'noticeMinutes\').value, 10) || 5;\n            const spTimeMin = parseInt(document.getElementById(\'spTime\').value, 10) || 0;\n            if (!bossInput) return;\n            const parsedDate = parseInputDate(dateInput);\n            if (!parsedDate) { alert(\'❌ วันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ DD/MM/YYYY หรือ DDMMYYYY เช่น 14/09/2026 หรือ 14092026\'); return; }\n            if (timeInput && !parseInputTime(timeInput)) { alert(TRANSLATIONS[currentLang].invalidTimeAlert); return; }\n\n            try {\n                const idToken = await auth.currentUser.getIdToken(true);\n                const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n                const response = await fetch(`${apiOrigin}/api/record-boss`, {\n                    method: \'POST\',\n                    headers: {\'Content-Type\':\'application/json\',\'Authorization\':`Bearer ${idToken}`},\n                    body: JSON.stringify({ bossName: bossInput, killTime: timeInput, killDate: dateInput, noticeMinutes: noticeMin, spTimeMinutes: spTimeMin, timeZone: getSelectedInputTimezone() })\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);\n                // V106: Explicitly clear every boss-record input after the server\n                // confirms the Firebase save. Do not rely only on form.reset(), because\n                // browser/autofill state can restore values in these text inputs.\n                const bossForm = document.getElementById(\'bossForm\');\n                if (bossForm) bossForm.reset();\n                const bossSelectEl = document.getElementById(\'bossSelect\');\n                const killDateEl = document.getElementById(\'killDate\');\n                const killTimeEl = document.getElementById(\'killTime\');\n                const spTimeEl = document.getElementById(\'spTime\');\n                const noticeMinutesEl = document.getElementById(\'noticeMinutes\');\n                if (bossSelectEl) { bossSelectEl.value = \'\'; bossSelectEl.defaultValue = \'\'; }\n                if (killDateEl) { killDateEl.value = \'\'; killDateEl.defaultValue = \'\'; }\n                if (killTimeEl) { killTimeEl.value = \'\'; killTimeEl.defaultValue = \'\'; }\n                if (spTimeEl) { spTimeEl.value = \'\'; spTimeEl.defaultValue = \'\'; }\n                if (noticeMinutesEl) { noticeMinutesEl.value = \'5\'; noticeMinutesEl.defaultValue = \'5\'; }\n                if (bossSelectEl) bossSelectEl.dispatchEvent(new Event(\'input\', {bubbles:true}));\n                if (killDateEl) killDateEl.dispatchEvent(new Event(\'input\', {bubbles:true}));\n                if (killTimeEl) killTimeEl.dispatchEvent(new Event(\'input\', {bubbles:true}));\n                if (spTimeEl) spTimeEl.dispatchEvent(new Event(\'input\', {bubbles:true}));\n                if (noticeMinutesEl) noticeMinutesEl.dispatchEvent(new Event(\'input\', {bubbles:true}));\n                if (result.bossName) {\n                    activeBosses[result.bossName] = {\n                        spawnTimeMs: Number(result.spawnTimeMs), killTimeMs: Number(result.killTimeMs),\n                        killDate: result.killDate || `${parsedDate.year}-${String(parsedDate.month).padStart(2,\'0\')}-${String(parsedDate.day).padStart(2,\'0\')}`,\n                        noticeMinutes: noticeMin,\n                        browserNoticeSent: browserBossNotificationAlreadySent(result.bossName, \'notice\', Number(result.spawnTimeMs)),\n                        browserSpawnSent: browserBossNotificationAlreadySent(result.bossName, \'spawn\', Number(result.spawnTimeMs)),\n                        recordedBy: result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || \'ไม่ระบุ\',\n                        recordedByDisplayName: result.recordedByDisplayName || result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || \'ไม่ระบุ\',\n                        recordedByUserId: result.recordedByUserId || auth.currentUser?.uid || \'\'\n                    };\n                    renderTable();\n                    scheduleBrowserBossNotificationTimers();\n                }\n                console.log(`✅ Dashboard boss recorded: ${result.bossName} | by ${result.recordedBy} | confirmation=${result.confirmationRequestId} | voice=${result.confirmationSuccess}`);\n                if (result.confirmationSuccess === false) alert(\'⚠️ บันทึกบอสสำเร็จ แต่ Bot ยังยืนยัน Voice ไม่สำเร็จ กรุณาตรวจห้อง /setvoice และ Render Log\');\n            } catch (err) {\n                console.error(\'Dashboard boss record failed:\', err);\n                alert(`❌ บันทึกเวลาบอสไม่สำเร็จ\\n${err.message || err}`);\n            }\n        });\n\n        async function deleteBoss(bossName) {\n            if (!await requireApprovedUser()) return;\n            if (!bossName) throw new Error(\'ไม่พบชื่อบอสที่ต้องการลบ\');\n            const idToken = await auth.currentUser.getIdToken(true);\n            const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n            const response = await fetch(`${apiOrigin}/api/delete-boss`, {\n                method: \'POST\',\n                headers: {\'Content-Type\':\'application/json\',\'Authorization\':`Bearer ${idToken}`},\n                body: JSON.stringify({ bossName })\n            });\n            const result = await response.json().catch(() => ({}));\n            if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);\n            const resolvedName = result.bossName || bossName;\n            delete activeBosses[resolvedName];\n            delete activeBosses[bossName];\n            renderTable();\n            scheduleBrowserBossNotificationTimers();\n            console.log(`✅ Dashboard boss deleted: ${resolvedName} | deletedBy=${result.deletedBy || \'unknown\'}`);\n        }\n\n        document.getElementById(\'clearAllBtn\').addEventListener(\'click\', async () => {\n            if (!await requireAdmin()) return;\n            if (!confirm(TRANSLATIONS[currentLang].confirmClear)) return;\n            try {\n                const idToken = await auth.currentUser.getIdToken(true);\n                const apiOrigin = window.SKYNET_API_ORIGIN || \'https://bosstimer-ry18.onrender.com\';\n                const response = await fetch(`${apiOrigin}/api/delete-all-bosses`, {\n                    method: \'POST\',\n                    headers: {\'Content-Type\':\'application/json\',\'Authorization\':`Bearer ${idToken}`}\n                });\n                const result = await response.json().catch(() => ({}));\n                if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);\n                activeBosses = {};\n                renderTable();\n                console.log(`✅ Dashboard all bosses deleted | count=${result.deletedCount || 0} | deletedBy=${result.deletedBy || \'unknown\'}`);\n            } catch (err) {\n                console.error(\'[SKYNET] Delete all bosses failed:\', err);\n                alert(\'ลบบอสทั้งหมดไม่สำเร็จ: \' + (err && err.message ? err.message : err));\n            }\n        });\n\n        function formatDisplayDate(value, ms) {\n            const raw = String(value || \'\').trim();\n            const m = raw.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/);\n            if (m) return `${m[1].padStart(2, \'0\')}/${m[2].padStart(2, \'0\')}/${m[3]}`;\n            const tz = currentTz === \'auto\' ? Intl.DateTimeFormat().resolvedOptions().timeZone : currentTz;\n            try {\n                const parts = new Intl.DateTimeFormat(\'en-GB\', { timeZone: tz, day: \'2-digit\', month: \'2-digit\', year: \'numeric\', calendar: \'gregory\' }).formatToParts(new Date(ms));\n                const out = {};\n                parts.forEach(p => { if (p.type !== \'literal\') out[p.type] = p.value; });\n                if (out.day && out.month && out.year) return `${out.day}/${out.month}/${out.year}`;\n            } catch (_) {}\n            const d = new Date(ms);\n            return `${String(d.getDate()).padStart(2, \'0\')}/${String(d.getMonth() + 1).padStart(2, \'0\')}/${d.getFullYear()}`;\n        }\n\n        function renderTable() {\n            const tbody = document.getElementById(\'bossTableBody\');\n            tbody.innerHTML = \'\';\n            const langData = TRANSLATIONS[currentLang];\n            const sortedBosses = Object.keys(activeBosses).sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);\n\n            if (sortedBosses.length === 0) {\n                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;\n                return;\n            }\n\n            sortedBosses.forEach(bossName => {\n                const data = activeBosses[bossName];\n                const tr = document.createElement(\'tr\');\n                const killTimeStr = format24h(new Date(data.killTimeMs));\n                const spawnTimeStr = format24h(new Date(data.spawnTimeMs));\n                \n                tr.innerHTML = `\n                    <td class="fw-bold text-warning">${bossName}</td>\n                    <td>${formatDisplayDate(data.killDate, data.killTimeMs)}</td>\n                    <td>${killTimeStr}</td>\n                    <td class="text-info">${spawnTimeStr}</td>\n                    <td id="cd-${bossName}" class="fw-bold">--:--:--</td>\n                    <td>${data.noticeMinutes} ${langData.minUnit}</td>\n                    <td><span class="badge bg-secondary">${data.recordedBy}</span></td>\n                    <td class="boss-action-cell"></td>\n                `;\n                const deleteBtn = document.createElement(\'button\');\n                deleteBtn.type = \'button\';\n                deleteBtn.className = \'btn btn-sm btn-danger\';\n                deleteBtn.textContent = langData.btnDelete;\n                deleteBtn.addEventListener(\'click\', () => {\n                    const confirmText = (langData.confirmDelete || \'Are you sure you want to delete boss {boss}?\').replace(\'{boss}\', bossName);\n                    if (!window.confirm(confirmText)) return;\n                    window.deleteBoss(bossName);\n                });\n                tr.querySelector(\'.boss-action-cell\').appendChild(deleteBtn);\n                tbody.appendChild(tr);\n            });\n            updateCountdowns();\n        }\n\n        function updateCountdowns() {\n            const nowMs = Date.now();\n            document.getElementById(\'liveClockDisplay\').innerText = format24h(new Date(nowMs));\n\n            Object.keys(activeBosses).forEach(bossName => {\n                const data = activeBosses[bossName];\n                const spawnMs = Number(data.spawnTimeMs || 0);\n                const diffMs = spawnMs - nowMs;\n                const cdCell = document.getElementById(`cd-${bossName}`);\n                if (!cdCell || !Number.isFinite(spawnMs) || spawnMs <= 0) return;\n\n                if (diffMs <= 0) {\n                    cdCell.innerHTML = `<span class="text-success">${TRANSLATIONS[currentLang].spawned}</span>`;\n                    if (!data.browserSpawnSent && !browserBossNotificationAlreadySent(bossName, \'spawn\', spawnMs)) {\n                        // Mark locally BEFORE scheduling the notification so a Firebase refresh or\n                        // visibility wake-up cannot trigger the same browser alert twice.\n                        data.browserSpawnSent = true;\n                        markBrowserBossNotificationSent(bossName, \'spawn\', spawnMs);\n                        playAlertSound(\'spawn\');\n                        const title = (TRANSLATIONS[currentLang].spawnNotifyTitle || "⚔️ {boss} Spawned!").replace(\'{boss}\', bossName);\n                        const body = (TRANSLATIONS[currentLang].spawnNotifyBody || "Boss {boss} has spawned!").replace(\'{boss}\', bossName);\n                        void sendBrowserNotification(title, body);\n                    }\n                } else {\n                    const totalSec = Math.floor(diffMs / 1000);\n                    const h = Math.floor(totalSec / 3600);\n                    const m = Math.floor((totalSec % 3600) / 60);\n                    const s = totalSec % 60;\n                    cdCell.innerText = `${h.toString().padStart(2, \'0\')}:${m.toString().padStart(2, \'0\')}:${s.toString().padStart(2, \'0\')}`;\n\n                    const noticeMs = Math.max(1, Number(data.noticeMinutes || 5)) * 60 * 1000;\n                    // Do not use a 5-second narrow window. This catches up immediately when the\n                    // tab wakes from background throttling and avoids missing the alert boundary.\n                    if (diffMs <= noticeMs && !data.browserNoticeSent && !browserBossNotificationAlreadySent(bossName, \'notice\', spawnMs)) {\n                        data.browserNoticeSent = true;\n                        markBrowserBossNotificationSent(bossName, \'notice\', spawnMs);\n                        playAlertSound(\'notice\');\n                        const title = (TRANSLATIONS[currentLang].noticeNotifyTitle || "⏳ {boss} Spawning Soon!").replace(\'{boss}\', bossName);\n                        const body = (TRANSLATIONS[currentLang].noticeNotifyBody || "Boss {boss} will spawn in {min} mins").replace(\'{boss}\', bossName).replace(\'{min}\', data.noticeMinutes);\n                        void sendBrowserNotification(title, body);\n                    }\n                }\n            });\n        }\n\n        const WEEKLY_GUILD_SIEGE_ROWS = [\n            { weekday: 3, hour: 12, minute: 30, dayKey: \'dayWednesday\' },\n            { weekday: 0, hour: 12, minute: 30, dayKey: \'daySunday\' }\n        ];\n\n        function getBangkokDateParts(date) {\n            const parts = new Intl.DateTimeFormat(\'en-CA\', {\n                timeZone: \'Asia/Bangkok\',\n                year: \'numeric\', month: \'2-digit\', day: \'2-digit\',\n                hour: \'2-digit\', minute: \'2-digit\', second: \'2-digit\', hour12: false\n            }).formatToParts(date).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});\n            return {\n                year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),\n                hour: Number(parts.hour), minute: Number(parts.minute), second: Number(parts.second)\n            };\n        }\n\n        function bangkokOccurrenceFromLocalParts(year, month, day, hour, minute) {\n            return new Date(Date.UTC(year, month - 1, day, hour - 7, minute, 0, 0));\n        }\n\n        function getNextWeeklyOccurrence(weekdaySundayBased, hour, minute, now = new Date()) {\n            const bkk = getBangkokDateParts(now);\n            const currentDateUtc = new Date(Date.UTC(bkk.year, bkk.month - 1, bkk.day));\n            const currentWeekday = currentDateUtc.getUTCDay();\n            let delta = (weekdaySundayBased - currentWeekday + 7) % 7;\n            let candidate = new Date(currentDateUtc.getTime() + delta * 86400000);\n            let occurrence = bangkokOccurrenceFromLocalParts(candidate.getUTCFullYear(), candidate.getUTCMonth() + 1, candidate.getUTCDate(), hour, minute);\n            if (occurrence.getTime() <= now.getTime()) {\n                candidate = new Date(candidate.getTime() + 7 * 86400000);\n                occurrence = bangkokOccurrenceFromLocalParts(candidate.getUTCFullYear(), candidate.getUTCMonth() + 1, candidate.getUTCDate(), hour, minute);\n            }\n            return occurrence;\n        }\n\n        function formatWeeklyDateTime(date) {\n            let tz = currentTz || DASHBOARD_DEFAULT_TZ;\n            if (tz === \'auto\') {\n                try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || DASHBOARD_DEFAULT_TZ; } catch (_) { tz = DASHBOARD_DEFAULT_TZ; }\n            }\n            try {\n                return new Intl.DateTimeFormat(currentLang === \'th\' ? \'th-TH\' : currentLang === \'ko\' ? \'ko-KR\' : \'en-US\', {\n                    timeZone: tz, year: \'numeric\', month: \'2-digit\', day: \'2-digit\',\n                    hour: \'2-digit\', minute: \'2-digit\', hour12: false\n                }).format(date);\n            } catch (_) {\n                return new Intl.DateTimeFormat(\'en-GB\', { timeZone: \'Asia/Bangkok\', dateStyle: \'short\', timeStyle: \'short\' }).format(date);\n            }\n        }\n\n        function formatWeeklyCountdown(diffMs) {\n            if (diffMs <= 0) return TRANSLATIONS[currentLang].weeklyNow;\n            let sec = Math.floor(diffMs / 1000);\n            const h = Math.floor(sec / 3600); sec %= 3600;\n            const m = Math.floor(sec / 60); const s = sec % 60;\n            const t = TRANSLATIONS[currentLang];\n            const parts = [];\n            if (h) parts.push(`${h}${t.weeklyHours}`);\n            if (h || m) parts.push(`${m}${t.weeklyMinutes}`);\n            parts.push(`${s}${t.weeklySeconds}`);\n            return parts.join(\' \');\n        }\n\n        let weeklyEventsRenderKey = \'\';\n\n        function updateWeeklyEvents() {\n            const body = document.getElementById(\'weeklyEventsBody\');\n            const badge = document.getElementById(\'weeklyEventsTimezoneBadge\');\n            if (!body) return;\n            const t = TRANSLATIONS[currentLang];\n            const now = new Date();\n            let shownTz = currentTz || DASHBOARD_DEFAULT_TZ;\n            if (shownTz === \'auto\') {\n                try { shownTz = Intl.DateTimeFormat().resolvedOptions().timeZone || DASHBOARD_DEFAULT_TZ; } catch (_) { shownTz = DASHBOARD_DEFAULT_TZ; }\n            }\n            if (badge) badge.textContent = shownTz;\n\n            const renderKey = `${currentLang}|${shownTz}|${WEEKLY_GUILD_SIEGE_ROWS.length}`;\n            if (weeklyEventsRenderKey !== renderKey || body.children.length !== WEEKLY_GUILD_SIEGE_ROWS.length) {\n                body.innerHTML = \'\';\n                WEEKLY_GUILD_SIEGE_ROWS.forEach((row, index) => {\n                    const tr = document.createElement(\'tr\');\n                    tr.innerHTML = `\n                        <td class="fw-bold text-primary">${escapeHtml(t.guildSiegeName)}</td>\n                        <td>${escapeHtml(t[row.dayKey])}</td>\n                        <td class="text-info">12:30 (TH)</td>\n                        <td><span class="weekly-next-value" data-weekly-next-index="${index}"></span></td>\n                        <td class="fw-bold"><span class="weekly-countdown-value" data-weekly-countdown-index="${index}"></span></td>\n                    `;\n                    body.appendChild(tr);\n                });\n                weeklyEventsRenderKey = renderKey;\n            }\n\n            WEEKLY_GUILD_SIEGE_ROWS.forEach((row, index) => {\n                const next = getNextWeeklyOccurrence(row.weekday, row.hour, row.minute, now);\n                const nextEl = body.querySelector(`[data-weekly-next-index="${index}"]`);\n                const countdownEl = body.querySelector(`[data-weekly-countdown-index="${index}"]`);\n                if (nextEl) nextEl.textContent = formatWeeklyDateTime(next);\n                if (countdownEl) countdownEl.textContent = formatWeeklyCountdown(next.getTime() - now.getTime());\n            });\n        }\n\n        function initApp() {\n            const dataList = document.getElementById(\'bossOptions\');\n            const allNames = new Set();\n            Object.keys(BOSS_DATABASE).sort().forEach(boss => {\n                allNames.add(boss);\n                const option = document.createElement(\'option\');\n                option.value = boss;\n                dataList.appendChild(option);\n            });\n            db.ref(\'custom_bosses\').on(\'value\', (snap) => {\n                const custom = snap.val() || {};\n                Object.keys(custom).sort().forEach(boss => {\n                    if (allNames.has(boss)) return;\n                    allNames.add(boss);\n                    const option = document.createElement(\'option\');\n                    option.value = boss;\n                    dataList.appendChild(option);\n                });\n            });\n\n            document.getElementById(\'langSelect\').value = currentLang;\n            const authLangSelect = document.getElementById(\'authLangSelect\');\n            if (authLangSelect) authLangSelect.value = currentLang;\n            \n            document.getElementById(\'tzSelect\').value = currentTz;\n            cleanupOldBrowserBossNotificationKeys();\n            \n            applyLanguage();\n            toggleAttendancePanel(localStorage.getItem(\'attendance_panel_open\') === \'1\');\n            prepareIOSWebPushSupport().catch(() => {});\n            setupForegroundFCMNotificationHandler();\n            checkAuthSession();\n\n            setInterval(updateCountdowns, 250);\n            setInterval(updateWeeklyEvents, 1000);\n            document.addEventListener(\'visibilitychange\', () => {\n                if (!document.hidden) updateCountdowns();\n            });\n            updateCountdowns();\n            updateWeeklyEvents();\n            setInterval(() => {\n                if (currentUserData && currentUserData.role === \'admin\') loadAdminUsers().catch(err => console.warn(\'[SKYNET] admin interval:\', err));\n            }, 30000);\n        }\n\n        function toggleAdminPanel(forceOpen=null) {\n            const content=document.getElementById(\'adminPanelContent\');\n            const btn=document.getElementById(\'adminCollapseBtn\');\n            if(!content) return;\n            const shouldOpen = forceOpen === null ? content.style.display !== \'block\' : !!forceOpen;\n            content.style.display = shouldOpen ? \'block\' : \'none\';\n            if(btn) btn.innerText = shouldOpen ? \'▲ ปิด\' : \'▼ เปิด\';\n            localStorage.setItem(\'admin_panel_open\', shouldOpen ? \'1\' : \'0\');\n            if(shouldOpen) loadAdminUsers().catch(()=>{});\n        }\n\n        // V8 FIX: HTML uses inline onclick handlers, while the dashboard is wrapped in an IIFE.\n        // Publish the UI functions explicitly so every button remains callable.\n        Object.assign(window, {\n            openBotSettingsModal,\n            scrollToAdminPanel,\n            openChangeCodeModal,\n            logout,\n            loadAdminUsers,\n            startAdminRealtimeListeners,\n            setUserStatus,\n            changeLanguage,\n            changeTimezone,\n            toggleNotifications,\n            deleteBoss,\n            requireApprovedUser,\n            requireAdmin,\n            toggleAdminPanel,\n            toggleAttendancePanel,\n            toggleAttendanceHistoryPanel,\n            toggleAttendanceMemberMonthlyPanel,\n            toggleAttendanceIndividualPanel,\n            saveDiscordUserNotifySettings,\n            applyDiscordUserNotifySettingsToUI,\n            saveAdminDiscordUserSettings\n        });\n\n        // Keep delete failures visible to the user.\n        window.deleteBoss = async function (bossName) {\n            try {\n                await deleteBoss(bossName);\n            } catch (err) {\n                console.error(\'[SKYNET] Delete boss failed:\', err);\n                alert(\'ลบบอสไม่สำเร็จ: \' + (err && err.message ? err.message : err));\n            }\n        };\n\n        window.addEventListener(\'beforeunload\', () => {\n            const sessionId = localStorage.getItem(\'logged_session_id\');\n            if (sessionId) {\n                sessionsRef.child(sessionId).update({\n                    lastSeenAt: new Date().toISOString(),\n                    active: false,\n                    logoutAt: new Date().toISOString()\n                });\n            }\n        });\n\n        window.addEventListener(\'DOMContentLoaded\', initApp);\n        })();\n    </script>\n</body>\n</html>'
+@app.route('/api/firebase-config.js')
+def firebase_config_js():
+    """Expose only the Firebase Web SDK config to the browser.
+    The config is read from FIREBASE_WEB_CONFIG_JSON; this is public client config,
+    not the Firebase Admin service-account secret.
+    """
+    raw = os.environ.get('FIREBASE_WEB_CONFIG_JSON', '').strip()
+    try:
+        cfg = json.loads(raw) if raw else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:
+        cfg = {}
+    cfg.setdefault('projectId', 'skynet-3ad44')
+    cfg.setdefault('authDomain', 'skynet-3ad44.firebaseapp.com')
+    cfg.setdefault('databaseURL', 'https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app')
+    payload = json.dumps(cfg, ensure_ascii=False).replace('</', '<\\/')
+    response = Response(f'window.SKYNET_FIREBASE_CONFIG = {payload};', mimetype='application/javascript')
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+
+@app.route('/api/firebase-config.json')
+def firebase_config_json():
+    """Expose the public Firebase Web SDK config as JSON for the FCM service worker.
+    This never exposes the Firebase Admin service-account secret.
+    """
+    raw = os.environ.get('FIREBASE_WEB_CONFIG_JSON', '').strip()
+    try:
+        cfg = json.loads(raw) if raw else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:
+        cfg = {}
+    cfg.setdefault('projectId', 'skynet-3ad44')
+    cfg.setdefault('authDomain', 'skynet-3ad44.firebaseapp.com')
+    cfg.setdefault('databaseURL', 'https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app')
+    response = jsonify(cfg)
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+
+_attendance_snapshot_last_log_summary = None
+
+# V88: event-driven Attendance cache. Firebase is observed once on the server;
+# Dashboard clients receive an update only when raid_attendance changes.
+_attendance_cache_lock = threading.Lock()
+_attendance_cache_payload = None
+_attendance_cache_version = 0
+_attendance_stream_clients = set()
+_attendance_stream_clients_lock = threading.Lock()
+
+ATTENDANCE_DISPLAY_ROLES = ("Eternal", "Meaw", "Anti")
+
+def _attendance_relevant_roles_from_member(member):
+    try:
+        role_names = []
+        for role in getattr(member, "roles", []) or []:
+            name = str(getattr(role, "name", "") or "").strip()
+            for allowed in ATTENDANCE_DISPLAY_ROLES:
+                if name.lower() == allowed.lower() and allowed not in role_names:
+                    role_names.append(allowed)
+        return role_names
+    except Exception:
+        return []
+
+def _attendance_relevant_roles(participant, guild_id=None, uid=None):
+    roles = participant.get("roles") if isinstance(participant, dict) else None
+    if isinstance(roles, (list, tuple)):
+        normalized = []
+        for value in roles:
+            text = str(value or "").strip()
+            for allowed in ATTENDANCE_DISPLAY_ROLES:
+                if text.lower() == allowed.lower() and allowed not in normalized:
+                    normalized.append(allowed)
+        if normalized:
+            return normalized
+    role = participant.get("role") if isinstance(participant, dict) else None
+    if role:
+        normalized = []
+        for value in str(role).split(","):
+            text = value.strip()
+            for allowed in ATTENDANCE_DISPLAY_ROLES:
+                if text.lower() == allowed.lower() and allowed not in normalized:
+                    normalized.append(allowed)
+        if normalized:
+            return normalized
+    try:
+        gid = int(guild_id) if guild_id is not None else None
+        user_id = int(uid) if uid is not None else None
+        if gid and user_id and "bot" in globals():
+            guild = bot.get_guild(gid)
+            member = guild.get_member(user_id) if guild else None
+            if member:
+                return _attendance_relevant_roles_from_member(member)
+    except Exception:
+        pass
+    return []
+
+
+def _build_attendance_payload(root, reports):
+    if not isinstance(root, dict):
+        root = {}
+    if not isinstance(reports, dict):
+        reports = {}
+    individual_members = {}
+    for guild_id, activities in root.items():
+        if not isinstance(activities, dict):
+            continue
+        for activity_id, activity in activities.items():
+            if not isinstance(activity, dict):
+                continue
+            participants = activity.get('participants') or {}
+            if not isinstance(participants, dict):
+                continue
+            attack_at = str(activity.get('attack_at') or activity.get('created_at') or '')
+            month_key = attack_at[:7] if len(attack_at) >= 7 and attack_at[4] == '-' and attack_at[7] == '-' else ''
+            for participant_key, participant in participants.items():
+                if not isinstance(participant, dict):
+                    continue
+                status = str(participant.get('status') or '').strip().lower()
+                if status != 'checked_in':
+                    continue
+                uid = str(participant.get('user_id') or participant_key or '').strip()
+                if not uid:
+                    continue
+                name = str(participant.get('display_name') or participant.get('username') or uid)
+                checked_at = str(participant.get('checked_in_at') or participant.get('checkedAt') or '')
+                roles = _attendance_relevant_roles(participant, guild_id, uid)
+                member = individual_members.setdefault(uid, {'uid': uid, 'name': name, 'roles': roles, 'entries': []})
+                if member.get('name') in ('', uid) and name:
+                    member['name'] = name
+                if roles:
+                    member['roles'] = sorted(set((member.get('roles') or []) + roles), key=lambda x: ATTENDANCE_DISPLAY_ROLES.index(x) if x in ATTENDANCE_DISPLAY_ROLES else 99)
+                member['entries'].append({
+                    'monthKey': month_key,
+                    'bossName': str(activity.get('boss_name') or '-'),
+                    'activityDate': str(activity.get('activity_date') or '-'),
+                    'attackTime': str(activity.get('attack_time') or '-'),
+                    'checkedAt': checked_at,
+                    'status': status,
+                    'activityId': str(activity_id),
+                    'guildId': str(guild_id),
+                    'roles': roles,
+                })
+    for member in individual_members.values():
+        member['entries'].sort(key=lambda e: str(e.get('checkedAt') or ''), reverse=True)
+    summary = {
+        'members': len(individual_members),
+        'entries': sum(len(m.get('entries', [])) for m in individual_members.values()),
+        'activities': sum(1 for guild_data in root.values() if isinstance(guild_data, dict) for _ in guild_data),
+    }
+    return {
+        'success': True,
+        'raid_attendance': root,
+        'monthly_reports': reports,
+        'individual_members': individual_members,
+        'server_time': datetime.now(TZ_THAI).isoformat(),
+        'attendance_version': 0,
+        'summary': summary,
+    }, summary
+
+
+def _publish_attendance_snapshot(root, reports, *, force=False):
+    global _attendance_cache_payload, _attendance_cache_version, _attendance_snapshot_last_log_summary
+    payload, summary = _build_attendance_payload(root, reports)
+    signature = json.dumps({
+        'raid_attendance': payload.get('raid_attendance', {}),
+        'monthly_reports': payload.get('monthly_reports', {}),
+    }, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    with _attendance_cache_lock:
+        previous_signature = getattr(_publish_attendance_snapshot, '_signature', None)
+        if not force and previous_signature == signature and _attendance_cache_payload is not None:
+            return False
+        _publish_attendance_snapshot._signature = signature
+        _attendance_cache_version += 1
+        payload['attendance_version'] = _attendance_cache_version
+        payload['server_time'] = datetime.now(TZ_THAI).isoformat()
+        _attendance_cache_payload = payload
+        changed = summary != _attendance_snapshot_last_log_summary
+        _attendance_snapshot_last_log_summary = summary
+    if changed or force:
+        print(
+            f"📊 Attendance snapshot changed | members={summary['members']} | entries={summary['entries']} | activities={summary['activities']} | version={payload['attendance_version']}",
+            flush=True,
+        )
+    with _attendance_stream_clients_lock:
+        clients = list(_attendance_stream_clients)
+    for client_queue in clients:
+        try:
+            client_queue.put_nowait(payload)
+        except Exception:
+            pass
+    return True
+
+
+def _get_attendance_cache():
+    with _attendance_cache_lock:
+        if _attendance_cache_payload is None:
+            return None
+        return json.loads(json.dumps(_attendance_cache_payload, ensure_ascii=False))
+
+
+def start_attendance_firebase_listener():
+    """One Firebase SSE listener for Attendance; rebuild only on actual Firebase events."""
+    def listener(event):
+        try:
+            root = db.reference('raid_attendance').get() or {}
+            reports = db.reference('monthly_reports').get() or {}
+            _publish_attendance_snapshot(root, reports)
+        except Exception as exc:
+            print(f"❌ Firebase Attendance Listener ผิดพลาด: {exc}", flush=True)
+    try:
+        root = db.reference('raid_attendance').get() or {}
+        reports = db.reference('monthly_reports').get() or {}
+        _publish_attendance_snapshot(root, reports, force=True)
+        db.reference('raid_attendance').listen(listener)
+        print("🟢 Firebase Attendance Listener พร้อมทำงานแบบ event-driven", flush=True)
+    except Exception as exc:
+        print(f"❌ ไม่สามารถเปิด Firebase Attendance Listener ได้: {exc}", flush=True)
+
+
+@app.route('/api/attendance-data', methods=['GET', 'OPTIONS'])
+def attendance_data_api():
+    """Return current cached Attendance snapshot; Firebase is not read per request."""
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        origin = request.headers.get('Origin', '')
+        allowed = {
+            'https://iahcatan.github.io',
+            'https://bosstimer-ry18.onrender.com',
+            'http://localhost:5000',
+        }
+        response.headers['Access-Control-Allow-Origin'] = origin if origin in allowed else 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    if request.method == 'OPTIONS':
+        response = _api_json({'success': True})
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
+    try:
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict) or profile.get('status') != 'approved':
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
+        cached = _get_attendance_cache()
+        if cached is None:
+            root = db.reference('raid_attendance').get() or {}
+            reports = db.reference('monthly_reports').get() or {}
+            _publish_attendance_snapshot(root, reports, force=True)
+            cached = _get_attendance_cache()
+        return _api_json(cached or {'success': True, 'raid_attendance': {}, 'monthly_reports': {}, 'individual_members': {}, 'attendance_version': 0})
+    except Exception as exc:
+        print(f"❌ /api/attendance-data failed: {exc}", flush=True)
+        traceback.print_exc()
+        return _api_json({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/attendance-stream', methods=['GET', 'OPTIONS'])
+def attendance_stream_api():
+    """Compatibility endpoint: return one Attendance snapshot and close immediately.
+
+    The previous generator kept a Waitress worker occupied for the lifetime of an SSE
+    connection. On the single-instance Render service that could exhaust workers and
+    grow waitress.queue depth. The Dashboard now uses short authenticated snapshot
+    polling, while this route remains available for older clients without holding a
+    worker open.
+    """
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        origin = request.headers.get('Origin', '')
+        allowed = {'https://iahcatan.github.io', 'https://bosstimer-ry18.onrender.com', 'http://localhost:5000'}
+        response.headers['Access-Control-Allow-Origin'] = origin if origin in allowed else 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    if request.method == 'OPTIONS':
+        response = _api_json({'success': True})
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
+    try:
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict) or profile.get('status') != 'approved':
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
+        cached = _get_attendance_cache()
+        if cached is None:
+            root = db.reference('raid_attendance').get() or {}
+            reports = db.reference('monthly_reports').get() or {}
+            _publish_attendance_snapshot(root, reports, force=True)
+            cached = _get_attendance_cache()
+        response = _api_json(cached or {'success': True, 'raid_attendance': {}, 'monthly_reports': {}, 'individual_members': {}, 'attendance_version': 0})
+        return response
+    except Exception as exc:
+        print(f"❌ /api/attendance-stream failed: {exc}", flush=True)
+        traceback.print_exc()
+        return _api_json({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/delete-boss', methods=['POST', 'OPTIONS'])
+def delete_boss_api():
+    """Delete one Boss Timer record from Dashboard using Firebase Admin SDK."""
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        response.headers['Access-Control-Allow-Origin'] = 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Type'
+        return response
+    if request.method == 'OPTIONS':
+        response = _api_json({'success': True})
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
+    try:
+        payload = request.get_json(silent=True) or {}
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict) or profile.get('status') != 'approved':
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
+        delete_actor_name = str(
+            profile.get('username')
+            or profile.get('displayName')
+            or profile.get('display_name')
+            or decoded.get('name')
+            or decoded.get('email')
+            or uid
+        ).strip()
+        if not delete_actor_name or delete_actor_name.lower() in {'unknown', 'unknow', 'undefined', 'null'}:
+            delete_actor_name = str(decoded.get('email') or uid).strip() or uid
+        boss_name = str(payload.get('bossName') or '').strip()
+        if not boss_name:
+            return _api_json({'success': False, 'error': 'Boss name is required'}), 400
+        # Do not depend on the in-memory boss_schedule cache here. A Firebase SSE listener can
+        # temporarily disconnect (for example SSL EOF) while the REST/Admin SDK remains usable.
+        # Read the authoritative root and resolve the exact Firebase key before deleting.
+        root = None
+        try:
+            root = db.reference('boss_schedule').get() or {}
+        except Exception as read_exc:
+            print(f"⚠️ DASHBOARD DELETE READ FAILED | boss={boss_name} | {read_exc}", flush=True)
+            raise
+        matched_key = None
+        if isinstance(root, dict):
+            for key in root.keys():
+                if str(key).casefold() == boss_name.casefold():
+                    matched_key = key
+                    break
+        if matched_key is None:
+            return _api_json({'success': False, 'error': f'ไม่พบบอส `{boss_name}` ใน boss_schedule'}), 404
+        target_key = matched_key
+        print(
+            f"🗑️ DASHBOARD DELETE REQUEST | boss={target_key} | uid={uid} | "
+            f"username={delete_actor_name}",
+            flush=True,
+        )
+        # Delete only the matched Firebase child. Never rebuild/replace the entire
+        # boss_schedule from the in-memory cache here: during Render startup/handover
+        # that cache can be empty or stale while Firebase already contains other timers.
+        # A root .set({}) from that partial cache would delete unrelated Boss records.
+        global is_updating_from_bot
+        is_updating_from_bot = True
+        try:
+            db.reference(f'boss_schedule/{target_key}').delete()
+            with schedule_lock:
+                boss_schedule.pop(target_key, None)
+        finally:
+            is_updating_from_bot = False
+        print(
+            f"✅ DASHBOARD DELETE COMPLETE | boss={target_key} | uid={uid} | "
+            f"username={delete_actor_name}",
+            flush=True,
+        )
+        return _api_json({'success': True, 'bossName': target_key, 'deletedBy': delete_actor_name, 'deletedByUserId': uid})
+    except Exception as exc:
+        print(f"❌ /api/delete-boss failed: {exc}", flush=True)
+        traceback.print_exc()
+        return _api_json({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/delete-all-bosses', methods=['POST', 'OPTIONS'])
+def delete_all_bosses_api():
+    """Delete all Boss Timer records from Dashboard while logging the authenticated actor."""
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        response.headers['Access-Control-Allow-Origin'] = 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Type'
+        return response
+    if request.method == 'OPTIONS':
+        response = _api_json({'success': True})
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
+    try:
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict) or profile.get('status') != 'approved':
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
+        if str(profile.get('role') or '').strip().lower() != 'admin':
+            print(
+                f"⛔ DASHBOARD DELETE ALL DENIED | uid={uid} | role={profile.get('role')!r}",
+                flush=True,
+            )
+            return _api_json({'success': False, 'error': 'Admin permission required'}), 403
+        delete_actor_name = str(
+            profile.get('username')
+            or profile.get('displayName')
+            or profile.get('display_name')
+            or decoded.get('name')
+            or decoded.get('email')
+            or uid
+        ).strip()
+        if not delete_actor_name or delete_actor_name.lower() in {'unknown', 'unknow', 'undefined', 'null'}:
+            delete_actor_name = str(decoded.get('email') or uid).strip() or uid
+
+        try:
+            root = db.reference('boss_schedule').get() or {}
+            deleted_count = len(root) if isinstance(root, dict) else 0
+        except Exception:
+            deleted_count = 0
+
+        print(
+            f"🗑️ DASHBOARD DELETE ALL REQUEST | count={deleted_count} | uid={uid} | "
+            f"username={delete_actor_name}",
+            flush=True,
+        )
+        global is_updating_from_bot
+        is_updating_from_bot = True
+        try:
+            db.reference('boss_schedule').delete()
+            with schedule_lock:
+                boss_schedule.clear()
+        finally:
+            is_updating_from_bot = False
+        print(
+            f"✅ DASHBOARD DELETE ALL COMPLETE | count={deleted_count} | uid={uid} | "
+            f"username={delete_actor_name}",
+            flush=True,
+        )
+        return _api_json({
+            'success': True,
+            'deletedCount': deleted_count,
+            'deletedBy': delete_actor_name,
+            'deletedByUserId': uid,
+        })
+    except Exception as exc:
+        print(f"❌ /api/delete-all-bosses failed: {exc}", flush=True)
+        traceback.print_exc()
+        return _api_json({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/record-boss', methods=['POST', 'OPTIONS'])
+def record_boss_api():
+    if request.method == 'OPTIONS':
+        response = jsonify({'success': True})
+        response.headers['Access-Control-Allow-Origin'] = 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
+    """Authenticated Dashboard boss recording endpoint.
+    Saves one canonical boss_schedule record using Firebase Admin SDK and triggers
+    the one-shot Voice confirmation from the same server process.
+    """
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        response.headers['Access-Control-Allow-Origin'] = 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Type'
+        return response
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict):
+            return _api_json({'success': False, 'error': 'User profile not found'}), 403
+        if profile.get('status') != 'approved':
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
+
+        boss_name = str(payload.get('bossName') or '').strip()
+        time_input = str(payload.get('killTime') or '').strip()
+        date_input = str(payload.get('killDate') or '').strip()
+        try:
+            notice_min = max(1, int(payload.get('noticeMinutes') or 5))
+        except (TypeError, ValueError):
+            notice_min = 5
+        try:
+            sp_time_min = max(0, int(payload.get('spTimeMinutes') or 0))
+        except (TypeError, ValueError):
+            sp_time_min = 0
+
+        if not boss_name:
+            return _api_json({'success': False, 'error': 'Boss name is required'}), 400
+
+        canonical_name = get_boss_canonical_name(boss_name)
+        # Dashboard uses BOSS_DATABASE for display, while the server uses the persisted
+        # BOSS_RESPAWN_TIMES/custom_bosses definition for the actual spawn calculation.
+        # Resolve custom definitions directly from Firebase when the startup cache is not
+        # ready yet, preserving exact respawnSeconds (including seconds such as 59:45).
+        custom_key, custom_cfg = _get_custom_boss_config_authoritative(canonical_name)
+        if custom_cfg is None and custom_key is None:
+            custom_key, custom_cfg = _get_custom_boss_config_authoritative(boss_name)
+        if custom_cfg is not None:
+            try:
+                custom_respawn_seconds = int(custom_cfg.get('respawnSeconds', 0) or 0)
+            except (TypeError, ValueError):
+                custom_respawn_seconds = 0
+            if custom_respawn_seconds <= 0:
+                return _api_json({
+                    'success': False,
+                    'error': f'Custom boss `{boss_name}` has no valid respawnSeconds',
+                }), 400
+            canonical_name = custom_key or canonical_name
+            respawn = timedelta(seconds=custom_respawn_seconds)
+            print(
+                f"🧭 Dashboard custom boss respawn resolved exactly | boss={canonical_name} | "
+                f"respawnSeconds={custom_respawn_seconds} | respawn={respawn}",
+                flush=True,
+            )
+        else:
+            respawn = get_boss_respawn_time(canonical_name)
+        requested_tz_name, dashboard_tz = resolve_dashboard_timezone(payload.get('timeZone'))
+        now_dashboard = datetime.now(dashboard_tz)
+        try:
+            if date_input:
+                date_match = re.fullmatch(r'\s*(\d{1,2})/?(\d{1,2})/?(\d{4})\s*', date_input)
+                if not date_match:
+                    raise ValueError('Invalid date format')
+                day, month, year = map(int, date_match.groups())
+                if time_input:
+                    hh, mm, ss = parse_dashboard_time_components(time_input)
+                    boss_died_at = datetime(year, month, day, hh, mm, ss, tzinfo=dashboard_tz)
+                else:
+                    boss_died_at = datetime(year, month, day, now_dashboard.hour, now_dashboard.minute, now_dashboard.second, tzinfo=dashboard_tz)
+            else:
+                if time_input:
+                    hh, mm, ss = parse_dashboard_time_components(time_input)
+                    # V108: when the Dashboard date field is blank, interpret the
+                    # typed clock time as TODAY in the selected IANA timezone.
+                    # Do not guess yesterday from the clock difference. The user
+                    # can explicitly enter a date when recording a past-day kill.
+                    # This prevents cross-timezone entries such as 21:02 Melbourne
+                    # from being shifted to an unintended date.
+                    boss_died_at = now_dashboard.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+                else:
+                    boss_died_at = now_dashboard
+        except ValueError:
+            return _api_json({'success': False, 'error': 'Invalid date/time format. Use DD/MM/YYYY or DDMMYYYY and HH:MM'}), 400
+
+        print(
+            f"🕒 Dashboard time resolved | boss={canonical_name} | "
+            f"input={date_input or '-'} {time_input or '-'} | tz={requested_tz_name} | "
+            f"resolved={boss_died_at.isoformat()} | "
+            f"resolved_utc={boss_died_at.astimezone(timezone.utc).isoformat()} | "
+            f"epoch_ms={int(boss_died_at.timestamp() * 1000)}",
+            flush=True,
+        )
+
+        next_spawn = boss_died_at + respawn + timedelta(minutes=sp_time_min)
+        spawn_ms = int(next_spawn.timestamp() * 1000)
+        kill_ms = int(boss_died_at.timestamp() * 1000)
+        already_passed = spawn_ms <= int(time.time() * 1000)
+        username = str(profile.get('username') or decoded.get('email') or uid).strip()
+        if not username or username.lower() in {'unknown','unknow','undefined','null'}:
+            username = str(decoded.get('email') or uid).strip() or 'สมาชิก'
+        print(f"📥 DASHBOARD RECORD REQUEST | boss={boss_name} | uid={uid} | username={username}")
+        request_id = uuid.uuid4().hex
+        requested_at = datetime.now(TZ_THAI).isoformat()
+
+        record = {
+            'killTimeMs': kill_ms,
+            'killDate': boss_died_at.strftime('%Y-%m-%d'),
+            'spawnTimeMs': spawn_ms,
+            'spawn_time': next_spawn.isoformat(),
+            'noticeMinutes': notice_min,
+            'recordedBy': username,
+            'recordedByDisplayName': username,
+            'recordedByUserId': uid,
+            'confirmationRequestId': request_id,
+            'confirmationRequestedAt': requested_at,
+            'confirmationStatus': 'pending',
+            'confirmationSource': 'dashboard',
+            'inputTimeZone': requested_tz_name,
+            'notifiedNotice': already_passed,
+            'notifiedSpawn': already_passed,
+            'voiceNoticeSent': already_passed,
+            'voiceSpawnSent': already_passed,
+            'channelId': payload.get('channelId')
+        }
+        if record['channelId'] is None:
+            record.pop('channelId')
+
+        ref = db.reference(f'boss_schedule/{canonical_name}')
+        ref.set(record)
+        print(f"✅ Dashboard Firebase save complete | boss={canonical_name} | request={request_id} | user={username}")
+
+        # V163: Firebase is the source of truth. Queue the Discord reference log only
+        # after the save succeeds; never make the Dashboard save wait on Discord REST.
+        try:
+            boss_log_queued = _queue_dashboard_boss_log(
+                boss_name=canonical_name,
+                username=username,
+                firebase_uid=uid,
+                request_id=request_id,
+                kill_at=boss_died_at,
+                spawn_at=next_spawn,
+                notice_minutes=notice_min,
+                sp_time_minutes=sp_time_min,
+                timezone_name=requested_tz_name,
+            )
+            print(
+                f"📝 Dashboard Boss Time log result | boss={canonical_name} | "
+                f"queued_guilds={boss_log_queued} | channel={BOSS_LOG_CHANNEL_NAME} | request={request_id}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ Dashboard Boss Time log queue failed safely | boss={canonical_name} | "
+                f"request={request_id} | {exc!r}",
+                flush=True,
+            )
+
+        with schedule_lock:
+            boss_schedule[canonical_name] = {
+                'spawn_time': next_spawn,
+                'killTimeMs': kill_ms,
+                'channel_id': payload.get('channelId'),
+                'notified_advance': already_passed,
+                'notified_spawn': already_passed,
+                'voice_notice_sent': already_passed,
+                'voice_spawn_sent': already_passed,
+                'noticeMinutes': notice_min,
+                'recorded_by': username,
+                'recordedByDisplayName': username,
+                'recordedByUserId': uid,
+                'confirmationRequestId': request_id,
+                'confirmationRequestedAt': requested_at,
+                'confirmationStatus': 'pending',
+                'confirmationSource': 'dashboard',
+                'inputTimeZone': requested_tz_name
+            }
+
+        # V106: Dashboard recording remains a Firebase mutation only.
+        # The durable confirmationRequestId + confirmationStatus=pending is consumed by
+        # the existing Firebase listener / voice-join flow. Do not queue Discord Voice
+        # directly from this HTTP request, because that creates a second execution path
+        # and produces the source=dashboard | wait=True queue log.
+        confirmation_result = True
+        confirmation_pending = True
+        print(
+            f"⏳ Dashboard Voice confirmation delegated to Firebase listener | "
+            f"boss={canonical_name} | request={request_id}",
+            flush=True,
+        )
+
+        print(
+            f"📣 Dashboard voice confirmation result | boss={canonical_name} "
+            f"| success={bool(confirmation_result)} | pending={confirmation_pending}"
+        )
+
+        return _api_json({
+            'success': True,
+            'bossName': canonical_name,
+            'recordedBy': username,
+            'recordedByDisplayName': username,
+            'recordedByUserId': uid,
+            'killTimeMs': kill_ms,
+            'spawnTimeMs': spawn_ms,
+            'spawnTime': next_spawn.isoformat(),
+            'confirmationRequestId': request_id,
+            'confirmationSuccess': bool(confirmation_result),
+            'confirmationPending': confirmation_pending,
+            'confirmationStatus': 'pending' if confirmation_pending else ('sent' if confirmation_result else 'failed'),
+            'inputTimeZone': requested_tz_name,
+            'alreadyPassed': already_passed
+        })
+    except Exception as exc:
+        print(f"❌ /api/record-boss failed: {exc}")
+        traceback.print_exc()
+        return _api_json({'success': False, 'error': str(exc)}), 500
+
+@app.route('/api/record-boss/health', methods=['GET'])
+def record_boss_health():
+    return jsonify({
+        'success': True,
+        'bot_ready': bool(is_bot_ready),
+        'event_loop_ready': bool(bot_event_loop is not None),
+        'guild_count': len(bot.guilds),
+        'voice_config_servers': len(voice_config),
+        'voice_targets': sum(len(cfg.get('channels', {})) for cfg in voice_config.values() if isinstance(cfg, dict)),
+        'runtime_role': SKYNET_RUNTIME_ROLE,
+        'discord_transport': 'disabled' if SKYNET_RUNTIME_ROLE == 'web' else 'direct',
+    })
+
+@app.route('/api/toggle_tts', methods=['POST'])
+def toggle_tts_api():
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    data = request.get_json() or {}
+    lang = data.get('lang')
+    enabled = parse_bool(data.get('enabled'), True)
+    
+    if lang == 'th':
+        tts_th_enabled = enabled
+    elif lang == 'en':
+        tts_en_enabled = enabled
+    elif lang == 'ko':
+        tts_ko_enabled = enabled
+    else:
+        return jsonify({"success": False, "error": "Invalid language"}), 400
+
+    if SKYNET_RUNTIME_ROLE == "web":
+        try:
+            key = {"th": "tts_th_enabled", "en": "tts_en_enabled", "ko": "tts_ko_enabled"}[lang]
+            db.reference("bot_settings").update({key: bool(enabled)})
+        except Exception as exc:
+            print(f"⚠️ Web runtime TTS setting persist failed: {exc!r}", flush=True)
+            return jsonify({"success": False, "error": "Failed to persist TTS setting"}), 500
+    elif is_bot_ready and bot.loop and bot.loop.is_running():
+        asyncio.run_coroutine_threadsafe(save_bot_settings(), bot.loop)
+    return jsonify({"success": True, "lang": lang, "enabled": enabled})
+
+_web_server_started = False
+_web_server_lock = threading.Lock()
+
+def run_web():
+    global _web_server_started
+    port = int(os.environ.get("PORT", 5000))
+    with _web_server_lock:
+        if _web_server_started:
+            return
+        _web_server_started = True
+    print(f"🌐 Starting Flask/Waitress on 0.0.0.0:{port}")
+    try:
+        serve(app, host="0.0.0.0", port=port, threads=int(os.environ.get("WAITRESS_THREADS", "8")), expose_tracebacks=False)
+    except OSError as e:
+        # Render can briefly restart/rebind a worker. Do not crash the Discord bot thread.
+        if getattr(e, "errno", None) == 98:
+            print(f"⚠️ PORT {port} ถูกใช้งานอยู่แล้ว — ไม่เปิด Web Server ซ้ำ")
+        else:
+            print(f"❌ Web Server หยุดทำงาน: {e}")
+    except Exception as e:
+        print(f"❌ Web Server error: {e}")
+
+def keep_alive():
+    global _web_server_started
+    with _web_server_lock:
+        if _web_server_started:
+            return
+    t = threading.Thread(target=run_web, name="render-web", daemon=True)
+    t.start()
+
+# ==========================================
+# ⚙️ Config & Global Variables
+# ==========================================
+DATA_FILE = "boss_data.json"
+CUSTOM_BOSSES_FILE = "custom_bosses.json"
+LIVE_CONFIG_FILE = "live_config.json"
+VIP_CONFIG_FILE = "vip_config.json"
+VOICE_CONFIG_FILE = "voice_config.json"
+SETTINGS_FILE = "bot_settings.json"
+
+DEFAULT_TARGET_ROLE_IDS = []
+env_target_roles = os.environ.get("TARGET_ROLE_IDS", "")
+TARGET_ROLE_IDS = [int(r.strip()) for r in env_target_roles.split(",") if r.strip().isdigit()] if env_target_roles else DEFAULT_TARGET_ROLE_IDS
+DEFAULT_TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
+env_target_role_names = os.environ.get("TARGET_ROLE_NAMES", "")
+TARGET_ROLE_NAMES = [x.strip() for x in env_target_role_names.split(",") if x.strip()] if env_target_role_names else DEFAULT_TARGET_ROLE_NAMES
+
+DEFAULT_BF_ROLE_IDS = []
+env_bf_roles = os.environ.get("BF_ROLE_IDS", "")
+BF_ROLE_IDS = [int(r.strip()) for r in env_bf_roles.split(",") if r.strip().isdigit()] if env_bf_roles else DEFAULT_BF_ROLE_IDS
+
+LOG_CHANNEL_NAME = "boss-logs"
+# V163: Dedicated Boss Time reference channel. Existing audit channel remains unchanged.
+def _normalize_boss_log_channel_name(value) -> str:
+    """Normalize only the dedicated Boss Time Log channel name for lookup/display.
+
+    Removes an accidental leading Thai vowel/zero-width prefix seen in one deployment.
+    This function never renames the Discord channel and never performs a REST request.
+    """
+    cleaned = str(value or "").strip()
+    cleaned = cleaned.lstrip("\u0e34\u200b\u200c\u200d\ufeff")
+    return cleaned or "boss-log"
+
+BOSS_LOG_CHANNEL_NAME = _normalize_boss_log_channel_name(
+    os.environ.get("BOSS_LOG_CHANNEL_NAME", "boss-log")
+)
+# V164: Optional explicit channel ID removes dependence on a stale channel-name lookup.
+# Leave blank to keep the existing exact-name cached lookup. No Discord HTTP discovery is
+# performed automatically, so this setting does not create extra REST traffic.
+BOSS_LOG_CHANNEL_ID = 0
+try:
+    BOSS_LOG_CHANNEL_ID = int(os.environ.get("BOSS_LOG_CHANNEL_ID", "0") or 0)
+except (TypeError, ValueError):
+    BOSS_LOG_CHANNEL_ID = 0
+LIVE_CHANNEL_NAME = "boss-schedule"
+
+voice_empty_start = {}
+voice_locks = {}
+voice_connect_locks = {}
+disconnect_tasks = {}
+voice_config = {}
+
+# V183: Weekly Inotia War / Guild Siege voice-event configuration.
+# Isolated from boss_schedule so existing Boss/Firebase schedule calculations remain unchanged.
+INOTIAWAR_CONFIG_FILE = "inotiawar_config.json"
+INOTIAWAR_CONFIG_FIREBASE_PATH = "inotiawar_config"
+inotiawar_config = {}  # guild_id -> {guild_id, enabled, updated_by, updated_at}
+inotiawar_last_fired_keys = set()
+weekly_event_lock = asyncio.Lock()
+WEEKLY_EVENT_TIMEZONE = TZ_THAI
+
+INOTIAWAR_SCHEDULE = (
+    ("prepare", 10, 50),
+    ("start", 11, 0),
+    ("boss_mid_1", 11, 2),
+    ("boss_four_1", 11, 5),
+    ("boss_mid_2", 11, 8),
+    ("boss_four_2", 11, 10),
+    ("boss_final", 11, 15),
+)
+
+INOTIAWAR_MESSAGES = {
+    "prepare": {
+        "th": "Inotia War ถึงเวลาเตรียมตัวแล้วค่ะ",
+        "en": "It is time to get ready for Inotia War.",
+        "ko": "Inotia War 준비할 시간입니다.",
+    },
+    "start": {
+        "th": "Inotia War เริ่มแล้วค่ะ",
+        "en": "Inotia War has started.",
+        "ko": "Inotia War가 시작되었습니다.",
+    },
+    "boss_mid_1": {
+        "th": "บอสสุ่มเกิดที่จุด กลางแมพฝั่ง ซ้าย-ขวา ตอนนี้ค่ะ",
+        "en": "The boss has randomly spawned at the middle points, left and right, now.",
+        "ko": "보스가 지금 맵 중앙의 왼쪽과 오른쪽 지점에 무작위로 생성되었습니다.",
+    },
+    "boss_four_1": {
+        "th": "บอสสุ่มเกิดที่ 4 จุด บนขวา-บนซ้าย-ล่างขวา-ล่างซ้าย ตอนนี้ค่ะ",
+        "en": "The boss has randomly spawned at the four points: top-right, top-left, bottom-right, and bottom-left, now.",
+        "ko": "보스가 지금 오른쪽 위, 왼쪽 위, 오른쪽 아래, 왼쪽 아래 네 지점에 무작위로 생성되었습니다.",
+    },
+    "boss_mid_2": {
+        "th": "บอสสุ่มเกิดที่จุด กลางแมพฝั่ง ซ้าย-ขวา ตอนนี้ค่ะ",
+        "en": "The boss has randomly spawned at the middle points, left and right, now.",
+        "ko": "보스가 지금 맵 중앙의 왼쪽과 오른쪽 지점에 무작위로 생성되었습니다.",
+    },
+    "boss_four_2": {
+        "th": "บอสสุ่มเกิดที่ 4 จุด  บนขวา-บนซ้าย-ล่างขวา-ล่างซ้าย ตอนนี้ค่ะ",
+        "en": "The boss has randomly spawned at the four points: top-right, top-left, bottom-right, and bottom-left, now.",
+        "ko": "보스가 지금 오른쪽 위, 왼쪽 위, 오른쪽 아래, 왼쪽 아래 네 지점에 무작위로 생성되었습니다.",
+    },
+    "boss_final": {
+        "th": "บอสเกิดที่ จุดกลางแมพ เตรียมตัวตีบอสค่ะ",
+        "en": "The boss has spawned at the middle point. Get ready to fight the boss.",
+        "ko": "보스가 맵 중앙 지점에 생성되었습니다. 보스 공격을 준비하세요.",
+    },
+}
+
+GUILD_SIEGE_MESSAGES = {
+    "prepare": {
+        "th": "guild siege ถึงเวลาเตรียมตัวแล้วค่ะ",
+        "en": "Guild Siege: it is time to get ready.",
+        "ko": "Guild Siege 준비할 시간입니다.",
+    },
+}
+
+# Python weekday: Monday=0 ... Wednesday=2, Sunday=6. Source schedule is Thailand time.
+GUILD_SIEGE_SCHEDULE = (
+    ("prepare", 2, 12, 20),
+    ("prepare", 6, 12, 20),
+)
+
+# V185: Weekly Guild Events public Discord + per-user DM queues use the same
+# notification role IDs/names, language settings, and central Discord REST guard
+# as Boss notifications. They do not create any Discord polling traffic.
+PENDING_WEEKLY_EVENT_REST_MAX = 100
+pending_weekly_event_rest_notifications = deque(maxlen=PENDING_WEEKLY_EVENT_REST_MAX)
+pending_weekly_event_rest_lock = threading.Lock()
+pending_weekly_event_rest_keys = set()
+
+PENDING_WEEKLY_EVENT_DM_MAX = 200
+pending_weekly_event_dm_notifications = deque(maxlen=PENDING_WEEKLY_EVENT_DM_MAX)
+pending_weekly_event_dm_lock = threading.Lock()
+pending_weekly_event_dm_keys = set()
+
+# Weekly Guild Events Attendance: one Guild Siege attendance window per Wednesday/Sunday.
+# The event is at 12:30, so the attendance window opens 30 minutes earlier at 12:00
+# and closes exactly at 13:00 using the existing exact-close mechanism.
+WEEKLY_GUILD_EVENT_ATTENDANCE_OPEN_HOUR = 12
+WEEKLY_GUILD_EVENT_ATTENDANCE_OPEN_MINUTE = 0
+WEEKLY_GUILD_EVENT_ATTENDANCE_CLOSE_HOUR = 13
+WEEKLY_GUILD_EVENT_ATTENDANCE_CLOSE_MINUTE = 0
+
+# V71/V72: Persistent Discord text-notification target channels.
+# Shape: {guild_id: {channel_id: {guild_id, channel_id, channel_name, enabled, ...}}}
+notification_channels = {}
+
+attendance_config = {}  # guild_id -> {summary_channel_id, ...}
+
+# Bosses that must NOT create automatic Attendance activities.
+# Comparison is case-insensitive and ignores surrounding whitespace.
+AUTO_ATTENDANCE_EXCLUDED_BOSSES = {
+    name.casefold() for name in (
+        "Elemental Queen",
+        "Tank",
+        "Swirl Flame",
+        "Maelstrom",
+        "Twister",
+        "Chief Magief",
+        "Apapa",
+        "Corrupt Forest Keeper",
+        "Recluse",
+        "Blackskull",
+        "Sleepy Kooii",
+        "Awaken Kooii",
+        "Eeheehee",
+        "Ooheeheek",
+        "Oohehe",
+        "Guardian Imp",
+        "Blackjuno",
+        "Blacksky",
+        "Red Fox",
+        "7tailfox",
+        "777Tailfox",
+        "Sunrise Flower",
+        "Magma Senior Thief",
+        "Bbinikjoe",
+        "Bigmouse",
+        "Poison Root Flower",
+        "Contaminated Queen Bee",
+        "Rotten Pudding",
+        "Swamp Flower Monster",
+        "Glucose",
+        "Overload",
+        "Shaaack",
+        "Suuuk",
+        "Sususuk",
+        "sandgrave",
+        "Elder Beholder",
+    )
+}
+
+def is_auto_attendance_excluded_boss(boss_name: str) -> bool:
+    return str(boss_name or "").strip().casefold() in AUTO_ATTENDANCE_EXCLUDED_BOSSES
+attendance_lifecycle_lock = asyncio.Lock()
+
+# V170: exact close scheduling for Attendance activities.
+# One in-memory task per (guild, activity) prevents the generic lifecycle scan or
+# Firebase listener from delaying a due close behind another activity.
+_attendance_exact_close_tasks = {}
+custom_bosses = {}
+last_voice_connect_attempt = {}
+last_channel_fetch_attempt = {}
+# Prevent overlapping boss notification passes (e.g. scheduled loop + manual /kill check).
+boss_notification_pass_lock = asyncio.Lock()
+
+# V58: minimal background text REST queue. Voice/TTS remains independent.
+PENDING_BOSS_REST_MAX = 100
+pending_boss_rest_notifications = deque(maxlen=PENDING_BOSS_REST_MAX)
+pending_boss_rest_lock = threading.Lock()
+pending_boss_rest_keys = set()
+
+# V174: keep an exact-boundary Boss text notification alive for a bounded grace period
+# after spawn_time. The V172 purge treated any post-spawn queue item as stale, which
+# could drop the message before the dedicated REST worker sent it.
+BOSS_REST_ADVANCE_LATE_GRACE_SECONDS = max(5.0, float(os.environ.get("BOSS_REST_ADVANCE_LATE_GRACE_SECONDS", "30.0")))
+BOSS_REST_SPAWN_LATE_GRACE_SECONDS = max(10.0, float(os.environ.get("BOSS_REST_SPAWN_LATE_GRACE_SECONDS", "30.0")))
+
+# =========================================================
+# 🛡️ V22: GLOBAL DISCORD REST GUARD
+# =========================================================
+# One central guard is used by Boss/BF/Library/Live Embed/Audit and command
+# follow-up REST calls.  The guard never retries a failed request immediately.
+# It records Discord Retry-After, serializes REST calls, spaces requests, and
+# temporarily suppresses non-essential REST calls while Discord is blocking us.
+# Voice/TTS is deliberately NOT routed through this guard.
+
+class DiscordRESTCooldown(Exception):
+    """Internal signal: a non-essential REST call was skipped during cooldown."""
+
+
+discord_rest_rate_limited_until = 0.0
+discord_rest_backoff_seconds = 60.0
+discord_rest_last_429_log = 0.0
+discord_rest_last_error_log = 0.0
+discord_rest_next_call_at = 0.0
+discord_rest_min_interval = max(0.0, float(os.environ.get("DISCORD_REST_MIN_INTERVAL", "0.20")))
+discord_rest_guard_lock = asyncio.Lock()
+
+# V159: conservative invalid-request circuit breaker. Discord documents 401/403/429
+# as invalid requests for the IP-based Cloudflare-ban counter (with shared-scope 429s
+# explicitly excluded). Keep a much lower local ceiling so a bug/permission mismatch
+# cannot accumulate thousands of invalid requests before Discord blocks the IP.
+DISCORD_INVALID_REQUEST_SOFT_LIMIT = max(10, int(os.environ.get("DISCORD_INVALID_REQUEST_SOFT_LIMIT", "25")))
+DISCORD_INVALID_REQUEST_WINDOW_SECONDS = max(60.0, float(os.environ.get("DISCORD_INVALID_REQUEST_WINDOW", "600")))
+DISCORD_INVALID_REQUEST_COOLDOWN_SECONDS = max(300.0, float(os.environ.get("DISCORD_INVALID_REQUEST_COOLDOWN", "900")))
+discord_invalid_request_events = deque(maxlen=2000)
+discord_invalid_request_cooldown_until = 0.0
+discord_invalid_request_last_log = 0.0
+
+# V58: separate non-essential background REST from the foreground command lane.
+# Background boss text notifications and audit logs are queued and rate-limited independently.
+# Voice/TTS never enters this lane.
+discord_background_rest_next_call_at = 0.0
+# V165: keep a separate, still-conservative fast lane for time-critical public Boss,
+# Boss-Time Log, and Auto Attendance messages. Non-critical background REST keeps the
+# V164 5-minute floor. This does NOT bypass Discord Retry-After / temporary restrictions.
+discord_background_rest_time_critical_min_interval = max(
+    2.0, float(os.environ.get("DISCORD_TIME_CRITICAL_REST_MIN_INTERVAL", "2.0"))
+)
+discord_background_rest_noncritical_next_call_at = 0.0
+# V175: keep conservative spacing for non-critical background REST, but isolate its
+# mutex from the time-critical notification lane. A non-critical request may sleep
+# until its 5-minute slot without holding the mutex needed by Boss/BF/Attendance.
+# Actual Discord HTTP remains serialized by discord_rest_guard_lock, and Discord
+# Retry-After remains authoritative when Discord returns HTTP 429.
+discord_background_rest_min_interval = max(300.0, float(os.environ.get("DISCORD_BACKGROUND_REST_MIN_INTERVAL", "300.0")))
+discord_background_rest_time_critical_call_lock = asyncio.Lock()
+discord_background_rest_noncritical_call_lock = asyncio.Lock()
+# V142: bounded in-process telemetry only; it never issues Discord requests.
+discord_background_rest_recent_calls = deque(maxlen=120)
+# V179: do not resume ordinary background Discord REST immediately after the
+# one-shot recovery confirmation. A 60s quiet window was insufficient in production:
+# the next background channel request arrived ~2m later and Discord returned a fresh
+# temporary API restriction. Keep 10 minutes of local quiet by default.
+discord_background_rest_recovery_grace_seconds = max(120.0, float(os.environ.get("DISCORD_BACKGROUND_REST_RECOVERY_GRACE", "600")))
+# V163: repeated long API restrictions were followed by another background 429 soon
+# after recovery. For a server-provided restriction of 15 minutes or longer, keep the
+# optional/background REST lane quiet for 60 minutes after the one-shot recovery probe.
+# Voice/TTS remains independent and continues normally.
+discord_background_rest_long_restriction_threshold = max(300.0, float(os.environ.get("DISCORD_BACKGROUND_REST_LONG_RESTRICTION_THRESHOLD", "900")))
+discord_background_rest_long_recovery_quiet_seconds = max(1800.0, float(os.environ.get("DISCORD_BACKGROUND_REST_LONG_RECOVERY_QUIET", "3600")))
+discord_background_rest_recovery_quiet_override_seconds = 0.0
+# V163: after a successful startup command sync, keep non-essential/background
+# Discord REST quiet for a longer probation window. This prevents the first
+# auto-attendance/boss/audit request after deploy from becoming a rate-limit
+# trigger when the process has just performed command synchronization.
+discord_background_rest_startup_probation_seconds = max(
+    300.0, float(os.environ.get("DISCORD_BACKGROUND_REST_STARTUP_PROBATION", "600"))
+)
+discord_background_rest_suppressed_until = 0.0
+discord_background_rest_quarantined = False
+# V160: keep the existing post-recovery background quiet across process/Gateway
+# restarts. This is a local safety gate only; it never sends Discord HTTP.
+discord_rest_post_recovery_quiet_until_wall = 0.0
+discord_rest_post_recovery_quiet_until_mono = 0.0
+# Hold all non-essential background Discord REST until the first successful
+# guild command sync after READY. This closes the startup race where on_ready
+# notification tasks can begin before start.py completes tree.sync().
+discord_background_rest_startup_hold = True
+
+discord_background_rest_context_prefixes = (
+    "boss-notify:",
+    "audit:",
+    "bf:",
+    "library-boss",
+    "attendance:",
+    "live:",
+)
+
+# 🔎 V51 diagnostics: distinguish Discord-provided timers from our own local
+# safety backoff. A local backoff is NOT presented as the real Discord block time.
+discord_block_started_at = 0.0
+discord_block_last_seen_at = 0.0
+discord_block_server_until = 0.0
+discord_block_server_retry_after = 0.0
+discord_block_scope = ""
+discord_block_global = False
+discord_block_kind = ""
+discord_block_source = ""
+# V177: retain the original 429 trigger metadata so a later 15-second diagnostic line
+# remains self-contained even when Render starts streaming logs after the actual 429 event.
+discord_block_trigger_context = ""
+discord_block_cf_ray = ""
+discord_block_via = ""
+discord_block_server_header = ""
+discord_block_content_type = ""
+discord_block_last_log_at = 0.0
+discord_block_temp_restriction = False
+discord_block_next_probe_mono = 0.0
+discord_block_local_retry_seconds = 60.0
+# V179: after Discord's supplied Retry-After expires, keep an additional no-HTTP
+# recovery margin before the next Gateway/REST request. The V178 log showed the
+# original persisted timer expiring and the very next Gateway startup still receiving
+# a new 429. This is local waiting only; it never probes Discord during the hold.
+discord_block_recovery_grace_seconds = max(300.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_GRACE", "900")))
+discord_block_recovery_until_mono = 0.0
+# V131: one-shot recovery probe epoch. This is only armed after the Discord server timer
+# and the configured recovery hold have both expired; it is never a periodic probe.
+discord_block_recovery_probe_started_at = 0.0
+# V180: Gateway startup may be the first real recovery request after the no-HTTP hold.
+discord_gateway_recovery_pending = False
+# V181: persist consecutive Discord temporary-API restrictions so a new Render
+# deployment cannot immediately repeat the same recovery request after a short
+# local grace window. This is a local no-HTTP backoff only and never bypasses
+# Discord Retry-After.
+discord_block_consecutive_429 = 0
+DISCORD_BLOCK_REPEAT_BACKOFF_CAP_SECONDS = max(3600.0, float(os.environ.get("DISCORD_BLOCK_REPEAT_BACKOFF_CAP", "43200")))
+
+# V53: Persist the REST restriction state across process/Gateway restarts.
+# Firebase is the durable source on Render; SQLite is kept as a local fallback
+# for same-container restarts. This state is only written on block/clear events,
+# never on the 15-second diagnostics heartbeat.
+DISCORD_REST_BLOCK_FIREBASE_PATH = "app_settings/discord_rest_block"
+discord_block_persist_lock = asyncio.Lock()
+discord_block_persist_task = None
+discord_block_persist_dirty = False
+
+discord_block_lock = threading.Lock()
+
+# V150: only the runtime that owns the existing Discord Gateway handover lease may
+# perform normal Discord REST. This closes Render zero-downtime overlap where an
+# old and new process could both reach the HTTP API even though only one Gateway
+# session was allowed. start.py flips this flag only after the Firebase lease is
+# acquired, and clears it before lease release. Voice/TTS and Firebase work are
+# unaffected because they do not pass through this REST guard.
+discord_rest_runtime_lease_owned = False
+
+# V178: after a temporary Discord API/IP restriction clears, do not make the first
+# real background message-create/edit call the next readiness test. The first use of
+# each cached message channel performs one background-guarded, read-only channel probe.
+# A failed/held probe is treated as a normal Discord REST safety stop and the real
+# message call is not sent.
+discord_background_recovery_channel_probe_required = False
+discord_background_recovery_channel_probe_done = set()
+discord_background_recovery_channel_probe_lock = asyncio.Lock()
+
+
+def _discord_rest_rate_limit_remaining() -> float:
+    return max(0.0, discord_rest_rate_limited_until - time.monotonic())
+
+
+def _extract_discord_rate_limit_metadata(exc: Exception) -> dict:
+    """Extract only evidence actually returned by Discord."""
+    retry_after = 0.0
+    reset_after = 0.0
+    scope = ""
+    is_global = False
+    message = ""
+    headers = {}
+    response = getattr(exc, "response", None)
+    try:
+        headers = getattr(response, "headers", None) or {}
+        raw_retry = headers.get("Retry-After") or headers.get("retry-after")
+        if raw_retry is not None:
+            retry_after = max(0.0, float(raw_retry))
+    except (TypeError, ValueError):
+        pass
+    try:
+        raw_reset = headers.get("X-RateLimit-Reset-After") or headers.get("x-ratelimit-reset-after")
+        if raw_reset is not None:
+            reset_after = max(0.0, float(raw_reset))
+    except (TypeError, ValueError):
+        pass
+    try:
+        scope = str(headers.get("X-RateLimit-Scope") or headers.get("x-ratelimit-scope") or "")
+        is_global = str(headers.get("X-RateLimit-Global") or headers.get("x-ratelimit-global") or "").lower() == "true"
+    except Exception:
+        pass
+    try:
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            if retry_after <= 0 and data.get("retry_after") is not None:
+                retry_after = max(0.0, float(data.get("retry_after") or 0))
+            if data.get("message") is not None:
+                message = str(data.get("message"))
+            if bool(data.get("global")):
+                is_global = True
+    except (TypeError, ValueError):
+        pass
+    if not message:
+        try:
+            message = str(exc)
+        except Exception:
+            message = ""
+    cf_ray = ""
+    via = ""
+    server = ""
+    date_header = ""
+    content_type = ""
+    try:
+        cf_ray = str(headers.get("CF-RAY") or headers.get("cf-ray") or "")
+        via = str(headers.get("Via") or headers.get("via") or "")
+        server = str(headers.get("Server") or headers.get("server") or "")
+        date_header = str(headers.get("Date") or headers.get("date") or "")
+        content_type = str(headers.get("Content-Type") or headers.get("content-type") or "")
+    except Exception:
+        pass
+    try:
+        body_preview = message[:1000]
+    except Exception:
+        body_preview = str(message)[:1000]
+    message_lower = str(message or "").lower()
+    cloudflare_1015 = (
+        "error 1015" in message_lower
+        or "temporarily restricted" in message_lower and "cloudflare" in message_lower
+        or "you are being rate limited" in message_lower and "cloudflare" in message_lower
+    )
+    return {
+        "retry_after": retry_after,
+        "reset_after": reset_after,
+        "scope": scope,
+        "global": is_global,
+        "message": message,
+        "cf_ray": cf_ray,
+        "via": via,
+        "server": server,
+        "date": date_header,
+        "content_type": content_type,
+        "body_preview": body_preview,
+        "cloudflare_1015": cloudflare_1015,
+    }
+
+
+def _extract_discord_retry_after(exc: Exception) -> float:
+    return float(_extract_discord_rate_limit_metadata(exc).get("retry_after") or 0.0)
+
+
+def _discord_invalid_request_remaining() -> float:
+    return max(0.0, discord_invalid_request_cooldown_until - time.monotonic())
+
+
+def _purge_discord_invalid_request_events(now_mono: float | None = None) -> None:
+    now_value = time.monotonic() if now_mono is None else float(now_mono)
+    cutoff = now_value - DISCORD_INVALID_REQUEST_WINDOW_SECONDS
+    while discord_invalid_request_events and discord_invalid_request_events[0][0] < cutoff:
+        discord_invalid_request_events.popleft()
+
+
+def _discord_invalid_request_count() -> int:
+    now_mono = time.monotonic()
+    _purge_discord_invalid_request_events(now_mono)
+    return len(discord_invalid_request_events)
+
+
+def _record_discord_invalid_request(exc: Exception, *, context: str) -> None:
+    """Count only invalid requests that Discord says can contribute to IP bans."""
+    global discord_invalid_request_cooldown_until, discord_invalid_request_last_log
+    status = getattr(exc, "status", None)
+    if status not in (401, 403, 429):
+        return
+    meta = _extract_discord_rate_limit_metadata(exc)
+    # Discord explicitly excludes shared-scope 429s from the invalid-request counter.
+    if status == 429 and str(meta.get("scope") or "").strip().lower() == "shared":
+        return
+    now_mono = time.monotonic()
+    _purge_discord_invalid_request_events(now_mono)
+    discord_invalid_request_events.append((now_mono, int(status), str(context)))
+    count = len(discord_invalid_request_events)
+    if count >= DISCORD_INVALID_REQUEST_SOFT_LIMIT:
+        discord_invalid_request_cooldown_until = max(
+            discord_invalid_request_cooldown_until,
+            now_mono + DISCORD_INVALID_REQUEST_COOLDOWN_SECONDS,
+        )
+        if now_mono - discord_invalid_request_last_log >= 15.0:
+            discord_invalid_request_last_log = now_mono
+            print(
+                "🛡️ Discord invalid-request emergency cooldown armed | "
+                f"count={count}/{DISCORD_INVALID_REQUEST_SOFT_LIMIT} | "
+                f"window={DISCORD_INVALID_REQUEST_WINDOW_SECONDS:.0f}s | "
+                f"hold={DISCORD_INVALID_REQUEST_COOLDOWN_SECONDS:.0f}s | "
+                f"last_status={status} | context={context} | "
+                "no normal REST will be sent until the local safety hold ends",
+                flush=True,
+            )
+
+
+def _log_invalid_request_cooldown_skip(context: str, remaining: float) -> None:
+    key = "invalid-request-emergency"
+    now_mono = time.monotonic()
+    last = float(discord_rest_last_skip_logs.get(key, 0.0))
+    if now_mono - last >= 60.0:
+        discord_rest_last_skip_logs[key] = now_mono
+        print(
+            f"⏭️ Discord REST skipped by invalid-request emergency circuit | "
+            f"context={context} | remaining={remaining:.1f}s | no HTTP sent",
+            flush=True,
+        )
+
+
+def _discord_block_state_snapshot() -> dict:
+    """Return a JSON-safe snapshot of the current Discord REST restriction state."""
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        started = float(discord_block_started_at or 0.0)
+        last_seen = float(discord_block_last_seen_at or 0.0)
+        server_until = float(discord_block_server_until or 0.0)
+        server_retry_after = float(discord_block_server_retry_after or 0.0)
+        scope = str(discord_block_scope or "")
+        is_global = bool(discord_block_global)
+        kind = str(discord_block_kind or "")
+        source = str(discord_block_source or "")
+        temp_restriction = bool(discord_block_temp_restriction)
+        next_probe_mono = float(discord_block_next_probe_mono or 0.0)
+        local_retry = float(discord_block_local_retry_seconds or 60.0)
+        consecutive_429 = int(discord_block_consecutive_429 or 0)
+
+    next_probe_remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
+    # If the 429 evidence already contains an authoritative server expiry but the
+    # local probe deadline has not been computed yet, persist a safe recovery point
+    # derived from that server expiry. This closes the tiny record-before-apply gap.
+    if next_probe_remaining <= 0 and temp_restriction and server_until > now_wall:
+        next_probe_remaining = max(0.0, (server_until - now_wall) + discord_block_recovery_grace_seconds)
+    elif next_probe_remaining <= 0 and temp_restriction and server_until <= 0:
+        # Interaction 429s may provide no usable expiry header. Persist the
+        # current local safety retry so a process restart still keeps the gate closed.
+        next_probe_remaining = max(60.0, local_retry)
+    # Persist wall-clock time, not monotonic time, because monotonic clocks reset
+    # when the Python process restarts.
+    next_probe_at = now_wall + next_probe_remaining if next_probe_remaining > 0 else 0.0
+    return {
+        "version": 1,
+        "updated_at": now_wall,
+        "started_at": started,
+        "last_seen_at": last_seen,
+        "server_until": server_until,
+        "server_retry_after": server_retry_after,
+        "next_probe_at": next_probe_at,
+        "scope": scope,
+        "global": is_global,
+        "kind": kind,
+        "source": source,
+        "trigger_context": str(discord_block_trigger_context or ""),
+        "cf_ray": str(discord_block_cf_ray or ""),
+        "via": str(discord_block_via or ""),
+        "server_header": str(discord_block_server_header or ""),
+        "content_type": str(discord_block_content_type or ""),
+        "temp_restriction": temp_restriction,
+        "local_retry_seconds": local_retry,
+        "consecutive_429": consecutive_429,
+        "post_recovery_quiet_until": float(discord_rest_post_recovery_quiet_until_wall or 0.0),
+        "updated_at": time.time(),
+    }
+
+
+def _schedule_persist_discord_block_state(reason: str):
+    """Persist the latest restriction snapshot without losing later state changes."""
+    global discord_block_persist_task, discord_block_persist_dirty
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if discord_block_persist_task and not discord_block_persist_task.done():
+        # A persist is already in flight. Mark it dirty so the final/latest state
+        # is written again after the current write completes.
+        discord_block_persist_dirty = True
+        return
+    discord_block_persist_dirty = False
+    discord_block_persist_task = loop.create_task(
+        _persist_discord_block_state_async(reason=reason),
+        name="discord-rest-block-persist",
+    )
+
+
+async def _persist_discord_block_state_async(*, reason: str):
+    """Persist the latest complete restriction state to SQLite + durable Firebase."""
+    global discord_block_persist_task, discord_block_persist_dirty
+
+    try:
+        while True:
+            # Snapshot only after all fields for the current event have been updated.
+            state = _discord_block_state_snapshot()
+            state_post_recovery_until = float(state.get("post_recovery_quiet_until") or 0.0)
+            if state.get("started_at", 0.0) <= 0 and state_post_recovery_until <= time.time():
+                return
+
+            async with discord_block_persist_lock:
+                # SQLite is the local fallback for process restarts.
+                try:
+                    set_db_value("discord_rest_block", state)
+                except Exception as exc:
+                    print(f"⚠️ Discord REST block SQLite persist failed: {exc!r}", flush=True)
+
+                # Firebase is the durable cross-restart/deploy copy.
+                firebase_saved = False
+                last_exc = None
+                for attempt in range(1, 4):
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).set,
+                                state,
+                            ),
+                            timeout=5.0,
+                        )
+                        firebase_saved = True
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 3:
+                            await asyncio.sleep(float(attempt))
+
+                if not firebase_saved:
+                    print(
+                        f"⚠️ Discord REST block Firebase persist failed after 3 attempts | "
+                        f"reason={reason}: {last_exc!r}",
+                        flush=True,
+                    )
+
+            # If a later 429/observation changed the state while we were writing,
+            # do one more write using the newest snapshot. This closes the V53
+            # race where the first queued write could capture pre-_apply state.
+            if discord_block_persist_dirty:
+                discord_block_persist_dirty = False
+                continue
+            return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ Discord REST block persistence failed | reason={reason}: {exc!r}", flush=True)
+    finally:
+        # Only clear the task pointer when no newer writer has replaced/marked it.
+        if discord_block_persist_task is asyncio.current_task():
+            discord_block_persist_task = None
+            if discord_block_persist_dirty:
+                discord_block_persist_dirty = False
+                try:
+                    loop = asyncio.get_running_loop()
+                    discord_block_persist_task = loop.create_task(
+                        _persist_discord_block_state_async(reason=f"followup:{reason}"),
+                        name="discord-rest-block-persist",
+                    )
+                except RuntimeError:
+                    discord_block_persist_task = None
+
+
+async def _clear_persisted_discord_block_state(*, reason: str):
+    """Remove active restriction state, but retain an active post-recovery background guard."""
+    with discord_block_lock:
+        # A new 429 may have happened after the success that scheduled this clear.
+        # Never let an older clear delete the newer persisted restriction.
+        if discord_block_started_at > 0:
+            return
+    state_snapshot = _discord_block_state_snapshot()
+    post_recovery_until = float(state_snapshot.get("post_recovery_quiet_until") or 0.0)
+    try:
+        async with discord_block_persist_lock:
+            if post_recovery_until > time.time():
+                try:
+                    set_db_value("discord_rest_block", state_snapshot)
+                except Exception as exc:
+                    print(f"⚠️ Discord REST post-recovery guard SQLite persist failed: {exc!r}", flush=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).set,
+                            state_snapshot,
+                        ),
+                        timeout=5.0,
+                    )
+                except Exception as exc:
+                    print(f"⚠️ Discord REST post-recovery guard Firebase persist failed | reason={reason}: {exc!r}", flush=True)
+                return
+            try:
+                set_db_value("discord_rest_block", None)
+            except Exception as exc:
+                print(f"⚠️ Discord REST block SQLite clear failed: {exc!r}", flush=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).delete,
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as exc:
+                print(f"⚠️ Discord REST block Firebase clear failed | reason={reason}: {exc!r}", flush=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ Discord REST block persistence clear failed | reason={reason}: {exc!r}", flush=True)
+
+
+async def flush_discord_block_persistence(timeout: float = 5.0):
+    """Allow an in-flight Discord REST restriction persist to finish before shutdown.
+
+    V158: a Render handover may terminate the old process shortly after a Discord
+    temporary restriction is observed. Complete the durable Firebase/SQLite write
+    when possible so the next runtime does not forget the restriction and immediately
+    issue a new REST request. This function performs no Discord HTTP request.
+    """
+    task = discord_block_persist_task
+    if not task or task.done():
+        return True
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=max(0.5, float(timeout)))
+        return True
+    except asyncio.TimeoutError:
+        print(
+            f"⚠️ Discord REST block persistence flush timed out safely | timeout={float(timeout):.1f}s",
+            flush=True,
+        )
+        return False
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ Discord REST block persistence flush failed safely: {exc!r}", flush=True)
+        return False
+
+
+async def restore_persisted_discord_block_state():
+    """Restore a still-active Discord REST restriction after a process restart."""
+    global discord_block_started_at, discord_block_last_seen_at
+    global discord_rest_rate_limited_until
+    global discord_block_server_until, discord_block_server_retry_after
+    global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_trigger_context, discord_block_cf_ray, discord_block_via
+    global discord_block_server_header, discord_block_content_type
+    global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_local_retry_seconds
+    global discord_block_consecutive_429
+    global discord_rest_post_recovery_quiet_until_wall, discord_rest_post_recovery_quiet_until_mono
+    global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    global discord_background_recovery_channel_probe_required, discord_background_recovery_channel_probe_done
+    now_wall = time.time()
+    state = None
+
+    # Prefer durable Firebase state. If unavailable, use the local SQLite copy.
+    # A post-recovery quiet state intentionally has started_at=0 after the restriction
+    # is cleared, so it must still be restored when post_recovery_quiet_until is active.
+    def _persisted_state_is_relevant(raw):
+        if not isinstance(raw, dict):
+            return False
+        try:
+            active = float(raw.get("started_at") or 0.0) > 0.0
+            post_quiet = float(raw.get("post_recovery_quiet_until") or 0.0) > now_wall
+            return active or post_quiet
+        except (TypeError, ValueError):
+            return bool(raw.get("started_at"))
+
+    try:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).get),
+            timeout=5.0,
+        )
+        if _persisted_state_is_relevant(raw):
+            state = raw
+    except Exception as exc:
+        print(f"⚠️ Discord REST block Firebase restore unavailable: {exc!r}", flush=True)
+
+    if state is None:
+        try:
+            raw = get_db_value("discord_rest_block", None)
+            if _persisted_state_is_relevant(raw):
+                state = raw
+        except Exception as exc:
+            print(f"⚠️ Discord REST block SQLite restore unavailable: {exc!r}", flush=True)
+
+    if not isinstance(state, dict):
+        print("🟢 Discord REST startup gate: no persisted restriction found", flush=True)
+        return False
+
+    try:
+        post_recovery_quiet_until = float(state.get("post_recovery_quiet_until") or 0.0)
+        started = float(state.get("started_at") or 0.0)
+        last_seen = float(state.get("last_seen_at") or started)
+        server_until = float(state.get("server_until") or 0.0)
+        server_retry_after = float(state.get("server_retry_after") or 0.0)
+        next_probe_at = float(state.get("next_probe_at") or 0.0)
+        scope = str(state.get("scope") or "")
+        is_global = bool(state.get("global"))
+        kind = str(state.get("kind") or "")
+        source = str(state.get("source") or "")
+        trigger_context = str(state.get("trigger_context") or "")
+        cf_ray = str(state.get("cf_ray") or "")
+        via = str(state.get("via") or "")
+        server_header = str(state.get("server_header") or "")
+        content_type = str(state.get("content_type") or "")
+        temp_restriction = bool(state.get("temp_restriction"))
+        local_retry = max(60.0, float(state.get("local_retry_seconds") or 60.0))
+        consecutive_429 = max(0, int(state.get("consecutive_429") or 0))
+        updated_at = float(state.get("updated_at") or last_seen or started)
+    except (TypeError, ValueError) as exc:
+        print(f"⚠️ Discord REST block persisted state invalid; ignoring it: {exc!r}", flush=True)
+        return False
+
+    with discord_block_lock:
+        global_state_assignments = (
+            trigger_context,
+            cf_ray,
+            via,
+            server_header,
+            content_type,
+        )
+        discord_block_trigger_context = global_state_assignments[0]
+        discord_block_cf_ray = global_state_assignments[1]
+        discord_block_via = global_state_assignments[2]
+        discord_block_server_header = global_state_assignments[3]
+        discord_block_content_type = global_state_assignments[4]
+        discord_block_consecutive_429 = consecutive_429 if consecutive_429 > 0 else (1 if temp_restriction else 0)
+
+    # V160/V162: restore a post-recovery background quiet even when the active block itself
+    # has already been cleared. This prevents a Render restart from immediately replaying
+    # background REST or starting a fresh Gateway HTTP login against a recently restricted IP.
+    post_recovery_guard_restored = False
+    if post_recovery_quiet_until > now_wall:
+        post_remaining = post_recovery_quiet_until - now_wall
+        with discord_block_lock:
+            discord_rest_post_recovery_quiet_until_wall = post_recovery_quiet_until
+            discord_rest_post_recovery_quiet_until_mono = time.monotonic() + post_remaining
+        discord_background_rest_suppressed_until = max(
+            discord_background_rest_suppressed_until,
+            time.monotonic() + post_remaining,
+        )
+        discord_background_rest_quarantined = True
+        discord_background_recovery_channel_probe_required = False
+        discord_background_recovery_channel_probe_done.clear()
+        post_recovery_guard_restored = True
+        print(
+            f"🛡️ Discord REST post-recovery background guard RESTORED | "
+            f"remaining={_format_duration(post_remaining)} | no background HTTP sent",
+            flush=True,
+        )
+    elif post_recovery_quiet_until > 0:
+        # Expired persisted guard is harmless; leave it out of the active restore state.
+        post_recovery_quiet_until = 0.0
+
+    # V132 migration: V131 could accidentally persist an Interaction ACK 429 into the
+    # shared REST breaker. That state is invalid for REST recovery and must never be
+    # restored. Remove only the contaminated interaction-lane record.
+    if source.strip().upper() == "INTERACTION":
+        print(
+            "🧹 V132 discarded persisted INTERACTION-only 429 from shared Discord REST breaker",
+            flush=True,
+        )
+        await _clear_persisted_discord_block_state(reason="v132-interaction-lane-migration")
+        return False
+
+    # An old/stale record must never permanently suppress REST.
+    # For temporary restrictions, Discord's supplied server expiry is authoritative.
+    # When an old record has expired, keep only a short recovery grace window so
+    # the first request after restart is not fired exactly on the boundary.
+    server_remaining = max(0.0, server_until - now_wall) if server_until > 0 else 0.0
+    persisted_probe_remaining = max(0.0, next_probe_at - now_wall) if next_probe_at > 0 else 0.0
+
+    if temp_restriction and server_until > 0 and server_retry_after > 0:
+        evidence_at = max(last_seen, updated_at, started)
+        expected_latest_expiry = evidence_at + server_retry_after + max(30.0, discord_block_recovery_grace_seconds)
+        if server_until > expected_latest_expiry + 120.0:
+            print(
+                f"⚠️ Discord REST persisted timer inconsistent/stale | "
+                f"evidence_at={datetime.fromtimestamp(evidence_at, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z')} | "
+                f"stored_expiry={datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z')} | "
+                f"retry_after={_format_duration(server_retry_after)} | clearing persisted gate for fresh Discord evidence",
+                flush=True,
+            )
+            await _clear_persisted_discord_block_state(reason="stale-inconsistent-timer")
+            return False
+
+    if temp_restriction and server_until > 0:
+        # V181 migration: retain V180's no-probe rule, but also retain the
+        # accumulated recovery hold across Deploys. A repeated temporary 429
+        # must not cause the next Render process to retry at merely
+        # server_expiry + 15 minutes. The durable next_probe_at is authoritative
+        # for the local safety hold, while Discord's Retry-After remains the
+        # authoritative server timer.
+        required_recovery_at = server_until + discord_block_recovery_grace_seconds
+        if consecutive_429 >= 2:
+            repeated_multiplier = min(float(consecutive_429), 6.0)
+            # Anchor the escalated hold to the persisted Discord evidence rather
+            # than to process-start time. Repeated Render restarts therefore do
+            # not keep moving the deadline forward; they only preserve the same
+            # already-computed no-HTTP recovery point.
+            evidence_at = max(last_seen, updated_at, started)
+            repeated_hold_from_evidence = min(
+                DISCORD_BLOCK_REPEAT_BACKOFF_CAP_SECONDS,
+                (server_retry_after * repeated_multiplier) + discord_block_recovery_grace_seconds,
+            )
+            required_recovery_at = max(
+                required_recovery_at,
+                evidence_at + repeated_hold_from_evidence,
+            )
+        if next_probe_at < required_recovery_at:
+            next_probe_at = required_recovery_at
+            persisted_probe_remaining = max(0.0, next_probe_at - now_wall)
+        elif server_remaining > 0 and persisted_probe_remaining <= 0:
+            persisted_probe_remaining = server_remaining + discord_block_recovery_grace_seconds
+        elif server_remaining <= 0 and persisted_probe_remaining <= 0:
+            persisted_probe_remaining = discord_block_recovery_grace_seconds
+    elif temp_restriction and persisted_probe_remaining <= 0:
+        # No server timer survived (for example an interaction 429). Use the
+        # persisted local retry as the minimum startup hold instead of probing immediately.
+        persisted_probe_remaining = max(60.0, local_retry)
+
+    if server_until > 0 and server_remaining <= 0 and persisted_probe_remaining <= 0:
+        grace = discord_block_recovery_grace_seconds if temp_restriction else 0.0
+        persisted_probe_remaining = max(0.0, grace)
+
+    if started <= 0 or (server_until <= 0 and persisted_probe_remaining <= 0 and not temp_restriction):
+        if post_recovery_guard_restored:
+            print(
+                f"🛡️ Discord REST startup gate RESTORED (post-recovery quiet only) | "
+                f"remaining={_format_duration(post_recovery_quiet_until - now_wall)} | no early HTTP sent",
+                flush=True,
+            )
+            return True
+        print("🟢 Discord REST startup gate: persisted restriction already expired", flush=True)
+        return False
+
+    with discord_block_lock:
+        discord_block_started_at = started
+        discord_block_last_seen_at = last_seen
+        discord_block_server_until = server_until
+        discord_block_server_retry_after = server_retry_after
+        discord_block_scope = scope
+        discord_block_global = is_global
+        discord_block_kind = kind or ("API_TEMPORARY_RESTRICTION" if temp_restriction else "RATE_LIMIT")
+        discord_block_source = source or "PERSISTED"
+        discord_block_temp_restriction = temp_restriction
+        discord_block_local_retry_seconds = local_retry
+        discord_block_consecutive_429 = consecutive_429 if consecutive_429 > 0 else (1 if temp_restriction else 0)
+        discord_block_next_probe_mono = time.monotonic() + max(0.0, persisted_probe_remaining)
+
+    # Recreate the in-memory REST cooldown as well. Monotonic deadlines cannot be
+    # persisted directly, so they are reconstructed from the wall-clock evidence.
+    restored_pause = max(server_remaining, persisted_probe_remaining)
+    if restored_pause > 0:
+        discord_rest_rate_limited_until = max(
+            discord_rest_rate_limited_until,
+            time.monotonic() + restored_pause,
+        )
+
+    probe_remaining = max(0.0, persisted_probe_remaining)
+    server_remaining = max(0.0, server_until - time.time()) if server_until > 0 else 0.0
+    print(
+        f"🛡️ Discord REST startup recovery gate RESTORED | kind={kind or '-'} | "
+        f"source={source or 'PERSISTED'} | server_remaining={_format_duration(server_remaining) if server_remaining else 'expired/unknown'} | "
+        f"gate_hold={_format_duration(probe_remaining) if probe_remaining > 0 else 'READY'} | "
+        f"expiry={datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if server_until > 0 else 'UNKNOWN'} | "
+        f"persisted_age={_format_duration(max(0.0, now_wall - updated_at))}",
+        flush=True,
+    )
+    return True
+
+
+def mark_gateway_recovery_attempt() -> bool:
+    """Mark Gateway startup as the first real recovery request after a no-HTTP hold."""
+    global discord_gateway_recovery_pending
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        pending = bool(
+            discord_block_temp_restriction
+            and discord_block_started_at > 0
+            and discord_block_next_probe_mono > 0
+            and now_mono >= discord_block_next_probe_mono
+        )
+        discord_gateway_recovery_pending = pending
+    if pending:
+        print(
+            "🟡 Discord Gateway recovery request armed | no synthetic REST probe; "
+            "Gateway authentication is the first real recovery request",
+            flush=True,
+        )
+    return pending
+
+
+def confirm_gateway_recovery_if_pending() -> bool:
+    """Confirm successful Gateway recovery and arm the local post-recovery REST quiet."""
+    global discord_gateway_recovery_pending
+    if not discord_gateway_recovery_pending:
+        return False
+    discord_gateway_recovery_pending = False
+    with discord_block_lock:
+        active = bool(discord_block_temp_restriction and discord_block_started_at > 0)
+    if not active:
+        return False
+    _clear_discord_block_after_success(context="gateway:on-ready", recovery_probe=True)
+    # V182: Gateway on-ready is the first real successful recovery signal. Arm the
+    # existing background quiet immediately so a Render restart during this window
+    # restores a durable no-HTTP hold instead of starting another Gateway request.
+    _arm_background_rest_after_foreground_recovery()
+    print(
+        "🛡️ Discord Gateway recovery post-quiet armed | "
+        "no synthetic REST probe; background REST remains quiet after recovery",
+        flush=True,
+    )
+    return True
+
+
+def clear_gateway_recovery_attempt() -> None:
+    global discord_gateway_recovery_pending
+    discord_gateway_recovery_pending = False
+
+
+async def wait_for_discord_rest_startup_gate(*, context: str):
+    """Wait before Gateway HTTP until both restriction and post-recovery quiet are safe.
+
+    discord.py performs an HTTP login/identify setup before the Gateway session reaches
+    READY, so this gate must protect bot.start() itself. During the configured
+    post-recovery quiet window, allowing a fresh Render process to call bot.start() would
+    immediately re-enter Discord and can trigger another temporary IP/API restriction.
+    """
+    last_reason = None
+    while True:
+        now_mono = time.monotonic()
+        with discord_block_lock:
+            next_probe = discord_block_next_probe_mono
+            block_active = discord_block_started_at > 0
+        block_remaining = max(0.0, next_probe - now_mono) if block_active and next_probe > 0 else 0.0
+        post_quiet_remaining = _background_post_recovery_quiet_remaining()
+        remaining = max(block_remaining, post_quiet_remaining)
+        if remaining <= 0:
+            return True
+
+        reason = 'active-restriction' if block_remaining >= post_quiet_remaining and block_remaining > 0 else 'post-recovery-quiet'
+        if reason != last_reason:
+            print(
+                f"🛡️ Discord REST startup gate reason={reason} | context={context}",
+                flush=True,
+            )
+            last_reason = reason
+        print(
+            f"⏳ Discord REST startup gate waiting | context={context} | "
+            f"remaining={remaining:.1f}s | no HTTP sent",
+            flush=True,
+        )
+        await asyncio.sleep(min(15.0, max(1.0, remaining)))
+
+
+async def wait_for_discord_rest_clear_confirmed(*, context: str):
+    """Wait for a safe REST recovery window without sending any test request."""
+    last_log = 0.0
+    while True:
+        now_mono = time.monotonic()
+        with discord_block_lock:
+            block_active = discord_block_started_at > 0
+            temp_restriction = bool(discord_block_temp_restriction)
+            next_recovery_mono = float(discord_block_next_probe_mono or 0.0)
+            post_gateway_recovery_mono = float(discord_block_recovery_until_mono or 0.0)
+        active_block_remaining = (
+            max(0.0, next_recovery_mono - now_mono)
+            if block_active and next_recovery_mono > 0 else 0.0
+        )
+        local_recovery_remaining = max(0.0, post_gateway_recovery_mono - now_mono)
+        remaining = max(active_block_remaining, local_recovery_remaining)
+        if remaining <= 0:
+            if block_active:
+                # No usable server timer was available; preserve the existing safe behavior.
+                await asyncio.sleep(1.0)
+                continue
+            print(
+                f"✅ Discord REST recovery gate open | context={context} | "
+                "no automatic probe sent; next real request is the first post-recovery request",
+                flush=True,
+            )
+            return True
+        current = time.monotonic()
+        if current - last_log >= 15.0:
+            last_log = current
+            reason = "active-restriction" if active_block_remaining >= local_recovery_remaining and active_block_remaining > 0 else "post-gateway-recovery-hold"
+            print(
+                f"⏳ Discord REST clear confirmation waiting | context={context} | "
+                f"reason={reason} | remaining={remaining:.1f}s | no normal HTTP sent",
+                flush=True,
+            )
+        await asyncio.sleep(min(15.0, max(1.0, remaining)))
+
+
+def _record_discord_block_observed(exc: Exception, *, context: str, source: str = "REST") -> dict:
+    """Record evidence of an API restriction without inventing an expiry time."""
+    global discord_block_started_at, discord_block_last_seen_at
+    global discord_block_server_until, discord_block_server_retry_after
+    global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_trigger_context, discord_block_cf_ray, discord_block_via
+    global discord_block_server_header, discord_block_content_type
+    global discord_block_temp_restriction
+    global discord_block_consecutive_429
+
+    meta = _extract_discord_rate_limit_metadata(exc)
+    if str(source or "").strip().upper() == "INTERACTION":
+        # Interaction callbacks use a dedicated webhook lane. Never allow an interaction
+        # callback 429 to become a shared REST breaker event.
+        return meta
+    now_wall = time.time()
+    with discord_block_lock:
+        previous_server_until = float(discord_block_server_until or 0.0)
+        previous_active = discord_block_started_at > 0
+        if not previous_active:
+            discord_block_consecutive_429 = 1
+        else:
+            discord_block_consecutive_429 = max(1, int(discord_block_consecutive_429 or 1)) + 1
+        if discord_block_started_at <= 0 or (previous_server_until > 0 and now_wall >= previous_server_until):
+            discord_block_started_at = now_wall
+        discord_block_last_seen_at = now_wall
+        if meta["retry_after"] > 0:
+            candidate_until = now_wall + meta["retry_after"]
+            discord_block_server_until = max(discord_block_server_until, candidate_until)
+            discord_block_server_retry_after = meta["retry_after"]
+        elif meta["reset_after"] > 0:
+            candidate_until = now_wall + meta["reset_after"]
+            discord_block_server_until = max(discord_block_server_until, candidate_until)
+            discord_block_server_retry_after = meta["reset_after"]
+        discord_block_scope = meta["scope"] or discord_block_scope
+        discord_block_global = bool(meta["global"] or discord_block_global)
+        text = meta["message"].lower()
+        if bool(meta.get("cloudflare_1015")) or "blocked from accessing our api" in text or ("temporarily" in text and "api" in text):
+            discord_block_kind = "API_TEMPORARY_RESTRICTION"
+            discord_block_temp_restriction = True
+        elif discord_block_global:
+            discord_block_kind = "GLOBAL_RATE_LIMIT"
+        elif meta["scope"]:
+            discord_block_kind = f"RATE_LIMIT_{meta['scope'].upper()}"
+        else:
+            discord_block_kind = "RATE_LIMIT"
+        discord_block_source = source
+        discord_block_trigger_context = str(context or "")
+        discord_block_cf_ray = str(meta.get("cf_ray") or "")
+        discord_block_via = str(meta.get("via") or "")
+        discord_block_server_header = str(meta.get("server") or "")
+        discord_block_content_type = str(meta.get("content_type") or "")
+
+    return meta
+
+
+def _format_duration(total_seconds: float) -> str:
+    total = max(0, int(round(total_seconds)))
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    return f"{minutes}m {seconds:02d}s"
+
+
+def _discord_block_diagnostic_line() -> str:
+    now_wall = time.time()
+    with discord_block_lock:
+        started = discord_block_started_at
+        last_seen = discord_block_last_seen_at
+        server_until = discord_block_server_until
+        next_probe_mono = discord_block_next_probe_mono
+        temp_restriction = discord_block_temp_restriction
+        scope = discord_block_scope or "-"
+        is_global = discord_block_global
+        kind = discord_block_kind or "-"
+        source = discord_block_source or "-"
+        trigger_context = discord_block_trigger_context or "-"
+        cf_ray = discord_block_cf_ray or "-"
+        consecutive_429 = int(discord_block_consecutive_429 or 0)
+    if started <= 0:
+        return "✅ Discord API restriction: NONE OBSERVED"
+    elapsed = max(0.0, now_wall - started)
+    now_mono = time.monotonic()
+    server_remaining = max(0.0, server_until - now_wall) if server_until > 0 else 0.0
+    next_probe_remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
+    if server_until > now_wall:
+        remaining_text = f"server-provided remaining={_format_duration(server_remaining)}"
+        expiry_text = datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime("%d/%m/%Y %H:%M:%S %Z")
+        certainty = "EXACT TIMER FROM DISCORD"
+    elif server_until > 0 and last_seen > 0 and now_wall >= server_until:
+        remaining_text = (f"server timer expired; safe recovery hold remaining={_format_duration(next_probe_remaining)}" if temp_restriction and next_probe_remaining > 0 else "server timer expired; waiting for a successful request to confirm clear")
+        expiry_text = datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime("%d/%m/%Y %H:%M:%S %Z")
+        certainty = "SERVER TIMER EXPIRED — CLEAR NOT YET CONFIRMED"
+    else:
+        remaining_text = "exact remaining UNKNOWN (Discord supplied no expiry timer)"
+        expiry_text = "UNKNOWN"
+        certainty = "NO SERVER EXPIRY PROVIDED"
+    return (
+        f"🚨 DISCORD API BLOCK STATUS | kind={kind} | source={source} | scope={scope} | global={is_global} | "
+        f"started={datetime.fromtimestamp(started, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z')} | "
+        f"elapsed={_format_duration(elapsed)} | {remaining_text} | expiry={expiry_text} | "
+        f"next_probe_in={_format_duration(next_probe_remaining) if next_probe_remaining > 0 else 'READY'} | {certainty} | "
+        f"trigger_context={trigger_context} | cf_ray={cf_ray} | consecutive_429={consecutive_429}"
+    )
+
+
+def _clear_discord_block_after_success(*, context: str, recovery_probe: bool = False):
+    global discord_block_started_at, discord_block_last_seen_at
+    global discord_block_server_until, discord_block_server_retry_after
+    global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_trigger_context, discord_block_cf_ray, discord_block_via
+    global discord_block_server_header, discord_block_content_type
+    global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_recovery_until_mono
+    global discord_block_consecutive_429
+    global discord_block_recovery_probe_started_at
+    global discord_background_recovery_channel_probe_required, discord_background_recovery_channel_probe_done
+    global discord_background_rest_recovery_quiet_override_seconds
+    global discord_user_dm_recovery_suppressed_until
+    now_wall = time.time()
+    with discord_block_lock:
+        started = discord_block_started_at
+        last_seen = discord_block_last_seen_at
+        prior_retry_after = float(discord_block_server_retry_after or 0.0)
+        prior_temp_restriction = bool(discord_block_temp_restriction)
+        if started <= 0:
+            return
+        # V158: an unrelated successful REST call must not declare a Cloudflare/API
+        # temporary restriction cleared. The dedicated post-timer recovery probe is
+        # the only authoritative clear for this state.
+        if prior_temp_restriction and not recovery_probe:
+            return
+        elapsed = max(0.0, now_wall - started)
+        if prior_temp_restriction and prior_retry_after >= discord_background_rest_long_restriction_threshold:
+            discord_background_rest_recovery_quiet_override_seconds = discord_background_rest_long_recovery_quiet_seconds
+            # V148: do not immediately replay optional per-user DMs after a long
+            # temporary restriction. The supplied log showed this lane as the
+            # concrete request that triggered the next long restriction.
+            discord_user_dm_recovery_suppressed_until = max(
+                discord_user_dm_recovery_suppressed_until,
+                time.monotonic() + DISCORD_USER_DM_LONG_RECOVERY_QUIET_SECONDS,
+            )
+            _drop_all_pending_discord_user_dms_after_long_restriction(
+                reason="long-rest-recovery-stale-backlog"
+            )
+        else:
+            discord_background_rest_recovery_quiet_override_seconds = discord_background_rest_recovery_grace_seconds
+        print(
+            f"✅ DISCORD API BLOCK CLEARED | context={context} | duration={_format_duration(elapsed)} | "
+            f"last_429_seen={datetime.fromtimestamp(last_seen, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if last_seen else '-'} | "
+            f"background_quiet={_format_duration(discord_background_rest_recovery_quiet_override_seconds)} | "
+            f"dm_recovery_quiet={_format_duration(max(0.0, discord_user_dm_recovery_suppressed_until - time.monotonic()))}",
+            flush=True,
+        )
+        discord_block_started_at = 0.0
+        discord_block_last_seen_at = 0.0
+        discord_block_server_until = 0.0
+        discord_block_server_retry_after = 0.0
+        discord_block_scope = ""
+        discord_block_global = False
+        discord_block_kind = ""
+        discord_block_source = ""
+        discord_block_trigger_context = ""
+        discord_block_cf_ray = ""
+        discord_block_via = ""
+        discord_block_server_header = ""
+        discord_block_content_type = ""
+        discord_block_temp_restriction = False
+        discord_block_next_probe_mono = 0.0
+        discord_block_consecutive_429 = 0
+        discord_block_recovery_probe_started_at = 0.0
+        # V182: keep a foreground recovery hold after successful Gateway auth too.
+        # Gateway authentication is the first real recovery request, but command
+        # verification/tree-sync must not immediately create another REST request.
+        # This uses local waiting only and does not contact Discord.
+        discord_block_recovery_until_mono = time.monotonic() + max(
+            discord_background_rest_recovery_grace_seconds,
+            discord_block_recovery_grace_seconds,
+        )
+        # V179: do NOT arm a separate channel readiness probe after recovery.
+        # The V178 production log proved that this extra fetch_channel() request could
+        # itself receive a fresh temporary API restriction. The existing central guard
+        # already protects the actual message create/edit call with the server Retry-After,
+        # background lane spacing, and post-recovery quiet. Keeping the compatibility state
+        # cleared also guarantees no hidden caller can turn recovery into an extra probe.
+        discord_background_recovery_channel_probe_required = False
+        discord_background_recovery_channel_probe_done.clear()
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            _clear_persisted_discord_block_state(reason=f"success:{context}"),
+            name="discord-rest-block-clear",
+        )
+    except RuntimeError:
+        pass
+
+
+def _mark_discord_block_log(context: str, *, force: bool = False):
+    global discord_block_last_log_at
+    now_mono = time.monotonic()
+    if not force and now_mono - discord_block_last_log_at < 15.0:
+        return
+    discord_block_last_log_at = now_mono
+    print(_discord_block_diagnostic_line() + f" | context={context}", flush=True)
+
+
+async def _run_expired_discord_recovery_probe():
+    """Compatibility no-op retained for older internal references; never sends HTTP."""
+    return False
+
+
+async def discord_block_diagnostics_loop():
+    """Diagnostics only; never polls Discord to test whether a block cleared."""
+    while True:
+        try:
+            with discord_block_lock:
+                active = discord_block_started_at > 0
+            if active:
+                _mark_discord_block_log("periodic", force=True)
+            await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ Discord block diagnostics loop error: {exc!r}", flush=True)
+            await asyncio.sleep(15)
+
+
+def _apply_discord_rest_429(exc: Exception, *, context: str, source: str = "REST") -> float:
+    global discord_rest_rate_limited_until, discord_rest_backoff_seconds, discord_rest_last_429_log
+    global discord_block_next_probe_mono, discord_block_local_retry_seconds
+    global discord_block_consecutive_429
+    meta = _record_discord_block_observed(exc, context=context, source=source)
+    server_retry = float(meta.get("retry_after") or 0.0)
+    if server_retry <= 0:
+        server_retry = float(meta.get("reset_after") or 0.0)
+    is_temp_restriction = bool(discord_block_temp_restriction)
+    now_mono = time.monotonic()
+
+    with discord_block_lock:
+        consecutive = max(1, int(discord_block_consecutive_429 or 1))
+        discord_block_consecutive_429 = consecutive
+
+    if server_retry > 0:
+        # Discord's Retry-After is the minimum server-side wait. For repeated
+        # temporary restrictions, add an escalating local no-HTTP hold so a
+        # Render restart cannot immediately consume another recovery attempt.
+        # The local multiplier never shortens Discord's timer and never sends a
+        # probe to discover whether the restriction has cleared.
+        if is_temp_restriction and consecutive >= 2:
+            multiplier = min(float(consecutive), 6.0)
+            recovery_hold = min(
+                DISCORD_BLOCK_REPEAT_BACKOFF_CAP_SECONDS,
+                (server_retry * multiplier) + discord_block_recovery_grace_seconds,
+            )
+            local_pause = max(server_retry, recovery_hold)
+            probe_in = local_pause
+        else:
+            local_pause = server_retry
+            probe_in = server_retry + (discord_block_recovery_grace_seconds if is_temp_restriction else 0.0)
+        discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
+        discord_rest_backoff_seconds = discord_block_local_retry_seconds
+    else:
+        local_pause = discord_block_local_retry_seconds
+        if is_temp_restriction and consecutive >= 2:
+            multiplier = min(float(consecutive), 6.0)
+            local_pause = min(
+                DISCORD_BLOCK_REPEAT_BACKOFF_CAP_SECONDS,
+                max(local_pause, (local_pause * multiplier) + discord_block_recovery_grace_seconds),
+            )
+        discord_block_local_retry_seconds = min(discord_block_local_retry_seconds * 2.0, 900.0)
+        probe_in = local_pause
+
+    discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, now_mono + max(1.0, local_pause))
+    discord_block_next_probe_mono = max(discord_block_next_probe_mono, now_mono + max(1.0, probe_in))
+    if is_temp_restriction:
+        _quarantine_background_rest(
+            reason=f"discord-temp-restriction:{context}",
+            duration=max(
+                server_retry + discord_background_rest_recovery_grace_seconds,
+                probe_in,
+            ),
+        )
+    _schedule_persist_discord_block_state(reason=f"429:{context}")
+    now_log = time.monotonic()
+    if now_log - discord_rest_last_429_log >= 5.0:
+        discord_rest_last_429_log = now_log
+        timer_note = f"server_timer={server_retry:.3f}s" if server_retry > 0 else f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
+        print(
+            f"⏸️ Discord REST 429 | context={context} | global={discord_block_global} | "
+            f"{timer_note} | consecutive_429={consecutive} | "
+            f"next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | "
+            "repeat probes suppressed",
+            flush=True,
+        )
+    _mark_discord_block_log(context, force=True)
+    return local_pause
+
+
+def _apply_discord_rest_error(exc: Exception, *, context: str) -> float:
+    """Throttle repeated invalid/server requests even when Discord returns non-429 errors."""
+    global discord_rest_rate_limited_until, discord_rest_last_error_log
+    status = getattr(exc, "status", None)
+    if status in (400, 401, 403, 404):
+        delay = 60.0
+        if _is_background_discord_rest_context(context):
+            _quarantine_background_invalid_context(
+                context,
+                status=int(status),
+                duration=DISCORD_BACKGROUND_INVALID_CONTEXT_QUIET_SECONDS,
+            )
+    elif status is not None and int(status) >= 500:
+        delay = 15.0
+    else:
+        delay = 10.0
+    discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, time.monotonic() + delay)
+    now_mono = time.monotonic()
+    if now_mono - discord_rest_last_error_log >= 10.0:
+        discord_rest_last_error_log = now_mono
+        print(
+            f"⏸️ GLOBAL Discord REST error cooldown | context={context} | "
+            f"status={status} | pause={delay:.1f}s",
+            flush=True,
+        )
+    return delay
+
+
+def _clear_discord_rest_backoff_after_success():
+    global discord_rest_backoff_seconds
+    discord_rest_backoff_seconds = 60.0
+
+
+discord_rest_last_skip_logs = {}
+
+# V150: Discord documents 401/403/429 (and the current invalid-request limit
+# section includes these invalid responses) as inputs to the IP-based Cloudflare
+# ban counter. A stale background target must therefore never be retried every
+# minute after a 400/401/403/404. Suppress only that exact background context;
+# unrelated valid contexts remain eligible.
+discord_background_invalid_context_suppressed_until = {}
+discord_background_invalid_context_order = deque(maxlen=500)
+DISCORD_BACKGROUND_INVALID_CONTEXT_QUIET_SECONDS = max(600.0, float(os.environ.get("DISCORD_BACKGROUND_INVALID_CONTEXT_QUIET", "3600")))
+
+
+def _background_invalid_context_remaining(context: str) -> float:
+    key = str(context or "")
+    until = float(discord_background_invalid_context_suppressed_until.get(key, 0.0) or 0.0)
+    remaining = max(0.0, until - time.monotonic())
+    if remaining <= 0 and key in discord_background_invalid_context_suppressed_until:
+        discord_background_invalid_context_suppressed_until.pop(key, None)
+    return remaining
+
+
+def _quarantine_background_invalid_context(context: str, *, status: int | None, duration: float | None = None) -> None:
+    key = str(context or "")
+    if not key or not _is_background_discord_rest_context(key):
+        return
+    hold = max(60.0, float(duration if duration is not None else DISCORD_BACKGROUND_INVALID_CONTEXT_QUIET_SECONDS))
+    discord_background_invalid_context_suppressed_until[key] = max(
+        float(discord_background_invalid_context_suppressed_until.get(key, 0.0) or 0.0),
+        time.monotonic() + hold,
+    )
+    discord_background_invalid_context_order.append(key)
+    while len(discord_background_invalid_context_suppressed_until) > len(discord_background_invalid_context_order):
+        old_key = discord_background_invalid_context_order.popleft()
+        discord_background_invalid_context_suppressed_until.pop(old_key, None)
+    print(
+        f"🛡️ Background Discord REST context quarantined after invalid HTTP response | "
+        f"context={key} | status={status} | hold={hold:.1f}s",
+        flush=True,
+    )
+
+
+def _log_background_invalid_context_skip(context: str, remaining: float) -> None:
+    key = f"invalid-context:{context}"
+    now_mono = time.monotonic()
+    last = float(discord_rest_last_skip_logs.get(key, 0.0))
+    if now_mono - last >= 60.0:
+        discord_rest_last_skip_logs[key] = now_mono
+        print(
+            f"⏭️ Background Discord REST invalid-context cooldown | context={context} | "
+            f"remaining={remaining:.1f}s | no HTTP sent",
+            flush=True,
+        )
+
+
+def _log_rest_skip(context: str, remaining: float):
+    """Log REST suppression at most once per context per 60 seconds."""
+    now_mono = time.monotonic()
+    last = float(discord_rest_last_skip_logs.get(context, 0.0))
+    if now_mono - last >= 60.0:
+        discord_rest_last_skip_logs[context] = now_mono
+        print(
+            f"⏭️ Discord REST skipped during cooldown | context={context} | "
+            f"remaining={remaining:.1f}s",
+            flush=True,
+        )
+
+
+def _is_background_discord_rest_context(context: str) -> bool:
+    """Classify non-essential Discord REST work without touching interaction/command lanes."""
+    value = str(context or "").strip().lower()
+    return any(value.startswith(prefix) for prefix in discord_background_rest_context_prefixes)
+
+
+def _background_rest_remaining() -> float:
+    return max(0.0, discord_background_rest_suppressed_until - time.monotonic())
+
+
+def _log_background_rest_skip(context: str, remaining: float, reason: str = "quarantine"):
+    key = f"bg:{reason}:{context}"
+    now_mono = time.monotonic()
+    last = float(discord_rest_last_skip_logs.get(key, 0.0))
+    if now_mono - last >= 60.0:
+        discord_rest_last_skip_logs[key] = now_mono
+        print(
+            f"⏭️ Background Discord REST skipped | context={context} | reason={reason} | remaining={remaining:.1f}s",
+            flush=True,
+        )
+
+
+def _quarantine_background_rest(*, reason: str, duration: float):
+    global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    hold = max(1.0, float(duration))
+    until = time.monotonic() + hold
+    discord_background_rest_suppressed_until = max(discord_background_rest_suppressed_until, until)
+    discord_background_rest_quarantined = True
+    print(
+        f"🛡️ Background Discord REST quarantine | reason={reason} | hold={hold:.1f}s | no background reprobe",
+        flush=True,
+    )
+
+
+def _background_post_recovery_quiet_remaining() -> float:
+    """Return the local post-recovery background REST quiet window remaining."""
+    global discord_rest_post_recovery_quiet_until_wall, discord_rest_post_recovery_quiet_until_mono
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    remaining = max(
+        0.0,
+        float(discord_rest_post_recovery_quiet_until_mono or 0.0) - now_mono,
+    )
+    if remaining <= 0 and float(discord_rest_post_recovery_quiet_until_wall or 0.0) > now_wall:
+        remaining = max(
+            0.0,
+            float(discord_rest_post_recovery_quiet_until_wall) - now_wall,
+        )
+        discord_rest_post_recovery_quiet_until_mono = now_mono + remaining
+    if remaining <= 0:
+        discord_rest_post_recovery_quiet_until_wall = 0.0
+        discord_rest_post_recovery_quiet_until_mono = 0.0
+    return remaining
+
+
+def _arm_background_rest_after_foreground_recovery():
+    global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    global discord_background_rest_recovery_quiet_override_seconds
+    global discord_rest_post_recovery_quiet_until_wall, discord_rest_post_recovery_quiet_until_mono
+    hold = max(
+        discord_background_rest_recovery_grace_seconds,
+        float(discord_background_rest_recovery_quiet_override_seconds or 0.0),
+    )
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    discord_rest_post_recovery_quiet_until_mono = max(
+        float(discord_rest_post_recovery_quiet_until_mono or 0.0),
+        now_mono + hold,
+    )
+    discord_rest_post_recovery_quiet_until_wall = max(
+        float(discord_rest_post_recovery_quiet_until_wall or 0.0),
+        now_wall + hold,
+    )
+    discord_background_rest_suppressed_until = max(
+        discord_background_rest_suppressed_until,
+        discord_rest_post_recovery_quiet_until_mono,
+    )
+    discord_background_rest_quarantined = True
+    discord_background_rest_recovery_quiet_override_seconds = 0.0
+    _schedule_persist_discord_block_state(reason="post-recovery-background-quiet")
+    print(
+        f"🛡️ Background Discord REST recovery quiet armed | hold={hold:.1f}s | foreground request succeeded",
+        flush=True,
+    )
+
+
+def _arm_background_rest_startup_probation():
+    """Quiet the non-essential Discord REST lane after every successful startup sync."""
+    global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    hold = discord_background_rest_startup_probation_seconds
+    discord_background_rest_suppressed_until = max(
+        discord_background_rest_suppressed_until,
+        time.monotonic() + hold,
+    )
+    discord_background_rest_quarantined = True
+    print(
+        f"🛡️ Background Discord REST startup probation armed | hold={hold:.1f}s | "
+        "command sync succeeded; background REST held",
+        flush=True,
+    )
+
+
+def release_discord_rest_startup_hold(*, reason: str, arm_probation: bool = False):
+    """Release the startup background-REST hold after command verification completes.
+
+    V138 fixes the V137 path where remote Guild Commands already matched the local
+    20-command tree, so no tree.sync() occurred and the startup hold stayed True forever.
+    When no HTTP write was needed, this helper releases the hold immediately without
+    arming the post-sync probation window. If a real command sync happened, callers may
+    request the existing conservative probation window explicitly.
+    """
+    global discord_background_rest_startup_hold
+    was_held = bool(discord_background_rest_startup_hold)
+    discord_background_rest_startup_hold = False
+    if was_held:
+        print(
+            f"🟢 Background Discord REST startup hold released | reason={reason} | "
+            f"probation={'armed' if arm_probation else 'not needed'}",
+            flush=True,
+        )
+    if arm_probation:
+        _arm_background_rest_startup_probation()
+
+
+def _record_background_rest_attempt(context: str):
+    discord_background_rest_recent_calls.append((time.monotonic(), str(context)))
+
+
+def _is_time_critical_background_rest_context(context: str) -> bool:
+    """Return True for background messages that are time-sensitive to the Boss UI."""
+    value = str(context or "").strip().lower()
+    return value.startswith((
+        "boss-notify:",
+        "boss-time-log:",
+        "attendance:auto-create:",
+        "attendance:panel-edit:",
+        "boss-user-dm:",
+        "bf:",
+        "library-boss",
+        # Kept only for telemetry compatibility; V180 never emits this probe context.
+        "rest-recovery-channel-probe:",
+    ))
+
+
+def _background_rest_attempt_counts(window_seconds: float = 600.0) -> tuple[int, int]:
+    cutoff = time.monotonic() - max(1.0, float(window_seconds))
+    total = 0
+    contexts = set()
+    for ts, context in list(discord_background_rest_recent_calls):
+        if ts >= cutoff:
+            total += 1
+            contexts.add(context)
+    return total, len(contexts)
+
+
+async def guarded_discord_call(
+    call_factory,
+    *,
+    context: str,
+    wait_for_cooldown: bool = False,
+    background: bool | None = None,
+    recovery_probe: bool = False,
+):
+    """Run a Discord REST call through the central guard.
+
+    V180 removes synthetic recovery HTTP probes. The existing central guard, Retry-After
+    handling, single-runtime lease,
+    and no-retry behavior remain authoritative.
+
+    V58 background policy:
+    - boss/audit/BF/Library/Live REST is non-essential and separately throttled.
+    - once Discord reports an API/IP temporary restriction, background REST is quarantined;
+      it never probes the API just to see whether the block ended.
+    - foreground command REST may still proceed according to Discord's own Retry-After rules.
+    - recovery_probe=True remains only for backward compatibility; V180 does not create
+      synthetic recovery HTTP requests.
+    - Voice/TTS calls never enter this function.
+    """
+    if background is None:
+        background = _is_background_discord_rest_context(context)
+
+    if background:
+        post_recovery_remaining = _background_post_recovery_quiet_remaining()
+        if post_recovery_remaining > 0 and not recovery_probe:
+            _log_background_rest_skip(context, post_recovery_remaining, reason="post-recovery-quiet")
+            return None
+
+    if SKYNET_RUNTIME_ROLE == "web":
+        print(f"⛔ Discord REST disabled in web runtime | context={context}", flush=True)
+        return None
+
+    invalid_request_remaining = _discord_invalid_request_remaining()
+    if invalid_request_remaining > 0 and not recovery_probe:
+        _log_invalid_request_cooldown_skip(context, invalid_request_remaining)
+        return None
+
+    if SKYNET_RUNTIME_ROLE == "bot" and not discord_rest_runtime_lease_owned:
+        print(
+            f"⏭️ Discord REST skipped: Gateway handover lease not owned | context={context} | no HTTP sent",
+            flush=True,
+        )
+        return None
+
+    # V180: after the server timer + local no-HTTP safety margin, background REST
+    # remains held, while a real foreground request may become the recovery test.
+    recovery_request_candidate = False
+    if not recovery_probe:
+        with discord_block_lock:
+            temp_restriction = bool(discord_block_temp_restriction)
+            server_until = float(discord_block_server_until or 0.0)
+            next_probe_mono = float(discord_block_next_probe_mono or 0.0)
+        timer_expired = (server_until > 0 and time.time() >= server_until)
+        local_timer_expired = (server_until <= 0 and next_probe_mono > 0 and time.monotonic() >= next_probe_mono)
+        if temp_restriction and (timer_expired or local_timer_expired):
+            if _is_background_discord_rest_context(context):
+                remaining = max(0.0, next_probe_mono - time.monotonic()) if next_probe_mono > 0 else 0.0
+                _log_background_rest_skip(context, remaining, reason="awaiting-real-recovery-request")
+                return None
+            recovery_request_candidate = True
+
+    global discord_rest_next_call_at, discord_background_rest_next_call_at, discord_background_rest_noncritical_next_call_at
+    global discord_background_rest_quarantined, discord_background_rest_startup_hold
+
+    background_lane_lock_acquired = False
+    background_lane_lock_name = "foreground"
+    if background:
+        invalid_context_remaining = _background_invalid_context_remaining(context)
+        if invalid_context_remaining > 0:
+            _log_background_invalid_context_skip(context, invalid_context_remaining)
+            return None
+
+        if discord_background_rest_startup_hold:
+            _log_background_rest_skip(
+                context,
+                0.0,
+                reason="startup-command-sync-hold",
+            )
+            return None
+
+        bg_remaining = _background_rest_remaining()
+        if discord_background_rest_quarantined or bg_remaining > 0:
+            if bg_remaining <= 0 and discord_background_rest_quarantined:
+                # Release only after the explicit recovery quiet window has elapsed.
+                discord_background_rest_quarantined = False
+            else:
+                _log_background_rest_skip(
+                    context,
+                    max(bg_remaining, 0.0),
+                    reason="recovery-hold" if bg_remaining > 0 else "quarantine",
+                )
+                return None
+
+        with discord_block_lock:
+            temp_restriction = discord_block_temp_restriction
+            next_probe_mono = discord_block_next_probe_mono
+        if temp_restriction and next_probe_mono > time.monotonic() and not recovery_probe:
+            _log_background_rest_skip(
+                context,
+                max(0.0, next_probe_mono - time.monotonic()),
+                reason="discord-block",
+            )
+            return None
+
+        # V175: isolate the fast time-critical lane from the conservative non-critical lane.
+        # A non-critical request can wait for its 5-minute slot without blocking Boss/BF/
+        # Auto Attendance/Boss-Log requests that are due at a time boundary.
+        if _is_time_critical_background_rest_context(context):
+            background_lane_lock = discord_background_rest_time_critical_call_lock
+            background_lane_lock_name = "time-critical"
+        else:
+            background_lane_lock = discord_background_rest_noncritical_call_lock
+            background_lane_lock_name = "noncritical"
+        await background_lane_lock.acquire()
+        background_lane_lock_acquired = True
+
+    now_mono = time.monotonic()
+    invalid_request_remaining = _discord_invalid_request_remaining()
+    if invalid_request_remaining > 0 and not recovery_probe:
+        _log_invalid_request_cooldown_skip(context, invalid_request_remaining)
+        return None
+    with discord_block_lock:
+        temp_restriction = discord_block_temp_restriction
+        next_probe_mono = discord_block_next_probe_mono
+    if temp_restriction and next_probe_mono > now_mono and not recovery_probe:
+        if background:
+            _log_background_rest_skip(context, max(0.0, next_probe_mono - now_mono), reason="discord-block")
+        else:
+            _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
+        return None
+
+    remaining = _discord_rest_rate_limit_remaining()
+    if remaining > 0 and not recovery_probe:
+        if not wait_for_cooldown:
+            _log_rest_skip(context, remaining)
+            return None
+        await asyncio.sleep(remaining)
+
+    async with discord_rest_guard_lock:
+        now_mono = time.monotonic()
+        with discord_block_lock:
+            temp_restriction = discord_block_temp_restriction
+            next_probe_mono = discord_block_next_probe_mono
+            server_until = float(discord_block_server_until or 0.0)
+        timer_expired = (server_until > 0 and time.time() >= server_until)
+        local_timer_expired = (server_until <= 0 and next_probe_mono > 0 and time.monotonic() >= next_probe_mono)
+        if temp_restriction and (timer_expired or local_timer_expired) and not recovery_probe:
+            if background:
+                remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
+                _log_background_rest_skip(context, remaining, reason="awaiting-real-recovery-request")
+                return None
+            recovery_request_candidate = True
+        if temp_restriction and next_probe_mono > now_mono and not recovery_probe:
+            if background:
+                _log_background_rest_skip(context, max(0.0, next_probe_mono - now_mono), reason="discord-block")
+            else:
+                _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
+            return None
+
+        if background:
+            bg_remaining = _background_rest_remaining()
+            if discord_background_rest_quarantined or bg_remaining > 0:
+                if bg_remaining <= 0 and discord_background_rest_quarantined:
+                    discord_background_rest_quarantined = False
+                else:
+                    _log_background_rest_skip(
+                        context,
+                        max(bg_remaining, 0.0),
+                        reason="recovery-hold" if bg_remaining > 0 else "quarantine",
+                    )
+                    return None
+
+        remaining = _discord_rest_rate_limit_remaining()
+        if remaining > 0 and not recovery_probe:
+            if not wait_for_cooldown:
+                if background:
+                    _log_background_rest_skip(context, remaining, reason="rate-limit")
+                else:
+                    _log_rest_skip(context, remaining)
+                return None
+            await asyncio.sleep(remaining)
+
+        now = time.monotonic()
+        if discord_rest_next_call_at > now:
+            await asyncio.sleep(discord_rest_next_call_at - now)
+        if discord_rest_min_interval > 0:
+            discord_rest_next_call_at = time.monotonic() + discord_rest_min_interval
+
+        had_active_block = False
+        with discord_block_lock:
+            had_active_block = discord_block_started_at > 0
+
+        try:
+            # V140: background spacing is checked immediately before the actual network call,
+            # while the dedicated background lane lock is held. This prevents concurrent queue
+            # workers from converting the configured interval into a burst after a long wait.
+            if background:
+                invalid_context_remaining = _background_invalid_context_remaining(context)
+                if invalid_context_remaining > 0:
+                    _log_background_invalid_context_skip(context, invalid_context_remaining)
+                    return None
+                now_bg = time.monotonic()
+                critical_background = _is_time_critical_background_rest_context(context)
+                next_background_slot = discord_background_rest_next_call_at
+                if not critical_background:
+                    next_background_slot = max(
+                        next_background_slot,
+                        discord_background_rest_noncritical_next_call_at,
+                    )
+                if next_background_slot > now_bg:
+                    await asyncio.sleep(next_background_slot - now_bg)
+                # Re-check the process-wide gates after the wait; a foreground command may have
+                # discovered a new Discord restriction while this background worker was sleeping.
+                now_after_wait = time.monotonic()
+                with discord_block_lock:
+                    temp_restriction = discord_block_temp_restriction
+                    next_probe_mono = discord_block_next_probe_mono
+                    server_until = float(discord_block_server_until or 0.0)
+                bg_remaining = _background_rest_remaining()
+                post_recovery_remaining = _background_post_recovery_quiet_remaining()
+                recovery_confirmation_pending = (
+                    temp_restriction
+                    and server_until > 0
+                    and time.time() >= server_until
+                )
+                if discord_background_rest_startup_hold or discord_background_rest_quarantined or bg_remaining > 0 or post_recovery_remaining > 0 or recovery_confirmation_pending or (temp_restriction and next_probe_mono > now_after_wait) or _discord_rest_rate_limit_remaining() > 0:
+                    remaining_for_log = max(
+                        bg_remaining,
+                        post_recovery_remaining,
+                        max(0.0, next_probe_mono - now_after_wait) if temp_restriction else 0.0,
+                        _discord_rest_rate_limit_remaining(),
+                    )
+                    _log_background_rest_skip(context, remaining_for_log, reason="recheck-before-send")
+                    return None
+                # V175: reserve only the selected lane's next slot.
+                # Time-critical work never waits on the non-critical 5-minute timer.
+                critical_background = _is_time_critical_background_rest_context(context)
+                if critical_background:
+                    discord_background_rest_next_call_at = now_after_wait + discord_background_rest_time_critical_min_interval
+                else:
+                    discord_background_rest_noncritical_next_call_at = now_after_wait + discord_background_rest_min_interval
+                _record_background_rest_attempt(f"{background_lane_lock_name}:{context}")
+
+            invalid_request_remaining = _discord_invalid_request_remaining()
+            if invalid_request_remaining > 0 and not recovery_probe:
+                _log_invalid_request_cooldown_skip(context, invalid_request_remaining)
+                return None
+
+            result = await call_factory()
+            _clear_discord_rest_backoff_after_success()
+            _clear_discord_block_after_success(
+                context=context,
+                recovery_probe=(recovery_probe or recovery_request_candidate),
+            )
+            if not background and had_active_block:
+                _arm_background_rest_after_foreground_recovery()
+            return result
+        except discord.HTTPException as exc:
+            if getattr(exc, "status", None) == 429:
+                # Single source of truth for Discord 429 state.
+                _record_discord_invalid_request(exc, context=context)
+                meta_429 = _extract_discord_rate_limit_metadata(exc)
+                _apply_discord_rest_429(exc, context=context)
+                recent_10m, unique_10m = _background_rest_attempt_counts(600.0) if background else (0, 0)
+                print(
+                    f"📊 Background REST 429 diagnostics | context={context} | "
+                    f"attempts_last_10m={recent_10m} | unique_contexts_last_10m={unique_10m}",
+                    flush=True,
+                )
+                if meta_429.get("cloudflare_1015") or meta_429.get("cf_ray"):
+                    print(
+                        "🔎 Discord 429 response diagnostics | "
+                        f"cloudflare_1015={bool(meta_429.get('cloudflare_1015'))} | "
+                        f"cf_ray={meta_429.get('cf_ray') or '-'} | "
+                        f"via={meta_429.get('via') or '-'} | "
+                        f"server={meta_429.get('server') or '-'} | "
+                        f"content_type={meta_429.get('content_type') or '-'}",
+                        flush=True,
+                    )
+            else:
+                _record_discord_invalid_request(exc, context=context)
+                _apply_discord_rest_error(exc, context=context)
+            raise
+        except Exception:
+            raise
+        finally:
+            if background and background_lane_lock_acquired:
+                if background_lane_lock_name == "time-critical":
+                    discord_background_rest_time_critical_call_lock.release()
+                else:
+                    discord_background_rest_noncritical_call_lock.release()
+
+
+async def _ensure_background_channel_recovery_probe(
+    channel,
+    *,
+    context: str,
+    background: bool | None = None,
+) -> bool:
+    """Compatibility shim: never issue an extra Discord request for channel readiness.
+
+    V180 removes all automatic post-recovery HTTP probes because the production log
+    showed that this artificial background request could become the exact request that
+    recreated a fresh temporary Discord API restriction. Channel objects are already
+    available from the Gateway cache for the existing write path, while the actual send/edit
+    remains protected by guarded_discord_call().
+    """
+    return True
+
+async def guarded_channel_send(channel, *, context: str, content=None, embed=None, view=None, background: bool | None = None):
+    # V179: send the actual requested message through the central guard; never add a
+    # separate post-recovery fetch_channel() probe that would consume another Discord API call.
+    return await guarded_discord_call(
+        lambda: channel.send(content=content, embed=embed, view=view),
+        context=context,
+        background=background,
+    )
+
+
+async def guarded_fetch_channel(channel_id: int, *, context: str, background: bool | None = None):
+    return await guarded_discord_call(
+        lambda: bot.fetch_channel(int(channel_id)),
+        context=context,
+        background=background,
+    )
+
+
+async def guarded_fetch_message(channel, message_id: int, *, context: str, background: bool | None = None):
+    return await guarded_discord_call(
+        lambda: channel.fetch_message(int(message_id)),
+        context=context,
+        background=background,
+    )
+
+
+async def guarded_message_edit(message, *, context: str, background: bool | None = None, **kwargs):
+    # V179: edit only through the central guard; no extra recovery probe request.
+    return await guarded_discord_call(
+        lambda: message.edit(**kwargs),
+        context=context,
+        background=background,
+    )
+
+
+async def guarded_context_send(ctx, *args, context: str, background: bool | None = None, **kwargs):
+    return await guarded_discord_call(
+        lambda: ctx.send(*args, **kwargs),
+        context=context,
+        background=background,
+    )
+
+
+# Interaction webhook traffic is intentionally isolated from the background REST
+# circuit breaker. A valid interaction token has its own webhook lane.
+# V132: Interaction 429 state is also isolated from the shared REST breaker so a
+# failed interaction ACK cannot create a 50-60 minute REST quarantine for boss/audit/BF.
+interaction_webhook_guard_lock = asyncio.Lock()
+interaction_webhook_next_call_at = 0.0
+interaction_api_suppressed_until = 0.0
+interaction_api_last_429_log = 0.0
+
+# V161: Cloudflare/API temporary restrictions are IP-scoped in practice. The latest
+# production log showed Interaction ACK requests continuing during an active REST
+# restriction and receiving 429 responses. Keep the interaction lane logically
+# separate from the shared REST breaker, but do NOT send interaction HTTP while the
+# shared API temporary restriction is active. This prevents additional invalid 429s
+# from being generated during the server-supplied restriction window.
+def _interaction_shared_restriction_remaining() -> float:
+    with discord_block_lock:
+        temp_restriction = bool(discord_block_temp_restriction)
+        server_until = float(discord_block_server_until or 0.0)
+        next_probe_mono = float(discord_block_next_probe_mono or 0.0)
+        started = float(discord_block_started_at or 0.0)
+    if not temp_restriction or started <= 0:
+        return 0.0
+    if server_until > 0:
+        return max(0.0, server_until - time.time())
+    if next_probe_mono > 0:
+        return max(0.0, next_probe_mono - time.monotonic())
+    return 60.0
+
+
+async def _interaction_webhook_call(call_factory, *, context: str):
+    global interaction_webhook_next_call_at
+    async with interaction_webhook_guard_lock:
+        shared_restriction_remaining = _interaction_shared_restriction_remaining()
+        if shared_restriction_remaining > 0:
+            print(
+                f"⏭️ Interaction webhook skipped during Discord API temporary restriction | "
+                f"context={context} | remaining={shared_restriction_remaining:.1f}s | no HTTP sent",
+                flush=True,
+            )
+            return None
+        now = time.monotonic()
+        if interaction_webhook_next_call_at > now:
+            await asyncio.sleep(interaction_webhook_next_call_at - now)
+        try:
+            result = await call_factory()
+            interaction_webhook_next_call_at = time.monotonic() + max(0.1, discord_rest_min_interval)
+            return result
+        except discord.HTTPException as exc:
+            if getattr(exc, "status", None) == 429:
+                retry_after = 0.0
+                try:
+                    retry_after = float(getattr(exc, "retry_after", 0) or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+                # Only honor a short webhook retry delay.  Waiting for a long
+                # restriction here would exceed the lifetime/usefulness of the interaction.
+                if 0 < retry_after <= 8.0:
+                    interaction_webhook_next_call_at = max(
+                        interaction_webhook_next_call_at,
+                        time.monotonic() + retry_after,
+                    )
+                print(
+                    f"⚠️ Interaction webhook 429 | context={context} | retry_after={retry_after:.2f}s | "
+                    "one-shot response; no immediate retry; background REST cooldown ignored",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"⚠️ Interaction webhook failed | context={context} | status={getattr(exc, 'status', None)} | {exc}",
+                    flush=True,
+                )
+            return None
+        except Exception as exc:
+            print(f"⚠️ Interaction webhook failed unexpectedly | context={context} | {exc!r}", flush=True)
+            return None
+
+
+async def guarded_interaction_followup_send(interaction: discord.Interaction, context: str, *args, **kwargs):
+    """Send a follow-up only after a successful initial interaction response.
+
+    A follow-up before the initial callback has been accepted is guaranteed to be
+    unsafe for an interaction that Discord has already rejected with 429.  Skip it
+    locally so a failed ACK cannot create an unnecessary second request.
+    """
+    try:
+        if not interaction.response.is_done():
+            print(
+                f"⏭️ Interaction followup skipped because initial response was not accepted | context={context}",
+                flush=True,
+            )
+            return None
+    except Exception:
+        pass
+    return await _interaction_webhook_call(
+        lambda: interaction.followup.send(*args, **kwargs),
+        context=context,
+    )
+
+
+async def guarded_interaction_edit_original(interaction: discord.Interaction, context: str, *args, **kwargs):
+    """Edit the original interaction response only when the initial callback succeeded."""
+    try:
+        if not interaction.response.is_done():
+            print(
+                f"⏭️ Interaction edit skipped because initial response was not accepted | context={context}",
+                flush=True,
+            )
+            return None
+    except Exception:
+        pass
+    return await _interaction_webhook_call(
+        lambda: interaction.edit_original_response(*args, **kwargs),
+        context=context,
+    )
+
+
+bot_event_loop = None
+
+bf_notify_enabled = True
+lib_notify_enabled = True
+ppl_notify_enabled = True
+tts_th_enabled = True
+tts_en_enabled = True
+tts_ko_enabled = True
+
+# V72: Discord text notification languages are independent from TTS languages.
+discord_notify_th_enabled = True
+discord_notify_en_enabled = True
+discord_notify_ko_enabled = True
+
+# V125: Per-dashboard-user Discord DM notification preferences.
+# This is additive and opt-in; existing public Discord channel notifications remain unchanged.
+# V148: Optional per-user Discord DMs are deliberately much slower than the existing
+# public Boss/Attendance REST lane. The current log showed 6 background REST attempts
+# within 10 minutes and the concrete request that received Discord's temporary API
+# restriction was a per-user Boss DM. Keeping this lane at a 5-minute start-to-start
+# floor reduces repeated optional DM traffic without changing public notifications,
+# commands, Firebase, TTS, or Voice. The environment variable remains supported.
+DISCORD_USER_DM_MIN_INTERVAL = max(15.0, float(os.environ.get("DISCORD_USER_DM_MIN_INTERVAL", "15")))
+PENDING_DISCORD_USER_DM_MAX = 200
+pending_discord_user_dm_notifications = deque(maxlen=PENDING_DISCORD_USER_DM_MAX)
+# V148: After a long Discord temporary restriction has been successfully cleared,
+# keep the optional per-user DM lane quiet for 30 minutes and discard any stale
+# pre-restriction DM backlog. Public/time-critical background REST is not changed.
+DISCORD_USER_DM_LONG_RECOVERY_QUIET_SECONDS = max(600.0, float(os.environ.get("DISCORD_USER_DM_LONG_RECOVERY_QUIET", "1800")))
+discord_user_dm_recovery_suppressed_until = 0.0
+pending_discord_user_dm_lock = threading.Lock()
+pending_discord_user_dm_keys = set()
+discord_user_dm_stage_prepared = set()
+discord_user_dm_stage_order = deque(maxlen=500)
+discord_user_dm_pref_cache = []
+discord_user_dm_pref_cache_at = 0.0
+discord_user_dm_pref_cache_lock = threading.Lock()
+
+# V135: Auto Attendance panel delivery is queued separately from the lifecycle timer.
+# The activity is still created/opened at T-30 and closed at spawn; only the Discord
+# panel send is deferred until the REST lane is available.
+PENDING_AUTO_ATTENDANCE_PANEL_MAX = 200
+pending_auto_attendance_panels = deque(maxlen=PENDING_AUTO_ATTENDANCE_PANEL_MAX)
+pending_auto_attendance_panel_lock = threading.Lock()
+pending_auto_attendance_panel_keys = set()
+pending_auto_attendance_panel_inflight_keys = set()
+# V172: suppress duplicate Discord panel creation when the lifecycle loop is working
+# from a slightly stale Firebase snapshot that still has panel_message_id=None after
+# the current process has already delivered the panel. This is in-memory only and
+# does not alter Firebase attendance history or the Discord REST guard.
+AUTO_ATTENDANCE_PANEL_COMPLETED_MAX = 5000
+auto_attendance_panel_completed_keys = set()
+auto_attendance_panel_completed_order = deque(maxlen=AUTO_ATTENDANCE_PANEL_COMPLETED_MAX)
+# V145: Auto Attendance activity records remain persistent in Firebase, but an unsent
+# Discord panel is only useful before the spawn/close window. These values bound any
+# stale-panel restoration after restart while preserving the existing environment
+# variable names for compatibility.
+# V145: An Auto Attendance panel is time-sensitive. If Discord is unavailable through
+# the spawn/close point, retrying the old panel hours later is not useful and can
+# repeatedly exercise the message-create REST endpoint after a temporary restriction.
+# Keep only a short post-close grace for a near-boundary recovery; stale activities
+# from an earlier restriction/restart are never restored.
+AUTO_ATTENDANCE_PANEL_LATE_DELIVERY_SECONDS = max(60.0, float(os.environ.get("AUTO_ATTENDANCE_PANEL_LATE_DELIVERY_SECONDS", "300")))
+AUTO_ATTENDANCE_PANEL_RESTORE_WINDOW_SECONDS = max(300.0, float(os.environ.get("AUTO_ATTENDANCE_PANEL_RESTORE_WINDOW_SECONDS", "7200")))
+
+# V137: Boss-record confirmation remains once per occupied /setvoice room, plus a local retry worker.
+# Boss advance/spawn announcements remain multi-room/global as before.
+# Duplicate protection is scoped by (confirmationRequestId, guildId, channelId),
+# so multiple occupied rooms still each receive one confirmation, while a race or
+# repeated Firebase/voice-join trigger cannot speak twice in the same room.
+_voice_confirmation_inflight_ids = set()
+_voice_confirmation_completed_ids = set()
+VOICE_CONFIRMATION_ROOM_COMPLETED_MAX = 4000
+_voice_confirmation_room_inflight = set()
+_voice_confirmation_room_completed = set()
+_voice_confirmation_room_completed_order = deque(maxlen=VOICE_CONFIRMATION_ROOM_COMPLETED_MAX)
+# V127: keep per-user Discord notification preferences outside users/<uid> so the
+# browser/user profile security rules cannot reject this feature-specific write.
+DISCORD_USER_NOTIFY_ROOT = "discord_user_notifications"
+
+vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
+last_bf_notified_hour = -1
+last_bf_text_notified_hour = -1
+last_bf_voice_success_hour = -1
+# Prevent repeated BF text API calls while Discord is rate-limiting.
+bf_text_retry_after_ts = {}
+# V156: throttle informational BF voice-window diagnostics without changing delivery behavior.
+bf_voice_diag_last_ts = {}
+# V168: BF warnings are anchored to the exact HH:57 warning boundary for each even-hour
+# Battlefield start. The warning remains 3 minutes before the even-hour BF start.
+BF_WARNING_LEAD_SECONDS = 180.0
+BF_WARNING_LATE_GRACE_SECONDS = max(
+    1.0, float(os.environ.get("BF_WARNING_LATE_GRACE_SECONDS", "3.0"))
+)
+BF_TTS_PREWARM_LEAD_SECONDS = max(
+    5.0, float(os.environ.get("BF_TTS_PREWARM_LEAD_SECONDS", "15.0"))
+)
+bf_tts_prewarm_cache = {}
+bf_tts_prewarm_tasks = {}
+
+# Serialize manual /notice commands to avoid bursty Discord API traffic.
+NOTICE_COMMAND_LOCK = asyncio.Lock()
+NOTICE_LAST_RUN_TS = 0.0
+last_lib_notified_key = ""
+
+cached_live_message = None
+VOICE_THAI = "th-TH-PremwadeeNeural"
+VOICE_ENG = "en-US-AriaNeural"
+VOICE_KOR = "ko-KR-SunHiNeural"
+
+BOSS_RESPAWN_TIMES = {
+    "Wadangka": timedelta(hours=2, minutes=30),
+    "Elemental Queen": timedelta(hours=2, minutes=30),
+    "Tank": timedelta(minutes=58, seconds=20),
+    "Swirl Flame": timedelta(minutes=58, seconds=20),
+    "Maelstrom": timedelta(minutes=58, seconds=20),
+    "Twister": timedelta(minutes=58, seconds=20),
+    "Bigmama": timedelta(hours=48),
+    "Chief Magief": timedelta(minutes=30),
+    "Faith": timedelta(hours=5, minutes=53),
+    "Apapa": timedelta(minutes=15),
+    "Corrupt Forest Keeper": timedelta(minutes=58),
+    "Recluse": timedelta(hours=11, minutes=23),
+    "Blackskull": timedelta(minutes=56, seconds=50),
+    "Sleepy Kooii": timedelta(minutes=20),
+    "Awaken Kooii": timedelta(hours=1, minutes=3),
+    "Eeheehee": timedelta(hours=1, minutes=6, seconds=48),
+    "Ooheeheek": timedelta(hours=1, minutes=8, seconds=3),
+    "Oohehe": timedelta(hours=1, minutes=5, seconds=8),
+    "Guardian Imp": timedelta(hours=1, minutes=3),
+    "Devilang": timedelta(hours=5, minutes=33),
+    "Blackjuno": timedelta(minutes=35),
+    "Blacksky": timedelta(minutes=35),
+    "Red Fox": timedelta(minutes=20),
+    "7tailfox": timedelta(minutes=20),
+    "777Tailfox": timedelta(minutes=30),
+    "Sunrise Flower": timedelta(minutes=20),
+    "Magma Senior Thief": timedelta(minutes=20),
+    "Bbinikjoe": timedelta(minutes=20),
+    "Bigmouse": timedelta(minutes=20),
+    "Caligo": timedelta(days=7),
+    "Poison Root Flower": timedelta(minutes=28, seconds=10),
+    "Contaminated Queen Bee": timedelta(minutes=28),
+    "Rotten Pudding": timedelta(minutes=30),
+    "Swamp Flower Monster": timedelta(minutes=30),
+    "Ukpana": timedelta(hours=48),
+    "Darlene the Witch": timedelta(hours=72),
+    "Illust": timedelta(hours=72),
+    "Actaemon": timedelta(hours=6),
+    "Aiyo's Protector": timedelta(hours=72),
+    "Glucose": timedelta(minutes=30),
+    "Overload": timedelta(minutes=29, seconds=52),
+    "Soul Lich": timedelta(hours=24, minutes=15),
+    "Platanista": timedelta(hours=168),
+    "Barslaf": timedelta(hours=48),
+    "Billiard": timedelta(hours=7, minutes=55, seconds=3),
+    "Shaaack": timedelta(minutes=30),
+    "Suuuk": timedelta(minutes=20),
+    "Sususuk": timedelta(minutes=20),
+    "sandgrave": timedelta(minutes=20),
+    "Elder Beholder": timedelta(minutes=20)
+}
+
+DEFAULT_BOSS_NAMES = set(BOSS_RESPAWN_TIMES.keys())
+
+BOSS_CD_TEXT = {
+    "Wadangka": "2 ชั่วโมง 30 นาที",
+    "Elemental Queen": "2 ชั่วโมง 30 นาที",
+    "Tank": "58 นาที 20 วินาที",
+    "Swirl Flame": "58 นาที 20 วินาที",
+    "Maelstrom": "58 นาที 20 วินาที",
+    "Twister": "58 นาที 20 วินาที",
+    "Bigmama": "48 ชั่วโมง",
+    "Chief Magief": "30 นาที",
+    "Faith": "5 ชั่วโมง 53 นาที",
+    "Apapa": "15 นาที",
+    "Corrupt Forest Keeper": "58 นาที",
+    "Recluse": "11 ชั่วโมง 23 นาที",
+    "Blackskull": "56 นาที 50 วินาที",
+    "Sleepy Kooii": "20 นาที",
+    "Awaken Kooii": "1 ชั่วโมง 3 นาที",
+    "Eeheehee": "1 ชั่วโมง 6 นาที 48 วินาที",
+    "Ooheeheek": "1 ชั่วโมง 8 นาที 3 วินาที",
+    "Oohehe": "1 ชั่วโมง 5 นาที 8 วินาที",
+    "Guardian Imp": "1 ชั่วโมง 3 นาที",
+    "Devilang": "5 ชั่วโมง 33 นาที",
+    "Blackjuno": "35 นาที",
+    "Blacksky": "35 นาที",
+    "Red Fox": "20 นาที",
+    "7tailfox": "20 นาที",
+    "777Tailfox": "30 นาที",
+    "Sunrise Flower": "20 นาที",
+    "Magma Senior Thief": "20 นาที",
+    "Bbinikjoe": "20 นาที",
+    "Bigmouse": "20 นาที",
+    "Caligo": "7 วัน",
+    "Poison Root Flower": "28 นาที 10 วินาที",
+    "Contaminated Queen Bee": "28 นาที",
+    "Rotten Pudding": "30 นาที",
+    "Swamp Flower Monster": "30 นาที",
+    "Ukpana": "48 ชั่วโมง",
+    "Darlene the Witch": "72 ชั่วโมง",
+    "Illust": "72 ชั่วโมง",
+    "Actaemon": "6 ชั่วโมง",
+    "Aiyo's Protector": "72 ชั่วโมง",
+    "Glucose": "30 นาที",
+    "Overload": "29 นาที 52 วินาที",
+    "Soul Lich": "24 ชั่วโมง 15 นาที",
+    "Platanista": "168 ชั่วโมง (7 วัน)",
+    "Barslaf": "48 ชั่วโมง",
+    "Billiard": "7 ชั่วโมง 55 นาที 3 วินาที",
+    "Shaaack": "30 นาที",
+    "Suuuk": "20 นาที",
+    "Sususuk": "20 นาที",
+    "sandgrave": "20 นาที",
+    "Elder Beholder": "20 นาที"
+}
+
+ADVANCE_NOTICE_SECONDS = {
+    "Wadangka": 1800, "Elemental Queen": 1800, "Tank": 300, "Swirl Flame": 300,
+    "Maelstrom": 300, "Twister": 300, "Bigmama": 1800, "Chief Magief": 300,
+    "Faith": 1800, "Apapa": 300, "Corrupt Forest Keeper": 300, "Recluse": 1800,
+    "Blackskull": 300, "Sleepy Kooii": 300, "Awaken Kooii": 300, "Eeheehee": 300,
+    "Ooheeheek": 300, "Oohehe": 300, "Guardian Imp": 300, "Devilang": 1800,
+    "Blackjuno": 300, "Blacksky": 300, "Red Fox": 300, "7tailfox": 300,
+    "777Tailfox": 300, "Sunrise Flower": 300, "Magma Senior Thief": 300, "Bbinikjoe": 300,
+    "Bigmouse": 300, "Caligo": 3600, "Poison Root Flower": 300, "Contaminated Queen Bee": 300,
+    "Rotten Pudding": 300, "Swamp Flower Monster": 300, "Ukpana": 1800, "Darlene the Witch": 1800,
+    "Illust": 1800, "Actaemon": 1800, "Aiyo's Protector": 1800, "Glucose": 300,
+    "Overload": 300, "Soul Lich": 1800, "Platanista": 3600, "Barslaf": 1800,
+    "Billiard": 1800, "Shaaack": 300, "Suuuk": 300, "Sususuk": 300,
+    "sandgrave": 300, "Elder Beholder": 300
+}
+
+ADVANCE_NOTICE_TEXT = {
+    "Wadangka": "30 นาที", "Elemental Queen": "30 นาที", "Tank": "5 นาที", "Swirl Flame": "5 นาที",
+    "Maelstrom": "5 นาที", "Twister": "5 นาที", "Bigmama": "30 นาที", "Chief Magief": "5 นาที",
+    "Faith": "30 นาที", "Apapa": "5 นาที", "Corrupt Forest Keeper": "5 นาที", "Recluse": "30 นาที",
+    "Blackskull": "5 นาที", "Sleepy Kooii": "5 นาที", "Awaken Kooii": "5 นาที", "Eeheehee": "5 นาที",
+    "Ooheeheek": "5 นาที", "Oohehe": "5 นาที", "Guardian Imp": "5 นาที", "Devilang": "30 นาที",
+    "Blackjuno": "5 นาที", "Blacksky": "5 นาที", "Red Fox": "5 นาที", "7tailfox": "5 นาที",
+    "777Tailfox": "5 นาที", "Sunrise Flower": "5 นาที", "Magma Senior Thief": "5 นาที", "Bbinikjoe": "5 นาที",
+    "Bigmouse": "5 นาที", "Caligo": "1 ชั่วโมง", "Poison Root Flower": "5 นาที", "Contaminated Queen Bee": "5 นาที",
+    "Rotten Pudding": "5 นาที", "Swamp Flower Monster": "5 นาที", "Ukpana": "30 นาที", "Darlene the Witch": "30 นาที",
+    "Illust": "30 นาที", "Actaemon": "30 นาที", "Aiyo's Protector": "30 นาที", "Glucose": "5 นาที",
+    "Overload": "5 นาที", "Soul Lich": "30 นาที", "Platanista": "1 ชั่วโมง", "Barslaf": "30 นาที",
+    "Billiard": "30 นาที", "Shaaack": "5 นาที", "Suuuk": "5 นาที", "Sususuk": "5 นาที",
+    "sandgrave": "5 นาที", "Elder Beholder": "5 นาที"
+}
+
+BOSS_PRONUNCIATION = {
+    "Wadangka": "วาดังการ์", "Elemental Queen": "เอเลเมนทัล ควีน", "Tank": "แท้งก์", "Swirl Flame": "สเวิร์ล เฟลม",
+    "Maelstrom": "เมลสตรอม", "Twister": "ทวิสเตอร์", "Bigmama": "บิ๊กมาม่า", "Chief Magief": "ชีฟ มาเกียฟ",
+    "Faith": "เฟธ", "Apapa": "อาปาป้า", "Corrupt Forest Keeper": "คอร์รัปต์ ฟอเรสต์ คีปเปอร์", "Recluse": "เรคลูซ",
+    "Blackskull": "แบล็กสกัลป์", "Sleepy Kooii": "สลีปปี้ คูอี", "Awaken Kooii": "อเวเคน คูอี", "Eeheehee": "อีฮีฮี",
+    "Ooheeheek": "โอฮีฮีก", "Oohehe": "โอเฮเฮ้", "Guardian Imp": "การ์เดียน อิมป์", "Devilang": "เดวิลแลง",
+    "Blackjuno": "แบล็กจูโน่", "Blacksky": "แบล็กสกาย", "Red Fox": "เรดฟ็อกซ์", "7tailfox": "เซเว่นเทลฟ็อกซ์",
+    "777Tailfox": "ทริปเปิลเซเว่นเทลฟ็อกซ์", "Sunrise Flower": "ซันไรส์ ฟลาวเวอร์", "Magma Senior Thief": "แมกม่า ซีเนียร์ ธีฟ",
+    "Bbinikjoe": "บีนิกโจ", "Bigmouse": "บิ๊กเมาส์", "Caligo": "คาลิโก้", "Poison Root Flower": "พอยซัน รูท ฟลาวเวอร์",
+    "Contaminated Queen Bee": "คอนทามิเนตเต็ด ควีนบี", "Rotten Pudding": "รอตเทน พุดดิ้ง", "Swamp Flower Monster": "สแวมป์ ฟลาวเวอร์ มอนสเตอร์",
+    "Ukpana": "อุคปาน่า", "Darlene the Witch": "ดาร์ลีน เดอะ วิทช์", "Illust": "อิลลัสต์", "Actaemon": "แอคธีมอน",
+    "Aiyo's Protector": "ไอโย โปรเตกเตอร์", "Glucose": "กลูโคส", "Overload": "โอเวอร์โหลด", "โซล ลิช": "โซล ลิช",
+    "Platanista": "พลานิสต้า", "Barslaf": "บาร์สลาฟ", "Billiard": "บิลเลียด", "Shaaack": "ชาค",
+    "Suuuk": "ซุก", "Sususuk": "ซูซูซุก", "sandgrave": "แซนด์เกรฟ", "Elder Beholder": "เอลเดอร์ บีโฮลเดอร์"
+}
+
+boss_schedule = {}
+live_message_config = {}
+
+# One-shot Voice confirmation for newly recorded boss times.
+_confirmation_seen_ids = set()
+_confirmation_claim_lock = asyncio.Lock()
+# Dashboard confirmations submitted while Discord is not READY are held here and
+# drained automatically after on_ready completes.
+_pending_voice_confirmations = {}
+
+# ==========================================
+# 📝 3. ระบบ Audit Log
+# ==========================================
+# 🔐 V50: Keep Audit Log durable while Discord REST is temporarily blocked.
+# This queue never retries in a tight loop; it is drained by a 15-second background task
+# only after the existing REST guard says requests are allowed again.
+PENDING_AUDIT_MAX = 200
+pending_audit_logs = deque(maxlen=PENDING_AUDIT_MAX)
+pending_audit_lock = threading.Lock()
+
+
+AUDIT_ACTION_TRANSLATIONS = {
+    "ตั้งค่า TTS เสียง (/tts)":{"th":"ตั้งค่า TTS เสียง (/tts)","en":"TTS Voice Settings (/tts)","ko":"TTS 음성 설정 (/tts)"},
+    "ตั้งค่าการแจ้งเตือน BF (/notify)":{"th":"ตั้งค่าการแจ้งเตือน BF (/notify)","en":"BF Notification Settings (/notify)","ko":"BF 알림 설정 (/notify)"},
+    "ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)":{"th":"ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)","en":"Member Voice-Join Notification Settings (/ppl)","ko":"음성 채널 입장 알림 설정 (/ppl)"},
+    "เปิดระบบทักทายคนพิเศษ (/vip)":{"th":"เปิดระบบทักทายคนพิเศษ (/vip)","en":"Enable VIP Greeting (/vip)","ko":"VIP 인사 기능 활성화 (/vip)"},
+    "ปิดระบบทักทายคนพิเศษ (/vip)":{"th":"ปิดระบบทักทายคนพิเศษ (/vip)","en":"Disable VIP Greeting (/vip)","ko":"VIP 인사 기능 비활성화 (/vip)"},
+    "เช็กเวลาบอสพร้อม TTS (!time)":{"th":"เช็กเวลาบอสพร้อม TTS (!time)","en":"Check Boss Times with TTS (!time)","ko":"TTS와 함께 보스 시간 확인 (!time)"},
+    "เพิ่มบอส (/addboss)":{"th":"เพิ่มบอส (/addboss)","en":"Add Boss (/addboss)","ko":"보스 추가 (/addboss)"},
+    "ลบบอส (/delboss)":{"th":"ลบบอส (/delboss)","en":"Delete Boss (/delboss)","ko":"보스 삭제 (/delboss)"},
+    "สร้าง Live Embed (/setlive)":{"th":"สร้าง Live Embed (/setlive)","en":"Create Live Embed (/setlive)","ko":"Live Embed 생성 (/setlive)"},
+    "ประกาศ Code / Item ของบอส":{"th":"ประกาศ Code / Item ของบอส","en":"Boss Code / Item Announcement","ko":"보스 코드 / 아이템 공지"},
+    "ประกาศเช็คชื่อบอส":{"th":"ประกาศเช็คชื่อบอส","en":"Boss Attendance Announcement","ko":"보스 출석 공지"},
+    "บันทึกเวลาบอส (Dashboard)":{"th":"บันทึกเวลาบอส (Dashboard)","en":"Boss Time Recorded (Dashboard)","ko":"보스 시간 기록 (Dashboard)"},
+}
+
+def _translate_audit_action(action: str, lang: str) -> str:
+    entry=AUDIT_ACTION_TRANSLATIONS.get(str(action))
+    return entry.get(lang, entry.get("th", str(action))) if entry else str(action)
+
+def _translate_audit_details(action: str, details: str, lang: str) -> str:
+    text=str(details or "-")
+    if lang=="th": return text
+    if action=="ตั้งค่า TTS เสียง (/tts)":
+        m=re.match(r"ภาษา:\s*`([^`]+)`\s*\|\s*สถานะ:\s*`([^`]+)`",text)
+        if m: return f"Language: `{m.group(1)}` | Status: `{m.group(2)}`" if lang=="en" else f"언어: `{m.group(1)}` | 상태: `{m.group(2)}`"
+    if action in {"ตั้งค่าการแจ้งเตือน BF (/notify)","ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)"}:
+        m=re.search(r"`([^`]+)`",text); status=m.group(1) if m else "-"
+        return f"Changed status to: `{status}`" if lang=="en" else f"상태 변경: `{status}`"
+    if action=="เปิดระบบทักทายคนพิเศษ (/vip)":
+        m=re.search(r"คนพิเศษ:\s*`([^`]*)`\s*\n💬 ข้อความ:\s*(.*)$",text,re.S)
+        if m: return f"👤 VIP User: `{m.group(1)}`\n💬 Message: {m.group(2)}" if lang=="en" else f"👤 VIP 사용자: `{m.group(1)}`\n💬 메시지: {m.group(2)}"
+    if action=="ปิดระบบทักทายคนพิเศษ (/vip)": return "VIP information was cleared successfully." if lang=="en" else "VIP 정보가 성공적으로 삭제되었습니다."
+    if action=="เช็กเวลาบอสพร้อม TTS (!time)": return "Boss times were calculated, sorted, and read aloud successfully." if lang=="en" else "보스 시간을 계산하고 정렬한 후 음성으로 안내했습니다."
+    if action=="เพิ่มบอส (/addboss)": return text.replace("ไม่มีการสร้าง boss_schedule","No boss_schedule was created.") if lang=="en" else text.replace("ไม่มีการสร้าง boss_schedule","boss_schedule은 생성되지 않았습니다.")
+    if action=="ลบบอส (/delboss)":
+        m=re.search(r"ลบบอส:\s*`([^`]*)`",text)
+        if m: return f"🗑️ Deleted boss: `{m.group(1)}`" if lang=="en" else f"🗑️ 삭제된 보스: `{m.group(1)}`"
+    if action=="สร้าง Live Embed (/setlive)":
+        return text.replace("ช่อง:","Channel:") if lang=="en" else text.replace("ช่อง:","채널:").replace("Message ID:","메시지 ID:")
+    if action in {"ประกาศเช็คชื่อบอส", "ประกาศ Code / Item ของบอส"}:
+        return text.replace("ผู้ประกาศ", "Announcer" if lang=="en" else "공지자").replace("ชื่อบอส", "Boss" if lang=="en" else "보스").replace("โค้ด (Code)", "Code").replace("ไอเทมดรอป", "Drop Item" if lang=="en" else "드롭 아이템")
+    return text
+
+def _build_audit_embed(user: discord.User, action: str, details: str, color: discord.Color, *, languages=None):
+    enabled=list(languages or get_enabled_discord_notification_languages()) or ["th"]; primary=enabled[0]
+    embed=discord.Embed(title=f"📝 Audit Log: {_translate_audit_action(action,primary)}",color=color,timestamp=datetime.now(TZ_THAI))
+    actor={"th":"👤 ผู้ดำเนินการ","en":"👤 Actor","ko":"👤 수행자"}; detail={"th":"📋 รายละเอียด","en":"📋 Details","ko":"📋 상세 정보"}
+    embed.add_field(name=actor[primary],value=f"{user.mention} (`{user.name}`)",inline=True)
+    for lang in enabled:
+        label={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]
+        embed.add_field(name=f"{detail[lang]} • {label}",value=_translate_audit_details(action,details,lang),inline=False)
+    embed.set_footer(text=f"User ID: {user.id}")
+    return embed
+
+
+def _queue_audit_log(
+    guild_id: int,
+    channel_id: int,
+    action: str,
+    user_id: int,
+    user_name: str,
+    details: str,
+    color_value: int,
+    channel_name: str | None = None,
+    rest_context: str | None = None,
+    hide_user_id: bool = False,
+):
+    item = {
+        "guild_id": int(guild_id),
+        "channel_id": int(channel_id),
+        "channel_name": str(channel_name or "").strip(),
+        "action": str(action),
+        "user_id": int(user_id),
+        "user_name": str(user_name),
+        "details": str(details),
+        "color_value": int(color_value),
+        "rest_context": str(rest_context or "").strip(),
+        "hide_user_id": bool(hide_user_id),
+        "queued_at": time.time(),
+    }
+    with pending_audit_lock:
+        pending_audit_logs.append(item)
+        size = len(pending_audit_logs)
+    print(
+        f"⏸️ Audit Log queued during Discord REST cooldown | action={action} | queue={size}/{PENDING_AUDIT_MAX}",
+        flush=True,
+    )
+
+
+def _find_cached_dashboard_boss_log_channel(guild: discord.Guild):
+    """Find the dedicated Dashboard Boss Time channel without making a Discord HTTP request."""
+    if not guild:
+        return None
+
+    # V164: Prefer an explicit channel ID when configured. This is the most reliable
+    # route when a server has duplicate/similar channel names.
+    if BOSS_LOG_CHANNEL_ID:
+        try:
+            channel = guild.get_channel(int(BOSS_LOG_CHANNEL_ID))
+        except (TypeError, ValueError):
+            channel = None
+        if isinstance(channel, discord.TextChannel):
+            return channel
+
+    target_name = _normalize_boss_log_channel_name(BOSS_LOG_CHANNEL_NAME).casefold()
+    # V168: normalize the dedicated Boss Time Log name before comparison. Gateway
+    # cache is used only; no extra REST request is generated by this resolver.
+    for channel in list(getattr(guild, "channels", []) or []):
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        candidate_name = _normalize_boss_log_channel_name(getattr(channel, "name", "")).casefold()
+        if candidate_name == target_name:
+            return channel
+    return None
+
+
+def _queue_dashboard_boss_log(*, boss_name: str, username: str, firebase_uid: str, request_id: str,
+                              kill_at: datetime, spawn_at: datetime, notice_minutes: int,
+                              sp_time_minutes: int, timezone_name: str) -> int:
+    """Queue one durable Boss Time reference log after a successful Firebase save.
+
+    V164 fixes the V163 failure mode seen in Render logs where the exact channel name
+    was not present in the cached text-channel list. The queue remains the only sender;
+    this helper itself never performs Discord HTTP and therefore cannot amplify a 429.
+    """
+    queued = 0
+    details = (
+        f"⚔️ Boss: `{boss_name}`\n"
+        f"🕒 Kill Time: `{kill_at.strftime('%d/%m/%Y %H:%M:%S %Z')}`\n"
+        f"⏭️ Spawn Time: `{spawn_at.strftime('%d/%m/%Y %H:%M:%S %Z')}`\n"
+        f"⏱️ SP Time: `{int(sp_time_minutes)} minutes`\n"
+        f"🔔 Notice: `{int(notice_minutes)} minutes`\n"
+        f"👤 Recorded By: `{username}`\n"
+        f"🌐 Timezone: `{timezone_name}`"
+    )
+    for guild in list(getattr(bot, "guilds", []) or []):
+        channel = _find_cached_dashboard_boss_log_channel(guild)
+        if channel is None:
+            print(
+                f"⚠️ Boss Time log channel not found in cached guilds | channel={BOSS_LOG_CHANNEL_NAME} | "
+                f"channel_id={BOSS_LOG_CHANNEL_ID or '-'} | boss={boss_name} | request={request_id} | "
+                "check View Channel + Send Messages permissions and channel name/ID",
+                flush=True,
+            )
+            continue
+
+        # Permission diagnostics are local/cached only; no REST request is made.
+        me = guild.me
+        if me is not None:
+            perms = channel.permissions_for(me)
+            if not perms.view_channel or not perms.send_messages:
+                print(
+                    f"⚠️ Boss Time log channel permission check failed | guild={guild.name} | "
+                    f"channel={channel.name} | view_channel={perms.view_channel} | "
+                    f"send_messages={perms.send_messages} | boss={boss_name} | request={request_id}",
+                    flush=True,
+                )
+                continue
+
+        _queue_audit_log(
+            guild.id,
+            channel.id,
+            "บันทึกเวลาบอส (Dashboard)",
+            0,
+            username or "Dashboard User",
+            details,
+            0xF59E0B,
+            channel_name=BOSS_LOG_CHANNEL_NAME,
+            rest_context=f"boss-time-log:{boss_name}",
+            hide_user_id=True,
+        )
+        queued += 1
+        display_channel_name = _normalize_boss_log_channel_name(channel.name)
+        print(
+            f"📝 Boss Time log queued | boss={boss_name} | guild={guild.name} | "
+            f"channel={display_channel_name} | channel_id={channel.id} | request={request_id} | "
+            "priority=time-critical",
+            flush=True,
+        )
+    return queued
+
+
+def _normalize_discord_user_id(value) -> str:
+    cleaned = str(value or "").strip()
+    return cleaned if re.fullmatch(r"\d{15,22}", cleaned) else ""
+
+
+def _normalize_discord_user_language(value) -> str:
+    cleaned = str(value or "th").strip().lower()
+    return cleaned if cleaned in {"th", "en", "ko"} else "th"
+
+
+def _boss_user_dm_event_key(boss_name: str, stage: str, spawn_time: datetime) -> str:
+    return hashlib.sha256(
+        f"{boss_name}|{stage}|{int(spawn_time.timestamp() * 1000)}".encode("utf-8")
+    ).hexdigest()
+
+
+def _resolve_cached_discord_user(discord_user_id: str):
+    try:
+        user_id = int(discord_user_id)
+    except (TypeError, ValueError):
+        return None
+    user = bot.get_user(user_id)
+    if user is not None:
+        return user
+    for guild in bot.guilds:
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member
+    return None
+
+
+def _invalidate_discord_user_dm_preferences_cache():
+    global discord_user_dm_pref_cache_at, discord_user_dm_pref_cache
+    with discord_user_dm_pref_cache_lock:
+        discord_user_dm_pref_cache_at = 0.0
+        discord_user_dm_pref_cache = []
+
+
+async def _load_discord_user_dm_preferences(force: bool = False) -> list[dict]:
+    """Load opt-in Discord DM preferences from the feature-specific Firebase node."""
+    global discord_user_dm_pref_cache_at, discord_user_dm_pref_cache
+    now = time.monotonic()
+    with discord_user_dm_pref_cache_lock:
+        if not force and (now - discord_user_dm_pref_cache_at) < 30.0:
+            return list(discord_user_dm_pref_cache)
+
+    try:
+        preferences_root, users_root = await asyncio.gather(
+            asyncio.wait_for(asyncio.to_thread(db.reference(DISCORD_USER_NOTIFY_ROOT).get), timeout=8),
+            asyncio.wait_for(asyncio.to_thread(db.reference("users").get), timeout=8),
+        )
+    except Exception as exc:
+        print(
+            f"⚠️ โหลด Discord per-user notification preferences ไม่สำเร็จ | "
+            f"type={type(exc).__name__} | error={exc!r}",
+            flush=True,
+        )
+        return []
+
+    preferences = []
+    seen_discord_ids = set()
+    if isinstance(preferences_root, dict):
+        for uid, stored in preferences_root.items():
+            if not isinstance(stored, dict):
+                continue
+            profile = users_root.get(uid, {}) if isinstance(users_root, dict) else {}
+            if not isinstance(profile, dict):
+                profile = {}
+            if str(profile.get("status") or "").strip().lower() != "approved":
+                continue
+            if not parse_bool(stored.get("discordNotificationEnabled"), False):
+                continue
+            discord_user_id = _normalize_discord_user_id(stored.get("discordUserId"))
+            if not discord_user_id or discord_user_id in seen_discord_ids:
+                continue
+            seen_discord_ids.add(discord_user_id)
+            preferences.append({
+                "uid": str(uid),
+                "discord_user_id": discord_user_id,
+                "language": _normalize_discord_user_language(stored.get("discordNotificationLanguage")),
+            })
+
+    # V125/V126 compatibility: keep legacy user-node settings working until
+    # each user saves the new feature-specific settings at least once.
+    if isinstance(users_root, dict):
+        for uid, profile in users_root.items():
+            if not isinstance(profile, dict):
+                continue
+            if str(profile.get("status") or "").strip().lower() != "approved":
+                continue
+            if not parse_bool(profile.get("discordNotificationEnabled"), False):
+                continue
+            if isinstance(preferences_root, dict) and isinstance(preferences_root.get(uid), dict):
+                continue
+            discord_user_id = _normalize_discord_user_id(profile.get("discordUserId"))
+            if not discord_user_id or discord_user_id in seen_discord_ids:
+                continue
+            seen_discord_ids.add(discord_user_id)
+            preferences.append({
+                "uid": str(uid),
+                "discord_user_id": discord_user_id,
+                "language": _normalize_discord_user_language(profile.get("discordNotificationLanguage")),
+            })
+
+    with discord_user_dm_pref_cache_lock:
+        discord_user_dm_pref_cache = list(preferences)
+        discord_user_dm_pref_cache_at = time.monotonic()
+    return preferences
+
+
+def _build_boss_user_dm_embed(boss_name: str, stage: str, spawn_time: datetime, notice_minutes: int, language: str):
+    language = _normalize_discord_user_language(language)
+    time_str = spawn_time.strftime("%H:%M:%S")
+    title_by_lang = {
+        "th": f"⚔️ {boss_name} {'ใกล้เกิด!' if stage == 'advance' else 'เกิดแล้ว!'}",
+        "en": f"⚔️ {boss_name} {'Spawning Soon!' if stage == 'advance' else 'Spawned!'}",
+        "ko": f"⚔️ {boss_name} {'젠 임박!' if stage == 'advance' else '젠 완료!'}",
+    }
+    body_by_lang = {
+        "th": (
+            f"บอส **{boss_name}** จะเกิดในอีก **{notice_minutes} นาที**!\nเวลาเกิด: **{time_str} น.**"
+            if stage == "advance"
+            else f"บอส **{boss_name}** เกิดแล้วในขณะนี้!\nเวลาเกิด: **{time_str} น.**"
+        ),
+        "en": (
+            f"Boss **{boss_name}** will spawn in **{notice_minutes} minutes**.\nSpawn time: **{time_str}**"
+            if stage == "advance"
+            else f"Boss **{boss_name}** has spawned!\nSpawn time: **{time_str}**"
+        ),
+        "ko": (
+            f"보스 **{boss_name}**가 **{notice_minutes}분 후에** 나타납니다.\n생성 시간: **{time_str}**"
+            if stage == "advance"
+            else f"보스 **{boss_name}**가 지금 나타났습니다!\n생성 시간: **{time_str}**"
+        ),
+    }
+    return discord.Embed(
+        title=title_by_lang[language],
+        description=body_by_lang[language],
+        color=discord.Color.gold() if stage == "advance" else discord.Color.green(),
+        timestamp=spawn_time,
+    )
+
+
+def _discord_user_dm_block_state(stage: str, spawn_time: datetime) -> tuple[bool, float]:
+    """Return whether an active Discord temporary restriction would make this DM stale.
+
+    Per-user DMs are optional background traffic. A long server-side restriction must not
+    leave the same event sitting in the queue and then re-trigger the restriction after recovery.
+    This helper never sends a request; it only inspects the existing central breaker state.
+    """
+    now_wall = time.time()
+    with discord_block_lock:
+        temp_restriction = bool(discord_block_temp_restriction)
+        server_until = float(discord_block_server_until or 0.0)
+        server_retry = float(discord_block_server_retry_after or 0.0)
+    if not temp_restriction:
+        return False, max(server_retry, 0.0)
+
+    remaining = max(0.0, server_until - now_wall) if server_until > 0 else max(server_retry, 0.0)
+    stage_name = str(stage or "spawn").strip().lower()
+    time_to_spawn = (spawn_time - datetime.now(TZ_THAI)).total_seconds()
+
+    # A spawn DM that cannot be attempted for more than a short grace period is no longer
+    # useful by the time Discord becomes writable again.
+    if stage_name == "spawn":
+        return remaining > 120.0, remaining
+
+    # For an advance DM, suppress only when the server restriction is expected to outlive
+    # the actual spawn time (plus a small safety margin). If plenty of time remains, keep
+    # the item queued so it can still be delivered after recovery.
+    stale = time_to_spawn <= 0 or remaining >= max(300.0, time_to_spawn + 60.0)
+    return stale, remaining
+
+
+def _mark_discord_user_dm_stage_suppressed(stage_key: str) -> None:
+    """Remember a deliberately dropped DM stage for this process lifetime."""
+    if not stage_key:
+        return
+    discord_user_dm_stage_prepared.add(stage_key)
+    discord_user_dm_stage_order.append(stage_key)
+    while len(discord_user_dm_stage_prepared) > len(discord_user_dm_stage_order):
+        old_key = discord_user_dm_stage_order.popleft()
+        discord_user_dm_stage_prepared.discard(old_key)
+
+
+def _discord_user_dm_recovery_quiet_remaining() -> float:
+    return max(0.0, float(discord_user_dm_recovery_suppressed_until or 0.0) - time.monotonic())
+
+
+def _drop_all_pending_discord_user_dms_after_long_restriction(*, reason: str) -> int:
+    """Drop only the optional per-user DM backlog after a long REST restriction."""
+    removed = []
+    with pending_discord_user_dm_lock:
+        while pending_discord_user_dm_notifications:
+            removed.append(pending_discord_user_dm_notifications.popleft())
+        pending_discord_user_dm_keys.clear()
+
+    for item in removed:
+        _mark_discord_user_dm_stage_suppressed(
+            f"{item.get('event_key')}:{item.get('stage')}"
+        )
+
+    if removed:
+        print(
+            f"🧹 Discord per-user Boss DM stale backlog cleared | count={len(removed)} | "
+            f"reason={reason}",
+            flush=True,
+        )
+    return len(removed)
+
+
+def _drop_pending_discord_user_dm_item(item: dict, *, reason: str) -> None:
+    with pending_discord_user_dm_lock:
+        if pending_discord_user_dm_notifications and pending_discord_user_dm_notifications[0] is item:
+            pending_discord_user_dm_notifications.popleft()
+        pending_discord_user_dm_keys.discard(item.get("key"))
+    _mark_discord_user_dm_stage_suppressed(
+        f"{item.get('event_key')}:{item.get('stage')}"
+    )
+    print(
+        f"⏭️ Discord per-user Boss DM dropped | boss={item.get('boss_name')} | "
+        f"stage={item.get('stage')} | discord_user_id={item.get('discord_user_id')} | reason={reason}",
+        flush=True,
+    )
+
+
+def _has_higher_priority_background_rest_work() -> bool:
+    """DMs yield to time-critical queued channel work such as Auto Attendance/Boss notices."""
+    with pending_auto_attendance_panel_lock:
+        if pending_auto_attendance_panels:
+            return True
+    with pending_boss_rest_lock:
+        if pending_boss_rest_notifications:
+            return True
+    with pending_channel_lock:
+        if pending_channel_messages:
+            return True
+    return False
+
+
+async def queue_discord_user_boss_notifications(
+    boss_name: str,
+    stage: str,
+    spawn_time: datetime,
+    notice_minutes: int,
+):
+    """Queue opt-in per-user Discord DMs without touching existing public channel notifications."""
+    event_key = _boss_user_dm_event_key(boss_name, stage, spawn_time)
+    stage_key = f"{event_key}:{stage}"
+    if stage_key in discord_user_dm_stage_prepared:
+        return
+
+    dm_recovery_quiet = _discord_user_dm_recovery_quiet_remaining()
+    if dm_recovery_quiet > 0:
+        _mark_discord_user_dm_stage_suppressed(stage_key)
+        print(
+            f"⏭️ Discord per-user Boss DM not queued | boss={boss_name} | stage={stage} | "
+            f"reason=post-long-recovery-dm-quiet | remaining={dm_recovery_quiet:.1f}s",
+            flush=True,
+        )
+        return
+
+    stale_due_block, block_remaining = _discord_user_dm_block_state(stage, spawn_time)
+    if stale_due_block:
+        _mark_discord_user_dm_stage_suppressed(stage_key)
+        print(
+            f"⏭️ Discord per-user Boss DM not queued | boss={boss_name} | stage={stage} | "
+            f"reason=active-rest-restriction-would-be-stale | remaining={block_remaining:.1f}s",
+            flush=True,
+        )
+        return
+
+    preferences = await _load_discord_user_dm_preferences()
+    queued = 0
+    skipped_not_cached = 0  # retained for log compatibility; cache lookup is deferred to send time
+    for pref in preferences:
+        discord_user_id = pref["discord_user_id"]
+        key = (event_key, stage, discord_user_id)
+        with pending_discord_user_dm_lock:
+            if key in pending_discord_user_dm_keys:
+                continue
+            if len(pending_discord_user_dm_notifications) >= PENDING_DISCORD_USER_DM_MAX:
+                print(
+                    f"⚠️ Discord per-user DM queue full; drop newest | boss={boss_name} | stage={stage} | user={discord_user_id}",
+                    flush=True,
+                )
+                continue
+            pending_discord_user_dm_keys.add(key)
+            pending_discord_user_dm_notifications.append({
+                "key": key,
+                "event_key": event_key,
+                "boss_name": boss_name,
+                "stage": stage,
+                "discord_user_id": discord_user_id,
+                "language": pref["language"],
+                "notice_minutes": int(notice_minutes),
+                "spawn_time": spawn_time.isoformat(),
+                "attempts": 0,
+            })
+            queued += 1
+
+    # Only finalize the stage when at least one recipient was actually queued.
+    # If preferences were empty/stale, keep the stage retryable so a Dashboard save
+    # immediately before the notification can still add the user to this stage.
+    if queued:
+        discord_user_dm_stage_prepared.add(stage_key)
+        discord_user_dm_stage_order.append(stage_key)
+        while len(discord_user_dm_stage_prepared) > len(discord_user_dm_stage_order):
+            old_key = discord_user_dm_stage_order.popleft()
+            discord_user_dm_stage_prepared.discard(old_key)
+
+    if queued or skipped_not_cached:
+        print(
+            f"📨 Discord per-user Boss DM queued | boss={boss_name} | stage={stage} | queued={queued} | not_cached={skipped_not_cached}",
+            flush=True,
+        )
+
+
+async def flush_pending_discord_user_dm_notifications_once():
+    """Send one low-priority per-user DM only when higher-priority background queues are clear."""
+    if _has_higher_priority_background_rest_work():
+        return
+    if _discord_user_dm_recovery_quiet_remaining() > 0:
+        return
+    if _discord_rest_rate_limit_remaining() > 0:
+        return
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        temp_restriction = discord_block_temp_restriction
+        next_probe_mono = discord_block_next_probe_mono
+    if temp_restriction and next_probe_mono > now_mono:
+        return
+
+    with pending_discord_user_dm_lock:
+        if not pending_discord_user_dm_notifications:
+            return
+        item = pending_discord_user_dm_notifications[0]
+
+    user = _resolve_cached_discord_user(item.get("discord_user_id"))
+
+    try:
+        context_base = f"boss-user-dm:{item.get('boss_name')}:{item.get('stage')}:{item.get('discord_user_id')}"
+        if user is None:
+            # A dashboard Discord ID does not guarantee the user is in the local
+            # Gateway cache. Fetch the user only when needed, and route that REST
+            # request through the same background guard so it cannot bypass the
+            # V124/V127 Discord 429 quarantine.
+            user = await guarded_discord_call(
+                lambda: bot.fetch_user(int(item.get("discord_user_id"))),
+                context=f"{context_base}:fetch-user",
+                background=True,
+            )
+            if user is None:
+                return
+
+        spawn_time = parse_to_thai_datetime(item.get("spawn_time")) or datetime.now(TZ_THAI)
+        embed = _build_boss_user_dm_embed(
+            str(item.get("boss_name") or "Boss"),
+            str(item.get("stage") or "spawn"),
+            spawn_time,
+            int(item.get("notice_minutes") or 0),
+            str(item.get("language") or "th"),
+        )
+        result = await guarded_discord_call(
+            lambda: user.send(embed=embed),
+            context=context_base,
+            background=True,
+        )
+        if result is None:
+            return
+        with pending_discord_user_dm_lock:
+            if pending_discord_user_dm_notifications and pending_discord_user_dm_notifications[0] is item:
+                pending_discord_user_dm_notifications.popleft()
+                pending_discord_user_dm_keys.discard(item.get("key"))
+        print(
+            f"✅ Discord per-user Boss DM sent | boss={item.get('boss_name')} | stage={item.get('stage')} | discord_user_id={item.get('discord_user_id')} | language={item.get('language')}",
+            flush=True,
+        )
+        await asyncio.sleep(DISCORD_USER_DM_MIN_INTERVAL)
+    except (discord.NotFound, discord.Forbidden) as exc:
+        with pending_discord_user_dm_lock:
+            if pending_discord_user_dm_notifications and pending_discord_user_dm_notifications[0] is item:
+                pending_discord_user_dm_notifications.popleft()
+                pending_discord_user_dm_keys.discard(item.get("key"))
+        print(
+            f"⚠️ Discord per-user DM unavailable ({getattr(exc, 'status', 403)}) | boss={item.get('boss_name')} | stage={item.get('stage')} | discord_user_id={item.get('discord_user_id')} | drop item | {exc}",
+            flush=True,
+        )
+    except discord.HTTPException as exc:
+        if getattr(exc, "status", None) == 429:
+            spawn_time = parse_to_thai_datetime(item.get("spawn_time")) or datetime.now(TZ_THAI)
+            stage = str(item.get("stage") or "spawn")
+            stale_due_block, block_remaining = _discord_user_dm_block_state(stage, spawn_time)
+            if stale_due_block:
+                _drop_pending_discord_user_dm_item(
+                    item,
+                    reason=f"discord-429-would-remain-blocked-{block_remaining:.0f}s",
+                )
+                return
+            # Short/non-stale 429: keep the item queued and let the central breaker own Retry-After.
+            print(
+                f"⏸️ Discord per-user DM held by REST 429 | boss={item.get('boss_name')} | "
+                f"stage={stage} | discord_user_id={item.get('discord_user_id')} | retryable=True",
+                flush=True,
+            )
+            return
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        if item["attempts"] >= 3:
+            with pending_discord_user_dm_lock:
+                if pending_discord_user_dm_notifications and pending_discord_user_dm_notifications[0] is item:
+                    pending_discord_user_dm_notifications.popleft()
+                    pending_discord_user_dm_keys.discard(item.get("key"))
+            print(
+                f"⚠️ Discord per-user DM exhausted after 3 attempts | boss={item.get('boss_name')} | stage={item.get('stage')} | discord_user_id={item.get('discord_user_id')} | status={getattr(exc, 'status', None)}",
+                flush=True,
+            )
+    except Exception as exc:
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        if item["attempts"] >= 3:
+            with pending_discord_user_dm_lock:
+                if pending_discord_user_dm_notifications and pending_discord_user_dm_notifications[0] is item:
+                    pending_discord_user_dm_notifications.popleft()
+                    pending_discord_user_dm_keys.discard(item.get("key"))
+            print(
+                f"⚠️ Discord per-user DM exhausted after 3 attempts | boss={item.get('boss_name')} | stage={item.get('stage')} | discord_user_id={item.get('discord_user_id')} | error={exc!r}",
+                flush=True,
+            )
+
+
+async def _send_one_audit_log(item: dict) -> bool:
+    try:
+        await refresh_discord_notification_languages()
+    except Exception:
+        pass
+    guild = bot.get_guild(int(item.get("guild_id", 0)))
+    if guild is None:
+        return False
+    channel = guild.get_channel(int(item.get("channel_id", 0)))
+    if channel is None:
+        requested_channel_name = str(item.get("channel_name") or "").strip()
+        if requested_channel_name == BOSS_LOG_CHANNEL_NAME:
+            requested_key = _normalize_boss_log_channel_name(requested_channel_name).casefold()
+            for candidate in list(getattr(guild, "channels", []) or []):
+                if not isinstance(candidate, discord.TextChannel):
+                    continue
+                candidate_key = _normalize_boss_log_channel_name(getattr(candidate, "name", "")).casefold()
+                if candidate_key == requested_key:
+                    channel = candidate
+                    break
+        else:
+            requested_key = (requested_channel_name or LOG_CHANNEL_NAME).casefold()
+            for candidate in list(getattr(guild, "channels", []) or []):
+                if isinstance(candidate, discord.TextChannel) and str(getattr(candidate, "name", "")).strip().casefold() == requested_key:
+                    channel = candidate
+                    break
+    if channel is None or not isinstance(channel, discord.TextChannel):
+        return False
+
+    try:
+        user_id = int(item.get("user_id", 0))
+    except (TypeError, ValueError):
+        user_id = 0
+    display_name = str(item.get("user_name") or "unknown")
+    user_obj = guild.get_member(user_id) or discord.Object(id=user_id)
+    # Preserve the existing audit format. Mention uses the original member when cached;
+    # otherwise fall back to a plain user ID label rather than fetching during a rate limit.
+    if user_id > 0 and hasattr(user_obj, "mention"):
+        user_mention = getattr(user_obj, "mention", f"<@{user_id}>")
+    elif user_id > 0:
+        user_mention = f"<@{user_id}>"
+    else:
+        user_mention = f"`{display_name}`"
+    enabled=get_enabled_discord_notification_languages() or ["th"]
+    primary=enabled[0]
+    action=str(item.get("action","-")); details=str(item.get("details") or "-")
+    embed=discord.Embed(title=f"📝 Audit Log: {_translate_audit_action(action,primary)}",color=discord.Color(int(item.get("color_value",0x5865F2))),timestamp=datetime.fromtimestamp(float(item.get("queued_at",time.time())),tz=TZ_THAI))
+    actor_labels={"th":"👤 ผู้ดำเนินการ","en":"👤 Actor","ko":"👤 수행자"}; detail_labels={"th":"📋 รายละเอียด","en":"📋 Details","ko":"📋 상세 정보"}
+    embed.add_field(name=actor_labels[primary],value=f"{user_mention} (`{display_name}`)",inline=True)
+    for lang in enabled:
+        label={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]
+        embed.add_field(name=f"{detail_labels[lang]} • {label}",value=_translate_audit_details(action,details,lang),inline=False)
+    if not bool(item.get("hide_user_id")):
+        embed.set_footer(text=f"User ID: {user_id}")
+    try:
+        send_context = str(item.get("rest_context") or "").strip() or f"audit:{item.get('action', '-')}"
+        result = await guarded_channel_send(
+            channel,
+            context=send_context,
+            embed=embed,
+            background=True if (item.get("rest_context") or item.get("hide_user_id")) else None,
+        )
+        return result is not None
+    except Exception as exc:
+        print(f"⚠️ ส่ง queued Audit Log ไม่สำเร็จ: {exc}", flush=True)
+        return False
+
+
+PENDING_CHANNEL_MAX = 100
+pending_channel_messages = deque(maxlen=PENDING_CHANNEL_MAX)
+pending_channel_lock = threading.Lock()
+
+
+def _queue_channel_result(channel_id: int, *, content=None, embed=None, context: str = "command-result"):
+    item = {
+        "channel_id": int(channel_id),
+        "content": content,
+        "embed": embed,
+        "context": str(context),
+        "queued_at": time.time(),
+    }
+    with pending_channel_lock:
+        pending_channel_messages.append(item)
+        size = len(pending_channel_messages)
+    print(
+        f"⏸️ Discord channel result queued during REST cooldown | context={context} | queue={size}/{PENDING_CHANNEL_MAX}",
+        flush=True,
+    )
+
+
+async def _flush_pending_channel_messages_once():
+    if _discord_rest_rate_limit_remaining() > 0:
+        return
+    for _ in range(2):
+        with pending_channel_lock:
+            if not pending_channel_messages:
+                return
+            item = pending_channel_messages[0]
+        channel = bot.get_channel(int(item.get("channel_id", 0)))
+        if channel is None:
+            with pending_channel_lock:
+                if pending_channel_messages and pending_channel_messages[0] is item:
+                    pending_channel_messages.popleft()
+            continue
+        try:
+            result = await guarded_channel_send(
+                channel,
+                context=item.get("context", "command-result"),
+                content=item.get("content"),
+                embed=item.get("embed"),
+            )
+        except Exception as exc:
+            print(f"⚠️ queued Discord channel result failed: {exc!r}", flush=True)
+            return
+        if result is None:
+            return
+        with pending_channel_lock:
+            if pending_channel_messages and pending_channel_messages[0] is item:
+                pending_channel_messages.popleft()
+        await asyncio.sleep(max(0.5, discord_rest_min_interval))
+
+
+async def flush_pending_command_outputs_once():
+    # Auto Attendance is time-sensitive and gets the first background REST slot.
+    # V174: Boss text notifications use their own fast worker so unrelated command-output
+    # or audit work cannot delay a Boss notice. Discord Retry-After and REST guards remain
+    # authoritative for every actual Discord request.
+    await flush_pending_autoattendance_panels_once()
+    await _flush_pending_channel_messages_once()
+    await flush_pending_audit_logs_once()
+    # V135: per-user DM delivery is handled only by the dedicated 5s worker below.
+    # Keeping it out of this shared queue worker prevents duplicate DM sends and lets
+    # DM delivery recover independently without accelerating other REST traffic.
+
+
+@tasks.loop(seconds=0.5)
+async def flush_pending_weekly_event_rest_worker():
+    try:
+        await flush_pending_weekly_event_rest_notifications_once()
+    except Exception as exc:
+        print(f"⚠️ Weekly event Discord text worker failed safely: {exc!r}", flush=True)
+
+
+@tasks.loop(seconds=1)
+async def flush_pending_weekly_event_dm_worker():
+    try:
+        await flush_pending_weekly_event_dms_once()
+    except Exception as exc:
+        print(f"⚠️ Weekly event Discord DM worker failed safely: {exc!r}", flush=True)
+
+
+@tasks.loop(seconds=1)
+async def flush_pending_autoattendance_panel_worker():
+    try:
+        await flush_pending_autoattendance_panels_once()
+    except Exception as exc:
+        print(f"⚠️ Auto Attendance panel worker failed safely: {exc!r}", flush=True)
+
+
+@tasks.loop(seconds=1)
+async def flush_pending_discord_user_dm_worker():
+    """Dedicated DM worker: faster pickup without accelerating other Discord REST queues."""
+    try:
+        await flush_pending_discord_user_dm_notifications_once()
+    except Exception as exc:
+        print(f"⚠️ Discord per-user DM worker failed safely: {exc!r}", flush=True)
+
+
+@tasks.loop(seconds=0.2)
+async def flush_pending_boss_rest_notification_worker():
+    """V174: dedicated fast worker for public Boss text notifications."""
+    try:
+        await flush_pending_boss_rest_notifications_once()
+    except Exception as exc:
+        print(f"⚠️ Boss REST timing worker failed safely: {exc!r}", flush=True)
+
+
+@tasks.loop(seconds=2)
+async def flush_pending_command_outputs():
+    try:
+        await flush_pending_command_outputs_once()
+    except Exception as exc:
+        print(f"⚠️ queued command output worker failed safely: {exc!r}", flush=True)
+
+
+async def flush_pending_audit_logs_once():
+    # Never drain queued audit logs while Discord reports an API/IP temporary restriction.
+    # The interaction callback lane and the normal REST lane can receive different 429
+    # metadata, but an API temporary restriction is broader than a normal bucket cooldown.
+    # Treat the process-wide block gate as authoritative here so this worker cannot
+    # immediately re-probe the restricted API and extend the block.
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        temp_restriction = discord_block_temp_restriction
+        next_probe_mono = discord_block_next_probe_mono
+    if temp_restriction and next_probe_mono > now_mono:
+        _log_rest_skip('audit-queue-blocked', max(0.0, next_probe_mono - now_mono))
+        return
+    if _discord_rest_rate_limit_remaining() > 0:
+        return
+    for _ in range(1):
+        with pending_audit_lock:
+            if not pending_audit_logs:
+                return
+            item = pending_audit_logs[0]
+        ok = await _send_one_audit_log(item)
+        if not ok:
+            return
+        with pending_audit_lock:
+            if pending_audit_logs and pending_audit_logs[0] is item:
+                pending_audit_logs.popleft()
+        await asyncio.sleep(max(0.5, discord_rest_min_interval))
+
+
+async def send_audit_log(guild: discord.Guild, user: discord.User, action: str, details: str, color: discord.Color):
+    if not guild:
+        return
+    log_channel = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
+    if not log_channel:
+        print(f"⚠️ Audit Log channel not found | guild={guild.name} | channel={LOG_CHANNEL_NAME}", flush=True)
+        return
+
+    try:
+        await refresh_discord_notification_languages()
+    except Exception:
+        pass
+    embed = _build_audit_embed(user, action, details, color, languages=get_enabled_discord_notification_languages())
+    try:
+        result = await guarded_channel_send(log_channel, context=f"audit:{action}", embed=embed)
+        if result is not None:
+            return
+        _queue_audit_log(
+            guild.id,
+            log_channel.id,
+            action,
+            getattr(user, "id", 0),
+            getattr(user, "display_name", getattr(user, "name", "unknown")),
+            details,
+            int(color.value),
+        )
+    except Exception as exc:
+        print(f"❌ ส่ง Audit Log ไม่สำเร็จ: {exc}", flush=True)
+        _queue_audit_log(
+            guild.id,
+            log_channel.id,
+            action,
+            getattr(user, "id", 0),
+            getattr(user, "display_name", getattr(user, "name", "unknown")),
+            details,
+            int(color.value),
+        )
+
+# ==========================================
+# 🛡️ 4. Check สำหรับตรวจสอบสิทธิ์ผู้ใช้งาน
+# ==========================================
+def check_user_permission(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator: return True
+    if not TARGET_ROLE_IDS: return True
+    user_role_ids = [role.id for role in member.roles]
+    return any(role_id in TARGET_ROLE_IDS for role_id in user_role_ids)
+
+def has_allowed_role():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if not isinstance(interaction.user, discord.Member): return False
+        return check_user_permission(interaction.user)
+    return app_commands.check(predicate)
+
+# ==========================================
+# 💾 5. ระบบบันทึก/โหลดไฟล์ Firebase & Local Storage
+# ==========================================
+def save_json_local(filename: str, data: dict):
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ เซฟ {filename} ลง local ไม่สำเร็จ: {e}")
+
+def _schedule_record_to_firebase(boss_name: str, data: dict) -> dict:
+    """Single canonical boss_schedule schema used by Discord and Dashboard."""
+    spawn_dt = parse_to_thai_datetime(data.get("spawnTimeMs") or data.get("spawn_time"))
+    kill_dt = parse_to_thai_datetime(data.get("killTimeMs") or data.get("kill_time_ms") or data.get("kill_time"))
+    if not spawn_dt:
+        raise ValueError(f"ไม่มี spawnTimeMs ที่ถูกต้องสำหรับ {boss_name}")
+    spawn_ms = int(spawn_dt.timestamp() * 1000)
+    kill_ms = int(kill_dt.timestamp() * 1000) if kill_dt else None
+    notice = data.get("noticeMinutes")
+    if notice is None:
+        notice = int(get_boss_advance_notice_seconds(boss_name) / 60)
+    try:
+        notice = max(1, int(notice))
+    except (TypeError, ValueError):
+        notice = int(get_boss_advance_notice_seconds(boss_name) / 60)
+    record = {
+        "spawnTimeMs": spawn_ms,
+        # Keep both fields because the Dashboard/Firebase Rules use spawn_time
+        # while the bot/UI use spawnTimeMs.
+        "spawn_time": datetime.fromtimestamp(spawn_ms / 1000, tz=TZ_THAI).isoformat(),
+        "noticeMinutes": notice,
+        "recordedBy": data.get("recordedBy") or data.get("recorded_by") or "-",
+        "recordedByDisplayName": data.get("recordedByDisplayName") or data.get("recorded_by_display_name") or data.get("recordedBy") or data.get("recorded_by") or "-",
+        "recordedByUserId": str(data.get("recordedByUserId") or data.get("recorded_by_user_id") or "").strip(),
+        "confirmationRequestId": str(data.get("confirmationRequestId") or data.get("confirmation_request_id") or "").strip(),
+        "confirmationRequestedAt": data.get("confirmationRequestedAt") or data.get("confirmation_requested_at") or None,
+        "confirmationStatus": str(data.get("confirmationStatus") or data.get("confirmation_status") or "").strip(),
+        "confirmationSource": str(data.get("confirmationSource") or data.get("confirmation_source") or "").strip().lower(),
+        "notifiedNotice": parse_bool(data.get("notifiedNotice", data.get("notified_advance", False))),
+        "notifiedSpawn": parse_bool(data.get("notifiedSpawn", data.get("notified_spawn", False))),
+        "voiceNoticeSent": parse_bool(data.get("voiceNoticeSent", data.get("voice_notice_sent", False))),
+        "voiceSpawnSent": parse_bool(data.get("voiceSpawnSent", data.get("voice_spawn_sent", False))),
+    }
+    if parse_bool(data.get("is_library_boss_schedule"), False):
+        record["is_library_boss_schedule"] = True
+        record["library_slot"] = str(data.get("library_slot") or "")
+        record["recurrence"] = str(data.get("recurrence") or "daily")
+        record["autoAttendanceEligible"] = parse_bool(data.get("autoAttendanceEligible"), True)
+        record["suppressBossNotifications"] = parse_bool(data.get("suppressBossNotifications"), True)
+    if kill_ms is not None:
+        record["killTimeMs"] = kill_ms
+        record["killDate"] = (data.get("killDate") or data.get("kill_date") or kill_dt.strftime("%Y-%m-%d"))
+    channel_id = data.get("channelId") or data.get("channel_id")
+    if channel_id is not None:
+        try: record["channelId"] = int(channel_id)
+        except (TypeError, ValueError): pass
+    voice_channel_id = data.get("voiceChannelId") or data.get("voice_channel_id")
+    if voice_channel_id is not None:
+        try: record["voiceChannelId"] = int(voice_channel_id)
+        except (TypeError, ValueError): pass
+    return record
+
+def _firebase_to_internal(boss_name: str, data: dict) -> dict | None:
+    try:
+        record = _schedule_record_to_firebase(boss_name, data)
+    except Exception:
+        return None
+    # Keep the existing task/UI code stable while Firebase remains canonical.
+    return {
+        "spawn_time": parse_to_thai_datetime(record["spawnTimeMs"]),
+        "killTimeMs": record.get("killTimeMs"),
+        "killDate": record.get("killDate", ""),
+        "channel_id": record.get("channelId"),
+        "voice_channel_id": record.get("voiceChannelId"),
+        "notified_advance": record.get("notifiedNotice", False),
+        "notified_spawn": record.get("notifiedSpawn", False),
+        "voice_notice_sent": record.get("voiceNoticeSent", False),
+        "voice_spawn_sent": record.get("voiceSpawnSent", False),
+        "noticeMinutes": record.get("noticeMinutes", 5),
+        "recorded_by": record.get("recordedBy", "-"),
+        "recordedByDisplayName": record.get("recordedByDisplayName", record.get("recordedBy", "-")),
+        "recordedByUserId": record.get("recordedByUserId", ""),
+        "confirmationRequestId": record.get("confirmationRequestId", ""),
+        "confirmationRequestedAt": record.get("confirmationRequestedAt"),
+        "confirmationStatus": record.get("confirmationStatus", ""),
+        "confirmationSource": record.get("confirmationSource", ""),
+        "is_library_boss_schedule": parse_bool(record.get("is_library_boss_schedule"), False),
+        "library_slot": record.get("library_slot", ""),
+        "recurrence": record.get("recurrence", ""),
+        "autoAttendanceEligible": parse_bool(record.get("autoAttendanceEligible"), False),
+        "suppressBossNotifications": parse_bool(record.get("suppressBossNotifications"), False),
+    }
+
+async def save_boss_data():
+    global is_updating_from_bot
+    with schedule_lock:
+        firebase_data = {}
+        for boss_name, data in boss_schedule.items():
+            try:
+                firebase_data[boss_name] = _schedule_record_to_firebase(boss_name, data)
+            except Exception as e:
+                print(f"⚠️ ข้ามข้อมูลบอส {boss_name}: {e}")
+    try:
+        is_updating_from_bot = True
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("boss_schedule").set, firebase_data),
+            timeout=8
+        )
+    except Exception as e:
+        print(f"❌ บันทึก boss_schedule ลง Firebase ไม่สำเร็จ: {e}")
+    finally:
+        is_updating_from_bot = False
+    await asyncio.to_thread(set_db_value, "boss_schedule", firebase_data)
+    await asyncio.to_thread(save_json_local, DATA_FILE, firebase_data)
+
+async def load_boss_data():
+    global boss_schedule
+    saved_data = None
+    try:
+        saved_data = await asyncio.to_thread(db.reference("boss_schedule").get)
+    except Exception as e:
+        print(f"⚠️ ดึง boss_schedule จาก Firebase ไม่สำเร็จ: {e}")
+    if not saved_data:
+        saved_data = get_db_value("boss_schedule", None)
+    if not isinstance(saved_data, dict):
+        saved_data = {}
+    with schedule_lock:
+        boss_schedule.clear()
+        for boss_name, data in saved_data.items():
+            if not isinstance(data, dict):
+                continue
+            canonical = _canonical_library_boss_key(boss_name)
+            if canonical == boss_name:
+                canonical = get_boss_canonical_name(boss_name)
+            internal = _firebase_to_internal(canonical, data)
+            if internal:
+                boss_schedule[canonical] = internal
+    print(f"✅ โหลด boss_schedule จาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
+
+
+_confirmation_queue_ids = set()
+# V105: Requests that are durably pending but currently have no occupied /setvoice
+# target are deferred at the Firebase-listener layer. This prevents root-sync events
+# from continuously creating fire-and-forget tasks for the same idle request.
+_confirmation_deferred_ids = set()
+# V154: stale request IDs are remembered locally as terminal before any new queue
+# task can be created. This closes the gap where voice-state callbacks could log
+# repeated "Queue voice confirmation" entries before the Firebase listener had a
+# chance to expire the same durable request.
+_confirmation_expired_ids = set()
+# V155: confirmation work is allowed only on the runtime that currently owns the
+# single Gateway handover lease. During Render zero-downtime handover the old
+# process can remain alive briefly; it must not enqueue new confirmation work after
+# its REST/Gateway ownership has been disabled. This affects only the Dashboard
+# confirmation lane and does not alter Boss Voice advance/spawn behavior.
+_confirmation_expiry_persist_inflight = set()
+_confirmation_expired_order = deque(maxlen=4000)
+_voice_confirmation_completed_order = deque(maxlen=1000)
+VOICE_CONFIRMATION_MAX_AGE_SECONDS = 30 * 60
+# V165: Dashboard "recorded successfully" Voice confirmation is a point-in-time event.
+# It may speak only during a very short window around the record event and never waits
+# for a later Voice join. The existing /kill confirmation window remains unchanged.
+DASHBOARD_VOICE_CONFIRMATION_MAX_AGE_SECONDS = max(
+    5.0, float(os.environ.get("DASHBOARD_VOICE_CONFIRMATION_MAX_AGE", "10.0"))
+)
+
+def _voice_confirmation_max_age_seconds(data: dict) -> float:
+    source = str(data.get("confirmationSource") or data.get("confirmation_source") or "").strip().lower()
+    return DASHBOARD_VOICE_CONFIRMATION_MAX_AGE_SECONDS if source == "dashboard" else VOICE_CONFIRMATION_MAX_AGE_SECONDS
+
+def _confirmation_request_age_seconds(data: dict, now_ms: int | None = None):
+    """Return the age of a Dashboard Voice-confirmation request in seconds."""
+    requested_at = data.get("confirmationRequestedAt") or data.get("confirmation_requested_at")
+    if requested_at in (None, ""):
+        return None
+    try:
+        if isinstance(requested_at, (int, float)):
+            requested_ms = float(requested_at)
+        else:
+            requested_ms = datetime.fromisoformat(str(requested_at).replace("Z", "+00:00")).timestamp() * 1000
+        current_ms = float(now_ms if now_ms is not None else int(time.time() * 1000))
+        return max(0.0, (current_ms - requested_ms) / 1000.0)
+    except Exception:
+        return None
+
+def _mark_voice_confirmation_expired_local(request_id: str, boss_name: str | None = None, expired_at: str | None = None) -> str:
+    """Mark a Voice-confirmation request terminal locally before any async persistence.
+
+    V154: this synchronous guard is intentionally cheap and contains no Discord HTTP.
+    It is called at the queue entry point so a stale request cannot create another
+    confirmation task merely because a voice-state callback fired before Firebase
+    listener synchronization completed.
+    """
+    request_id = str(request_id or "").strip()
+    if not request_id:
+        return expired_at or datetime.now(TZ_THAI).isoformat()
+    expired_at = expired_at or datetime.now(TZ_THAI).isoformat()
+    if request_id not in _confirmation_expired_ids:
+        if len(_confirmation_expired_order) >= _confirmation_expired_order.maxlen:
+            old_id = _confirmation_expired_order.popleft()
+            _confirmation_expired_ids.discard(old_id)
+        _confirmation_expired_ids.add(request_id)
+        _confirmation_expired_order.append(request_id)
+    _confirmation_deferred_ids.discard(request_id)
+    _confirmation_seen_ids.add(request_id)
+    _confirmation_queue_ids.discard(request_id)
+    _pending_voice_confirmations.pop(request_id, None)
+    if boss_name:
+        with schedule_lock:
+            current = boss_schedule.get(boss_name)
+            if isinstance(current, dict) and str(current.get("confirmationRequestId") or "").strip() == request_id:
+                current["confirmationStatus"] = "expired"
+                current["confirmationExpiredAt"] = expired_at
+    return expired_at
+
+
+async def _persist_voice_confirmation_expired_once(boss_name: str, request_id: str, expired_at: str) -> None:
+    """Persist one stale-confirmation terminal state without creating Discord traffic."""
+    request_id = str(request_id or "").strip()
+    if not request_id:
+        return
+    key = (str(boss_name), request_id)
+    if key in _confirmation_expiry_persist_inflight:
+        return
+    _confirmation_expiry_persist_inflight.add(key)
+    try:
+        try:
+            await asyncio.to_thread(
+                db.reference(f"boss_schedule/{boss_name}").update,
+                {"confirmationStatus": "expired", "confirmationExpiredAt": expired_at},
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ Could not persist expired Voice confirmation | boss={boss_name} | "
+                f"request={request_id} | {exc}",
+                flush=True,
+            )
+    finally:
+        _confirmation_expiry_persist_inflight.discard(key)
+
+
+async def _expire_stale_voice_confirmation(boss_name: str, data: dict, *, now_ms: int | None = None) -> bool:
+    """Close an over-age pending Dashboard Voice confirmation without retrying it."""
+    request_id = str(data.get("confirmationRequestId") or "").strip()
+    status = str(data.get("confirmationStatus") or "").strip().lower()
+    if not request_id or status not in ("", "pending"):
+        return False
+    if request_id in _confirmation_expired_ids:
+        return True
+    age_seconds = _confirmation_request_age_seconds(data, now_ms=now_ms)
+    max_age_seconds = _voice_confirmation_max_age_seconds(data)
+    if age_seconds is None or age_seconds <= max_age_seconds:
+        return False
+
+    expired_at = _mark_voice_confirmation_expired_local(request_id, boss_name=boss_name)
+    await _persist_voice_confirmation_expired_once(boss_name, request_id, expired_at)
+
+    print(
+        f"⏭️ Expired stale Voice confirmation closed | boss={boss_name} | "
+        f"request={request_id} | age={_format_duration(age_seconds)} | "
+        f"max_age={_format_duration(max_age_seconds)} | no retry",
+        flush=True,
+    )
+    return True
+
+def _voice_confirmation_room_key(request_id: str, guild_id: int, channel_id: int):
+    return (str(request_id), int(guild_id), int(channel_id))
+
+def _mark_voice_confirmation_room_completed(room_key):
+    """Remember one successful confirmation delivery for one request/room.
+
+    This is intentionally in-memory and bounded. It prevents duplicate speech caused
+    by Firebase root-sync races, voice-join retries, or overlapping confirmation tasks
+    without changing the persistent boss schema or any other notification system.
+    """
+    if room_key in _voice_confirmation_room_completed:
+        return
+    if len(_voice_confirmation_room_completed_order) >= VOICE_CONFIRMATION_ROOM_COMPLETED_MAX:
+        old_key = _voice_confirmation_room_completed_order.popleft()
+        _voice_confirmation_room_completed.discard(old_key)
+    _voice_confirmation_room_completed.add(room_key)
+    _voice_confirmation_room_completed_order.append(room_key)
+
+def _has_occupied_voice_confirmation_target():
+    """Return True only when at least one configured /setvoice room has a human.
+
+    This is intentionally read-only and does not connect to Voice. It lets the
+    Firebase listener keep pending work durable without repeatedly scheduling
+    the existing confirmation coroutine while every configured room is empty.
+    """
+    for guild in list(bot.guilds):
+        try:
+            configured_channels = get_configured_voice_channels(guild)
+        except Exception:
+            continue
+        for configured in configured_channels:
+            try:
+                if any(not member.bot for member in configured.members):
+                    return True
+            except Exception:
+                continue
+    return False
+
+def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown', wait: bool = False, timeout: float = 180.0):
+    """Queue one voice confirmation on the Discord event loop.
+    When the bot is not READY yet, retain the request as pending instead of
+    falsely reporting Voice failure. The pending request is drained after on_ready.
+    """
+    request_id = str(data.get("confirmationRequestId") or "").strip()
+    if not request_id:
+        print(f"⚠️ Voice confirmation skipped: missing requestId | boss={boss_name} | source={source}")
+        return False
+    status = str(data.get("confirmationStatus") or "").strip()
+    if status not in ("", "pending"):
+        print(f"⏭️ Voice confirmation skipped: status={status} | boss={boss_name} | source={source}")
+        return False
+
+    # V155: never create new Dashboard Voice-confirmation work from a runtime that
+    # does not own the active Gateway handover lease. Render may keep an old process
+    # alive for a short graceful-shutdown window while the new process is starting.
+    # The old process must not re-enqueue the same durable confirmation during that
+    # overlap. No Discord HTTP is performed by this guard.
+    if SKYNET_RUNTIME_ROLE == "bot" and not discord_rest_runtime_lease_owned:
+        _pending_voice_confirmations.pop(request_id, None)
+        _confirmation_deferred_ids.discard(request_id)
+        _confirmation_queue_ids.discard(request_id)
+        print(
+            f"⏭️ Voice confirmation skipped: Gateway handover lease not owned | "
+            f"boss={boss_name} | source={source} | request={request_id}",
+            flush=True,
+        )
+        return False
+
+    # V154: stale requests are rejected BEFORE the queue marker/log/future is created.
+    # Previously the age check lived inside the async confirmation coroutine, so a
+    # voice-state callback could repeatedly enqueue the same already-expired request
+    # while that coroutine immediately terminated. No Discord request is made here.
+    if request_id in _confirmation_expired_ids:
+        return False
+    request_age = _confirmation_request_age_seconds(data)
+    max_age_seconds = _voice_confirmation_max_age_seconds(data)
+    if request_age is not None and request_age > max_age_seconds:
+        expired_at = _mark_voice_confirmation_expired_local(request_id, boss_name=boss_name)
+        loop = bot_event_loop
+        if loop is not None and not loop.is_closed():
+            try:
+                # The queue entry can be reached from both the Discord event-loop
+                # thread and the Firebase listener thread. run_coroutine_threadsafe
+                # is safe in both cases and never blocks this caller.
+                asyncio.run_coroutine_threadsafe(
+                    _persist_voice_confirmation_expired_once(boss_name, request_id, expired_at),
+                    loop,
+                )
+            except (RuntimeError, TypeError):
+                pass
+        print(
+            f"⏭️ Voice confirmation queue entry expired before enqueue | boss={boss_name} | "
+            f"request={request_id} | age={_format_duration(request_age)} | "
+            f"max_age={_format_duration(max_age_seconds)} | no retry",
+            flush=True,
+        )
+        return False
+
+    if request_id in _confirmation_queue_ids:
+        print(f"⏭️ Voice confirmation already queued: boss={boss_name} | request={request_id}")
+        return True if not wait else False
+
+    if bot_event_loop is None or bot_event_loop.is_closed() or not is_bot_ready:
+        _pending_voice_confirmations[request_id] = (boss_name, dict(data), source)
+        print(
+            f"⏳ Voice confirmation pending: bot event loop not READY | boss={boss_name} "
+            f"| source={source} | request={request_id}"
+        )
+        return None
+
+    _confirmation_queue_ids.add(request_id)
+    print(f"📢 Queue voice confirmation | source={source} | boss={boss_name} | request={request_id} | wait={wait}")
+    future = asyncio.run_coroutine_threadsafe(_voice_confirm_boss_recording(boss_name, dict(data)), bot_event_loop)
+    if not wait:
+        # Release the in-memory dedup marker when the actual confirmation task
+        # finishes.  V74 left this ID in the set forever for fire-and-forget
+        # confirmations, so later retries of the same completed request emitted
+        # the misleading "already queued" log indefinitely.
+        def _release_confirmation_marker(_future):
+            _confirmation_queue_ids.discard(request_id)
+        future.add_done_callback(_release_confirmation_marker)
+        return True
+    try:
+        result = future.result(timeout=float(timeout))
+        if result is None:
+            print(f"📣 Voice confirmation pending | boss={boss_name} | source={source} | room-not-occupied")
+            return None
+        print(f"📣 Voice confirmation finished | boss={boss_name} | source={source} | success={bool(result)}")
+        return bool(result)
+    except Exception as exc:
+        print(f"❌ Voice confirmation wait failed | boss={boss_name} | source={source} | {exc}")
+        try:
+            future.cancel()
+        except Exception:
+            pass
+        return False
+    finally:
+        _confirmation_queue_ids.discard(request_id)
+
+async def _voice_confirm_boss_recording(boss_name: str, data: dict):
+    """Speak one confirmation in every occupied configured Voice room, exactly once per room.
+
+    A configured /setvoice room with no human occupants is not a Voice target for this
+    confirmation. If a target is occupied, the bot may enter that room and speak once.
+    The per-room idempotency key prevents the same confirmation from being spoken twice
+    in the same room when Firebase/voice-join callbacks race or repeat.
+    """
+    request_id = str(data.get("confirmationRequestId") or "").strip()
+    requested_at = data.get("confirmationRequestedAt")
+    status = str(data.get("confirmationStatus") or "").strip()
+    if not request_id or status not in ("", "pending"):
+        return False
+
+    # One in-process confirmation runner per durable request. This prevents two
+    # overlapping runners from each iterating the same occupied Voice targets.
+    if request_id in _voice_confirmation_completed_ids or request_id in _voice_confirmation_inflight_ids:
+        print(f"⏭️ Boss confirmation voice duplicate request suppressed | boss={boss_name} | request={request_id}", flush=True)
+        return True
+    _voice_confirmation_inflight_ids.add(request_id)
+
+    try:
+        # V153/V154: close an over-age pending confirmation instead of leaving it pending.
+        # The V154 queue-entry guard normally catches this first; this remains the
+        # defensive async check for tasks already scheduled before expiry was observed.
+        if await _expire_stale_voice_confirmation(boss_name, data):
+            return True
+
+        spoken_name = get_boss_pronunciation(boss_name)
+        recorded_by = str(data.get("recordedBy") or data.get("recorded_by") or "").strip()
+        if not recorded_by or recorded_by.lower() in {"unknown", "unknow", "ไม่ระบุ"}:
+            recorded_by = "สมาชิก"
+
+        success = False
+        has_configured_target = False
+        occupied_targets = []
+        seen_target_channel_ids = set()
+
+        # Snapshot configured /setvoice targets once. Duplicate channel IDs in the
+        # stored config are collapsed here so the same Discord Voice channel can never
+        # be selected twice for the same confirmation request.
+        for guild in list(bot.guilds):
+            configured_channels = get_configured_voice_channels(guild)
+            if not configured_channels:
+                print(f"⚠️ Boss confirmation skipped: no /setvoice targets | guild={guild.name}")
+                continue
+
+            has_configured_target = True
+            for configured in configured_channels:
+                try:
+                    channel_id = int(configured.id)
+                except Exception:
+                    continue
+                if channel_id in seen_target_channel_ids:
+                    print(
+                        f"⏭️ Boss confirmation duplicate configured room suppressed | "
+                        f"guild={guild.name} | channel={configured.name} | id={channel_id}",
+                        flush=True,
+                    )
+                    continue
+                seen_target_channel_ids.add(channel_id)
+
+                try:
+                    humans = [m for m in configured.members if not m.bot]
+                except Exception:
+                    humans = []
+                if not humans:
+                    print(
+                        f"⏭️ Boss confirmation skipped: configured Voice is empty | "
+                        f"guild={guild.name} | channel={configured.name}",
+                        flush=True,
+                    )
+                    continue
+
+                occupied_targets.append((guild, configured, len(humans)))
+
+        # No configured occupied Voice room means there is nothing to announce in Voice.
+        # Preserve the existing behavior: do not enter an empty room.
+        if has_configured_target and not occupied_targets:
+            confirmation_source = str(data.get("confirmationSource") or data.get("confirmation_source") or "").strip().lower()
+            with schedule_lock:
+                _confirmation_deferred_ids.discard(request_id)
+                _confirmation_seen_ids.add(request_id)
+            terminal_status = "skipped_no_occupied" if confirmation_source == "dashboard" else "sent"
+            print(
+                f"⏭️ Boss record confirmation skipped: no members in configured Voice rooms | "
+                f"boss={boss_name} | request={request_id} | source={confirmation_source or 'unknown'} | "
+                f"status={terminal_status} | no late retry",
+                flush=True,
+            )
+            try:
+                payload = {"confirmationStatus": terminal_status}
+                if confirmation_source == "dashboard":
+                    payload["confirmationSkippedAt"] = datetime.now(TZ_THAI).isoformat()
+                await asyncio.to_thread(db.reference(f"boss_schedule/{boss_name}").update, payload)
+            except Exception as exc:
+                print(f"⚠️ Could not persist skipped Voice confirmation for {boss_name}: {exc}", flush=True)
+            return True
+
+        if not has_configured_target:
+            print(
+                f"⚠️ Boss record confirmation failed: no /setvoice targets | "
+                f"boss={boss_name} | request={request_id}",
+                flush=True,
+            )
+            return False
+
+        try:
+            await asyncio.to_thread(
+                db.reference(f"boss_schedule/{boss_name}").update,
+                {"confirmationStatus": "processing"},
+            )
+        except Exception as exc:
+            print(f"⚠️ Could not mark confirmation processing: {boss_name}: {exc}")
+
+        await refresh_tts_settings_from_firebase()
+        text_th = f"บันทึกเวลาบอส {spoken_name} สำเร็จแล้วค่ะ"
+        text_en = f"Boss {boss_name} time saved successfully."
+        text_ko = f"보스 {boss_name} 시간이 성공적으로 저장되었습니다."
+
+        pending_retry = False
+        delivered_rooms = 0
+
+        # V136: speak every occupied configured room, but only once per room for this
+        # durable confirmation request. Boss advance/spawn multi-room behavior is untouched.
+        for guild, configured, initial_humans in occupied_targets:
+            room_key = _voice_confirmation_room_key(request_id, guild.id, configured.id)
+
+            if room_key in _voice_confirmation_room_completed:
+                print(
+                    f"⏭️ Boss confirmation room already delivered | boss={boss_name} | "
+                    f"guild={guild.name} | channel={configured.name} | request={request_id}",
+                    flush=True,
+                )
+                delivered_rooms += 1
+                continue
+
+            if room_key in _voice_confirmation_room_inflight:
+                print(
+                    f"⏭️ Boss confirmation room already in-flight | boss={boss_name} | "
+                    f"guild={guild.name} | channel={configured.name} | request={request_id}",
+                    flush=True,
+                )
+                pending_retry = True
+                continue
+
+            _voice_confirmation_room_inflight.add(room_key)
+            try:
+                # Recheck occupancy immediately before connecting. This closes the race
+                # where the last human leaves between the initial scan and the Voice join.
+                try:
+                    current_humans = [m for m in configured.members if not m.bot]
+                except Exception:
+                    current_humans = []
+                if not current_humans:
+                    confirmation_source = str(data.get("confirmationSource") or data.get("confirmation_source") or "").strip().lower()
+                    if confirmation_source == "dashboard":
+                        _confirmation_deferred_ids.discard(request_id)
+                        _confirmation_seen_ids.add(request_id)
+                        pending_retry = False
+                        try:
+                            await asyncio.to_thread(
+                                db.reference(f"boss_schedule/{boss_name}").update,
+                                {
+                                    "confirmationStatus": "skipped_no_occupied",
+                                    "confirmationSkippedAt": datetime.now(TZ_THAI).isoformat(),
+                                },
+                            )
+                        except Exception as exc:
+                            print(f"⚠️ Could not persist Dashboard Voice skip after room emptied | boss={boss_name}: {exc}", flush=True)
+                        print(
+                            f"⏭️ Dashboard Boss confirmation canceled: room became empty before connect | "
+                            f"boss={boss_name} | guild={guild.name} | channel={configured.name} | no late retry",
+                            flush=True,
+                        )
+                    else:
+                        pending_retry = True
+                        print(
+                            f"⏭️ Boss confirmation room became empty before connect | boss={boss_name} | "
+                            f"guild={guild.name} | channel={configured.name}",
+                            flush=True,
+                        )
+                    continue
+
+                print(
+                    f"📢 Boss confirmation voice target | guild={guild.name} | "
+                    f"channel={configured.name} | humans={len(current_humans)} | "
+                    f"initial_humans={initial_humans} | request={request_id}",
+                    flush=True,
+                )
+                try:
+                    ok = await asyncio.wait_for(
+                        speak_in_guild(
+                            guild,
+                            text_th=text_th,
+                            text_en=text_en,
+                            text_ko=text_ko,
+                            target_channel=configured,
+                        ),
+                        timeout=180,
+                    )
+                except Exception as exc:
+                    ok = False
+                    print(
+                        f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{configured.name}): {exc}",
+                        flush=True,
+                    )
+
+                if ok:
+                    _mark_voice_confirmation_room_completed(room_key)
+                    delivered_rooms += 1
+                    success = True
+                    print(
+                        f"✅ Boss confirmation room delivered | boss={boss_name} | "
+                        f"guild={guild.name} | channel={configured.name} | request={request_id}",
+                        flush=True,
+                    )
+                else:
+                    pending_retry = True
+                    print(
+                        f"⏸️ Boss confirmation room pending retry | boss={boss_name} | "
+                        f"guild={guild.name} | channel={configured.name} | request={request_id}",
+                        flush=True,
+                    )
+            finally:
+                _voice_confirmation_room_inflight.discard(room_key)
+
+        print(
+            f"✅ Boss record confirmation | boss={boss_name} | user={recorded_by} | "
+            f"success={success} | delivered_rooms={delivered_rooms}/{len(occupied_targets)} | "
+            f"pending_retry={pending_retry}",
+            flush=True,
+        )
+
+        final_status = "pending" if pending_retry else ("sent" if success else "failed")
+        try:
+            await asyncio.to_thread(
+                db.reference(f"boss_schedule/{boss_name}").update,
+                {"confirmationStatus": final_status},
+            )
+            if final_status == "pending":
+                with schedule_lock:
+                    _confirmation_seen_ids.discard(request_id)
+        except Exception as exc:
+            print(f"⚠️ Could not persist confirmation status for {boss_name}: {exc}")
+
+        if final_status == "sent":
+            _voice_confirmation_completed_ids.add(request_id)
+            _voice_confirmation_completed_order.append(request_id)
+            while len(_voice_confirmation_completed_ids) > len(_voice_confirmation_completed_order):
+                _voice_confirmation_completed_ids.discard(_voice_confirmation_completed_order.popleft())
+
+        return bool(success and not pending_retry)
+    finally:
+        _confirmation_queue_ids.discard(request_id)
+        _voice_confirmation_inflight_ids.discard(request_id)
+
+async def _persist_dashboard_confirmation_skipped(boss_name: str, request_id: str, skipped_at: str) -> None:
+    try:
+        await asyncio.to_thread(
+            db.reference(f"boss_schedule/{boss_name}").update,
+            {
+                "confirmationStatus": "skipped_no_occupied",
+                "confirmationSkippedAt": skipped_at,
+            },
+        )
+    except Exception as exc:
+        print(
+            f"⚠️ Could not persist Dashboard Voice confirmation skip | "
+            f"boss={boss_name} | request={request_id} | {exc}",
+            flush=True,
+        )
+
+
+def start_firebase_listener(loop):
+    """Safe listener: always read the boss_schedule root, never trust event.data as the full tree."""
+    def listener(event):
+        global is_updating_from_bot
+        if not is_bot_ready or is_updating_from_bot:
+            return
+        try:
+            snapshot = db.reference("boss_schedule").get()
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            new_schedule = {}
+            for boss_name, data in snapshot.items():
+                if not isinstance(data, dict):
+                    continue
+                canonical = _canonical_library_boss_key(boss_name)
+                if canonical == boss_name:
+                    canonical = get_boss_canonical_name(boss_name)
+                internal = _firebase_to_internal(canonical, data)
+                if internal:
+                    new_schedule[canonical] = internal
+            with schedule_lock:
+                previous = dict(boss_schedule)
+                boss_schedule.clear()
+                boss_schedule.update(new_schedule)
+
+            # Trigger one-shot confirmation from the durable Firebase pending state.
+            # Do not require the local cache's previous requestId to differ: the local
+            # cache can already contain the same pending request after a dashboard save,
+            # a reconnect, or a root-sync race.  The requestId itself is the idempotency
+            # key, while confirmationStatus=pending is the durable work signal.
+            for boss_name, item in new_schedule.items():
+                req_id = str(item.get("confirmationRequestId") or "").strip()
+                status = str(item.get("confirmationStatus") or "pending").strip().lower()
+                if not req_id or status not in ("", "pending"):
+                    continue
+
+                # V153: stale Dashboard confirmations are terminal even when all
+                # configured Voice rooms are empty; do not let them wake up later.
+                request_age = _confirmation_request_age_seconds(item)
+                if request_age is not None and request_age > VOICE_CONFIRMATION_MAX_AGE_SECONDS:
+                    try:
+                        expired_at = datetime.now(TZ_THAI).isoformat()
+                        db.reference(f"boss_schedule/{boss_name}").update({
+                            "confirmationStatus": "expired",
+                            "confirmationExpiredAt": expired_at,
+                        })
+                        with schedule_lock:
+                            current_item = boss_schedule.get(boss_name)
+                            if (
+                                isinstance(current_item, dict)
+                                and str(current_item.get("confirmationRequestId") or "").strip() == req_id
+                            ):
+                                current_item["confirmationStatus"] = "expired"
+                                current_item["confirmationExpiredAt"] = expired_at
+                        _confirmation_deferred_ids.discard(req_id)
+                        _confirmation_seen_ids.add(req_id)
+                        _confirmation_queue_ids.discard(req_id)
+                        print(
+                            f"⏭️ Firebase stale Voice confirmation expired | boss={boss_name} | "
+                            f"request={req_id} | age={_format_duration(request_age)} | max_age=30m | no retry",
+                            flush=True,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"⚠️ Firebase stale Voice confirmation expiry failed | boss={boss_name} | "
+                            f"request={req_id} | {exc}",
+                            flush=True,
+                        )
+                    continue
+
+                if req_id in _confirmation_seen_ids or req_id in _confirmation_queue_ids:
+                    continue
+
+                # V165: Dashboard confirmation is point-in-time only. If no human is
+                # present when the Firebase event is processed, terminalize it instead of
+                # leaving durable pending work for a later voice join.
+                confirmation_source = str(item.get("confirmationSource") or item.get("confirmation_source") or "").strip().lower()
+                if not _has_occupied_voice_confirmation_target():
+                    if confirmation_source == "dashboard":
+                        _confirmation_deferred_ids.discard(req_id)
+                        _confirmation_queue_ids.discard(req_id)
+                        _confirmation_seen_ids.add(req_id)
+                        skipped_at = datetime.now(TZ_THAI).isoformat()
+                        with schedule_lock:
+                            current = boss_schedule.get(boss_name)
+                            if isinstance(current, dict) and str(current.get("confirmationRequestId") or "").strip() == req_id:
+                                current["confirmationStatus"] = "skipped_no_occupied"
+                                current["confirmationSkippedAt"] = skipped_at
+                        listener_loop = loop
+                        if listener_loop is not None and not listener_loop.is_closed():
+                            try:
+                                asyncio.run_coroutine_threadsafe(
+                                    _persist_dashboard_confirmation_skipped(boss_name, req_id, skipped_at),
+                                    listener_loop,
+                                )
+                            except (RuntimeError, TypeError) as exc:
+                                print(
+                                    f"⚠️ Dashboard Voice confirmation skip scheduling failed | "
+                                    f"boss={boss_name} | request={req_id} | {exc!r}",
+                                    flush=True,
+                                )
+                        print(
+                            f"⏭️ Dashboard Voice confirmation skipped: no occupied /setvoice room at processing time | "
+                            f"boss={boss_name} | request={req_id} | no late retry",
+                            flush=True,
+                        )
+                    elif req_id not in _confirmation_deferred_ids:
+                        _confirmation_deferred_ids.add(req_id)
+                        print(
+                            f"⏳ Firebase pending Voice confirmation held: no occupied /setvoice room "
+                            f"| boss={boss_name} | request={req_id}",
+                            flush=True,
+                        )
+                    continue
+
+                _confirmation_deferred_ids.discard(req_id)
+                queue_result = queue_voice_confirmation(
+                    boss_name, item, source='firebase-listener'
+                )
+                # Only mark the request as seen after it has been accepted either
+                # for immediate execution or for the READY/pending queue. This keeps
+                # a transient listener race from permanently swallowing the request.
+                if queue_result is not False:
+                    _confirmation_seen_ids.add(req_id)
+            print(f"🔄 Firebase boss_schedule sync: {len(new_schedule)} รายการ")
+        except Exception as e:
+            print(f"❌ Firebase Listener boss_schedule ผิดพลาด: {e}")
+    try:
+        db.reference("boss_schedule").listen(listener)
+        print("🟢 Firebase Listener พร้อมทำงานแบบ safe root-sync")
+    except Exception as e:
+        print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
+
+async def save_inotiawar_config():
+    """Persist per-guild Inotia War notification switches without touching boss_schedule."""
+    with schedule_lock:
+        data = {str(gid): dict(cfg) for gid, cfg in (inotiawar_config or {}).items() if isinstance(cfg, dict)}
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference(INOTIAWAR_CONFIG_FIREBASE_PATH).set, data), timeout=8
+        )
+        firebase_ok = True
+    except Exception as exc:
+        firebase_ok = False
+        print(f"⚠️ บันทึก inotiawar_config ลง Firebase ไม่สำเร็จ: {exc}", flush=True)
+    await asyncio.to_thread(set_db_value, "inotiawar_config", data)
+    await asyncio.to_thread(save_json_local, INOTIAWAR_CONFIG_FILE, data)
+    return firebase_ok
+
+
+async def load_inotiawar_config():
+    """Load per-guild Inotia War switches. Firebase is canonical; local storage is fallback."""
+    global inotiawar_config
+    data = None
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(db.reference(INOTIAWAR_CONFIG_FIREBASE_PATH).get), timeout=8
+        )
+    except Exception as exc:
+        print(f"⚠️ โหลด inotiawar_config จาก Firebase ไม่สำเร็จ: {exc}", flush=True)
+    if not isinstance(data, dict):
+        data = get_db_value("inotiawar_config", None)
+    normalized = {}
+    if isinstance(data, dict):
+        for gid, cfg in data.items():
+            if not isinstance(cfg, dict):
+                continue
+            normalized[str(gid)] = {
+                "guild_id": int(gid) if str(gid).isdigit() else gid,
+                "enabled": parse_bool(cfg.get("enabled", False), False),
+                "updated_by": str(cfg.get("updated_by") or ""),
+                "updated_at": str(cfg.get("updated_at") or ""),
+            }
+    with schedule_lock:
+        inotiawar_config = normalized
+    enabled_count = sum(1 for cfg in normalized.values() if parse_bool(cfg.get("enabled"), False))
+    print(
+        f"✅ load_inotiawar_config สำเร็จ | guilds={len(normalized)} | enabled={enabled_count}",
+        flush=True,
+    )
+
+
+def is_inotiawar_enabled(guild_id: int) -> bool:
+    cfg = inotiawar_config.get(str(guild_id)) if guild_id is not None else None
+    return bool(isinstance(cfg, dict) and parse_bool(cfg.get("enabled", False), False))
+
+
+async def save_voice_config():
+    """บันทึกการตั้งค่าห้อง Voice แบบถาวรลง Firebase และ local SQLite/JSON"""
+    with schedule_lock:
+        data = {str(gid): dict(cfg) for gid, cfg in voice_config.items()}
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("voice_config").set, data),
+            timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก voice_config ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "voice_config", data)
+    await asyncio.to_thread(save_json_local, VOICE_CONFIG_FILE, data)
+
+async def save_notification_channels():
+    """Persist Discord text-notification target channels to Firebase and local storage."""
+    with schedule_lock:
+        data = {str(gid): dict(channels) for gid, channels in (notification_channels or {}).items()}
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("notification_channels").set, data), timeout=8
+        )
+        firebase_ok = True
+    except Exception as e:
+        firebase_ok = False
+        print(f"⚠️ บันทึก notification_channels ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "notification_channels", data)
+    await asyncio.to_thread(save_json_local, "notification_channels.json", data)
+    return firebase_ok
+
+
+async def load_notification_channels():
+    """Load persistent Discord text-notification channels. Firebase is canonical."""
+    global notification_channels
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("notification_channels").get)
+    except Exception as e:
+        print(f"⚠️ โหลด notification_channels จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("notification_channels", None)
+
+    normalized = {}
+    if isinstance(data, dict):
+        for guild_id, guild_data in data.items():
+            if not isinstance(guild_data, dict):
+                continue
+            bucket = {}
+            # Accept the canonical channels map. Also tolerate a flat legacy shape.
+            source = guild_data.get("channels") if isinstance(guild_data.get("channels"), dict) else guild_data
+            for channel_id, cfg in source.items():
+                if not isinstance(cfg, dict):
+                    continue
+                cid = cfg.get("channel_id", channel_id)
+                try:
+                    cid = int(cid)
+                except (TypeError, ValueError):
+                    continue
+                enabled = parse_bool(cfg.get("enabled"), True)
+                if not enabled:
+                    continue
+                gid = cfg.get("guild_id", guild_id)
+                try:
+                    gid = int(gid)
+                except (TypeError, ValueError):
+                    try:
+                        gid = int(guild_id)
+                    except (TypeError, ValueError):
+                        continue
+                bucket[str(cid)] = {
+                    "guild_id": gid,
+                    "channel_id": cid,
+                    "channel_name": str(cfg.get("channel_name") or ""),
+                    "enabled": True,
+                    "updated_by": str(cfg.get("updated_by") or ""),
+                    "updated_at": str(cfg.get("updated_at") or ""),
+                }
+            if bucket:
+                normalized[str(guild_id)] = bucket
+    notification_channels = normalized
+    total = sum(len(v) for v in notification_channels.values())
+    print(f"✅ load_notification_channels สำเร็จ ({total} enabled channel(s))")
+    return notification_channels
+
+
+def _notification_channel_ids_from_memory():
+    """Return enabled persistent notification channel IDs, de-duplicated globally."""
+    ids = []
+    seen = set()
+    with schedule_lock:
+        snapshot = {str(gid): dict(chs) for gid, chs in (notification_channels or {}).items()}
+    for _, channels in snapshot.items():
+        for channel_id, cfg in channels.items():
+            if not isinstance(cfg, dict) or not parse_bool(cfg.get("enabled"), True):
+                continue
+            try:
+                cid = int(cfg.get("channel_id", channel_id))
+            except (TypeError, ValueError):
+                continue
+            if cid not in seen:
+                ids.append(cid)
+                seen.add(cid)
+    return ids
+
+
+async def get_notification_channel_ids_from_database():
+    """Fetch the canonical notification_channels root immediately before a Boss send."""
+    global notification_channels
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(db.reference("notification_channels").get), timeout=8
+        )
+        if isinstance(data, dict):
+            # Reuse the same normalization logic without adding another Firebase write.
+            normalized = {}
+            for guild_id, guild_data in data.items():
+                if not isinstance(guild_data, dict):
+                    continue
+                source = guild_data.get("channels") if isinstance(guild_data.get("channels"), dict) else guild_data
+                bucket = {}
+                for channel_id, cfg in source.items():
+                    if not isinstance(cfg, dict) or not parse_bool(cfg.get("enabled"), True):
+                        continue
+                    cid = cfg.get("channel_id", channel_id)
+                    try:
+                        cid = int(cid)
+                    except (TypeError, ValueError):
+                        continue
+                    bucket[str(cid)] = {
+                        "guild_id": int(cfg.get("guild_id", guild_id)),
+                        "channel_id": cid,
+                        "channel_name": str(cfg.get("channel_name") or ""),
+                        "enabled": True,
+                        "updated_by": str(cfg.get("updated_by") or ""),
+                        "updated_at": str(cfg.get("updated_at") or ""),
+                    }
+                if bucket:
+                    normalized[str(guild_id)] = bucket
+            notification_channels = normalized
+            return _notification_channel_ids_from_memory()
+    except Exception as e:
+        print(f"⚠️ อ่าน notification_channels สดจาก Firebase ไม่สำเร็จ; ใช้ cache: {e}")
+    return _notification_channel_ids_from_memory()
+
+
+async def refresh_discord_notification_languages():
+    """Refresh only Discord notification language switches; do not reload TTS/BF/Voice settings."""
+    global discord_notify_th_enabled, discord_notify_en_enabled, discord_notify_ko_enabled
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(db.reference("bot_settings").get), timeout=8
+        )
+        if isinstance(data, dict):
+            discord_notify_th_enabled = parse_bool(data.get("discord_notify_th_enabled"), discord_notify_th_enabled)
+            discord_notify_en_enabled = parse_bool(data.get("discord_notify_en_enabled"), discord_notify_en_enabled)
+            discord_notify_ko_enabled = parse_bool(data.get("discord_notify_ko_enabled"), discord_notify_ko_enabled)
+            return True
+    except Exception as e:
+        print(f"⚠️ อ่าน Discord notification languages สดจาก Firebase ไม่สำเร็จ; ใช้ค่าเดิม: {e}")
+    return False
+
+
+async def save_bot_settings():
+    """Persist notification/TTS switches to Firebase and local SQLite."""
+    data = {
+        "bf_notify_enabled": bool(bf_notify_enabled),
+        "lib_notify_enabled": bool(lib_notify_enabled),
+        "ppl_notify_enabled": bool(ppl_notify_enabled),
+        "tts_th_enabled": bool(tts_th_enabled),
+        "tts_en_enabled": bool(tts_en_enabled),
+        "tts_ko_enabled": bool(tts_ko_enabled),
+        "discord_notify_th_enabled": bool(discord_notify_th_enabled),
+        "discord_notify_en_enabled": bool(discord_notify_en_enabled),
+        "discord_notify_ko_enabled": bool(discord_notify_ko_enabled),
+    }
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("bot_settings").update, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก bot_settings ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "bot_settings", data)
+    await asyncio.to_thread(save_json_local, SETTINGS_FILE, data)
+
+async def load_bot_settings():
+    """Load notification/TTS switches. Firebase is canonical; local storage is fallback."""
+    global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    global discord_notify_th_enabled, discord_notify_en_enabled, discord_notify_ko_enabled
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("bot_settings").get)
+    except Exception as e:
+        print(f"⚠️ โหลด bot_settings จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("bot_settings", None)
+    if isinstance(data, dict):
+        bf_notify_enabled = parse_bool(data.get("bf_notify_enabled"), bf_notify_enabled)
+        lib_notify_enabled = parse_bool(data.get("lib_notify_enabled"), lib_notify_enabled)
+        ppl_notify_enabled = parse_bool(data.get("ppl_notify_enabled"), ppl_notify_enabled)
+        tts_th_enabled = parse_bool(data.get("tts_th_enabled"), tts_th_enabled)
+        tts_en_enabled = parse_bool(data.get("tts_en_enabled"), tts_en_enabled)
+        tts_ko_enabled = parse_bool(data.get("tts_ko_enabled"), tts_ko_enabled)
+        discord_notify_th_enabled = parse_bool(data.get("discord_notify_th_enabled"), discord_notify_th_enabled)
+        discord_notify_en_enabled = parse_bool(data.get("discord_notify_en_enabled"), discord_notify_en_enabled)
+        discord_notify_ko_enabled = parse_bool(data.get("discord_notify_ko_enabled"), discord_notify_ko_enabled)
+    print("✅ load_bot_settings สำเร็จ")
+
+async def load_custom_bosses():
+    """Load custom boss definitions from Firebase/local fallback."""
+    global custom_bosses
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("custom_bosses").get)
+    except Exception as e:
+        print(f"⚠️ โหลด custom_bosses จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("custom_bosses", None)
+    custom_bosses = data if isinstance(data, dict) else {}
+    loaded = 0
+    for name, cfg in custom_bosses.items():
+        if not isinstance(cfg, dict) or not str(name).strip():
+            continue
+        try:
+            seconds = int(cfg.get("respawnSeconds", 0) or 0)
+            if seconds <= 0:
+                continue
+            canonical = str(name).strip()
+            BOSS_RESPAWN_TIMES[canonical] = timedelta(seconds=seconds)
+            notice = max(1, int(cfg.get("noticeMinutes", 5) or 5))
+            ADVANCE_NOTICE_SECONDS[canonical] = notice * 60
+            ADVANCE_NOTICE_TEXT[canonical] = f"{notice} นาที"
+            BOSS_CD_TEXT[canonical] = str(cfg.get("cdText") or "").strip() or f"{seconds // 3600} ชั่วโมง {(seconds % 3600) // 60} นาที {seconds % 60} วินาที"
+            BOSS_PRONUNCIATION[canonical] = str(cfg.get("pronunciation") or canonical)
+            loaded += 1
+        except (TypeError, ValueError):
+            continue
+    print(f"✅ load_custom_bosses สำเร็จ ({loaded} custom bosses)")
+
+async def save_custom_bosses_to_github():
+    """Persist custom boss definitions durably in Firebase (canonical)."""
+    data = {str(k): dict(v) for k, v in (custom_bosses or {}).items() if isinstance(v, dict)}
+    if not data:
+        print("ℹ️ custom_bosses ว่าง — ไม่เขียนทับข้อมูล Firebase เดิม")
+        return True
+    try:
+        # Save each boss separately first, so one bad record cannot erase the others.
+        for boss_name, cfg in data.items():
+            await asyncio.wait_for(
+                asyncio.to_thread(db.reference(f"custom_bosses/{boss_name}").set, cfg), timeout=8
+            )
+        # Then keep a complete root snapshot for compatibility.
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("custom_bosses").update, data), timeout=8
+        )
+        print(f"💾 custom_bosses saved to Firebase: {len(data)} boss(es)")
+        ok = True
+    except Exception as e:
+        print(f"❌ บันทึก custom_bosses ลง Firebase ไม่สำเร็จ: {e}")
+        ok = False
+    await asyncio.to_thread(set_db_value, "custom_bosses", data)
+    await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, data)
+    return ok
+
+async def load_live_config():
+    global live_message_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("live_message_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด live_message_config จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("live_message_config", None)
+    live_message_config = data if isinstance(data, dict) else {}
+    print("✅ load_live_config สำเร็จ")
+
+async def save_live_config():
+    data = dict(live_message_config or {})
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("live_message_config").set, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก live_message_config ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "live_message_config", data)
+    await asyncio.to_thread(save_json_local, LIVE_CONFIG_FILE, data)
+
+async def load_vip_config():
+    global vip_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("vip_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด vip_config จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("vip_config", None)
+    if isinstance(data, dict):
+        vip_config = {
+            "enabled": parse_bool(data.get("enabled"), False),
+            "user_id": int(data["user_id"]) if str(data.get("user_id", "")).isdigit() else None,
+            "user_name": str(data.get("user_name", "")),
+            "message": str(data.get("message", "")),
+        }
+    print("✅ load_vip_config สำเร็จ")
+
+async def save_vip_config():
+    data = dict(vip_config or {})
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("vip_config").set, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก vip_config ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "vip_config", data)
+    await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, data)
+
+async def load_voice_config():
+    """Load and normalize persisted Voice targets. Supports legacy single-channel records and new multi-channel records."""
+    global voice_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("voice_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด voice_config จาก Firebase ไม่สำเร็จ: {e}")
+    if not data:
+        data = get_db_value("voice_config", None)
+
+    normalized = {}
+    if isinstance(data, dict):
+        for gid, cfg in data.items():
+            if not isinstance(cfg, dict):
+                continue
+            guild_id = int(gid) if str(gid).isdigit() else gid
+            channels = {}
+
+            # New schema: channels = {channel_id: {...}}
+            raw_channels = cfg.get("channels")
+            if isinstance(raw_channels, dict):
+                for cid, cdata in raw_channels.items():
+                    if not isinstance(cdata, dict):
+                        continue
+                    try:
+                        channel_id = int(cdata.get("voice_channel_id") or cdata.get("voiceChannelId") or cid)
+                    except (TypeError, ValueError):
+                        continue
+                    channels[str(channel_id)] = {
+                        "voice_channel_id": channel_id,
+                        "guild_id": guild_id,
+                        "channel_name": cdata.get("channel_name", ""),
+                        "enabled": parse_bool(cdata.get("enabled", True), True),
+                        "updated_by": cdata.get("updated_by", cfg.get("updated_by", "")),
+                        "updated_at": cdata.get("updated_at", cfg.get("updated_at", ""))
+                    }
+
+            # Legacy schema: one voice_channel_id at guild root. Keep it.
+            if not channels:
+                legacy_id = cfg.get("voice_channel_id") or cfg.get("voiceChannelId")
+                if legacy_id:
+                    try:
+                        channel_id = int(legacy_id)
+                        channels[str(channel_id)] = {
+                            "voice_channel_id": channel_id,
+                            "guild_id": guild_id,
+                            "channel_name": cfg.get("channel_name", ""),
+                            "enabled": parse_bool(cfg.get("enabled", True), True),
+                            "updated_by": cfg.get("updated_by", ""),
+                            "updated_at": cfg.get("updated_at", "")
+                        }
+                    except (TypeError, ValueError):
+                        pass
+
+            if channels:
+                normalized[str(gid)] = {
+                    "guild_id": guild_id,
+                    "channels": channels,
+                    "enabled": parse_bool(cfg.get("enabled", True), True),
+                    "mode": cfg.get("mode", "on-demand"),
+                    "updated_by": cfg.get("updated_by", ""),
+                    "updated_at": cfg.get("updated_at", "")
+                }
+
+    voice_config = normalized
+    total_targets = sum(len(cfg.get("channels", {})) for cfg in voice_config.values())
+    print(f"🔊 โหลด voice_config สำเร็จ {total_targets} ห้อง / {len(voice_config)} เซิร์ฟเวอร์")
+
+
+def get_configured_voice_channels(guild: discord.Guild):
+    """Return all configured /setvoice channels for a guild (new + legacy schema)."""
+    if not guild:
+        return []
+    cfg = voice_config.get(str(guild.id))
+    if not cfg or not parse_bool(cfg.get("enabled", True), True):
+        return []
+
+    channels = []
+    raw_channels = cfg.get("channels")
+    if isinstance(raw_channels, dict):
+        for cdata in raw_channels.values():
+            if not isinstance(cdata, dict) or not parse_bool(cdata.get("enabled", True), True):
+                continue
+            channel_id = cdata.get("voice_channel_id")
+            try:
+                channel_id = int(channel_id) if channel_id is not None else None
+            except (TypeError, ValueError):
+                channel_id = None
+            if not channel_id:
+                continue
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                channels.append(channel)
+    else:
+        channel_id = cfg.get("voice_channel_id") or cfg.get("voiceChannelId")
+        try:
+            channel_id = int(channel_id) if channel_id is not None else None
+        except (TypeError, ValueError):
+            channel_id = None
+        if channel_id:
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                channels.append(channel)
+    # Stable order and de-duplicate by channel id.
+    seen = set()
+    result = []
+    for channel in channels:
+        if channel.id not in seen:
+            seen.add(channel.id)
+            result.append(channel)
+    return result
+
+
+def get_configured_voice_channel(guild: discord.Guild):
+    """Backward-compatible first configured channel."""
+    channels = get_configured_voice_channels(guild)
+    return channels[0] if channels else None
+
+def get_occupied_voice_channels(guild: discord.Guild):
+    """Return VoiceChannels that currently contain at least one human member."""
+    if not guild:
+        return []
+    return [
+        channel for channel in guild.voice_channels
+        if any(not member.bot for member in channel.members)
+    ]
+
+
+async def ensure_configured_voice(guild: discord.Guild):
+    """Legacy compatibility: configured Voice is ON-DEMAND, never persistent."""
+    return None
+
+
+def get_ffmpeg_path():
+    try: return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e: print(f"⚠️ ไม่สามารถโหลด FFmpeg จาก imageio-ffmpeg ได้: {e}")
+    cwd = os.getcwd()
+    for filename in ["ffmpeg.exe", "ffmpeg"]:
+        local_path = os.path.join(cwd, filename)
+        if os.path.exists(local_path): return local_path
+    for filename in ["ffmpeg.exe", "ffmpeg"]:
+        bin_path = os.path.join(cwd, "ffmpeg", "bin", filename)
+        if os.path.exists(bin_path): return bin_path
+    system_path = shutil.which("ffmpeg")
+    if system_path: return system_path
+    return "ffmpeg"
+
+def clean_display_name(name: str) -> str:
+    if not name: return "สมาชิก"
+    cleaned = re.sub(r'[^\w\s\u0E00-\u0E7F]', '', name)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned if cleaned else "สมาชิก"
+
+# 🔥 ฟังก์ชันแจ้งเตือนด้วยเสียง (ตรวจสอบสถานะเปิด-ปิด TTS แต่ละภาษาก่อนเล่น)
+async def refresh_tts_settings_from_firebase():
+    """Read bot_settings directly from Firebase immediately before TTS generation.
+    Firebase is the single source of truth; local SQLite/files are not used to decide
+    which languages the Discord bot speaks.
+    """
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    try:
+        data = await asyncio.to_thread(db.reference("bot_settings").get)
+        if isinstance(data, dict):
+            tts_th_enabled = parse_bool(data.get("tts_th_enabled"), False)
+            tts_en_enabled = parse_bool(data.get("tts_en_enabled"), False)
+            tts_ko_enabled = parse_bool(data.get("tts_ko_enabled"), False)
+        else:
+            tts_th_enabled = tts_en_enabled = tts_ko_enabled = False
+    except Exception as e:
+        print(f"❌ TTS settings refresh from Firebase failed: {e}")
+        return False
+    print(f"🔐 Effective TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
+    return True
+
+async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
+    """Generate TTS with live Firebase settings and bounded recovery.
+
+    Keep the configured voice as the primary voice. If Edge TTS returns
+    ``NoAudioReceived`` for that voice, make one bounded fallback attempt with
+    another currently supported voice in the same language. This is intentionally
+    limited to TTS generation and does not change Firebase, Boss, Voice, or command
+    behavior.
+    """
+    await refresh_tts_settings_from_firebase()
+    actual = []
+    if tts_th_enabled and text_th:
+        actual.append(("th", text_th, VOICE_THAI, "-20%", "+10Hz"))
+    if tts_en_enabled and text_en:
+        actual.append(("en", text_en, VOICE_ENG, "-10%", "+0Hz"))
+    if tts_ko_enabled and text_ko:
+        actual.append(("ko", text_ko, VOICE_KOR, "-10%", "+0Hz"))
+
+    # Fallbacks are used only after the configured voice has exhausted its
+    # normal bounded retries. They preserve the language and avoid retry storms.
+    tts_voice_fallbacks = {
+        "th": ["th-TH-AcharaNeural"],
+        "en": ["en-US-JennyNeural"],
+        "ko": ["ko-KR-JiMinNeural"],
+    }
+
+    files = []
+    uid = uuid.uuid4().hex
+    for lang, text, voice, rate, pitch in actual:
+        filename = f"temp_tts_{lang}_{guild_id}_{uid}.mp3"
+        success = False
+        last_error = None
+
+        # Phase 1: configured voice, unchanged from the existing 3-attempt policy.
+        for attempt in range(1, 4):
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+                # First attempt keeps configured prosody; retries fall back to plain voice
+                # because the upstream TTS service can intermittently reject rate/pitch.
+                if attempt == 1:
+                    communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+                else:
+                    communicator = edge_tts.Communicate(text, voice)
+                await communicator.save(filename)
+                if os.path.exists(filename) and os.path.getsize(filename) > 256:
+                    files.append((lang, filename))
+                    print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id}) voice={voice} attempt={attempt}")
+                    success = True
+                    break
+                last_error = RuntimeError("No audio was received")
+            except Exception as e:
+                last_error = e
+                print(f"⚠️ TTS attempt {attempt}/3 failed ({lang}) voice={voice}: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(0.8 * attempt)
+
+        if success:
+            continue
+
+        # Phase 2: one fallback voice, only for a no-audio/voice-rejection class
+        # failure. Do not fan out across many voices because that can create an
+        # upstream retry storm.
+        error_text = str(last_error or "")
+        no_audio_failure = bool(last_error) and (
+            "No audio was received" in error_text
+            or last_error.__class__.__name__ == "NoAudioReceived"
+        )
+        if no_audio_failure:
+            for fallback_voice in tts_voice_fallbacks.get(lang, []):
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                    print(f"🔁 TTS fallback voice | lang={lang} | primary={voice} | fallback={fallback_voice}")
+                    await asyncio.sleep(1.5)
+                    communicator = edge_tts.Communicate(text, fallback_voice)
+                    await communicator.save(filename)
+                    if os.path.exists(filename) and os.path.getsize(filename) > 256:
+                        files.append((lang, filename))
+                        print(f"✅ TTS fallback สำเร็จ: {lang} ({guild_id}) voice={fallback_voice}")
+                        success = True
+                        break
+                    last_error = RuntimeError("No audio was received")
+                except Exception as e:
+                    last_error = e
+                    print(f"⚠️ TTS fallback failed ({lang}) voice={fallback_voice}: {e}")
+
+        if not success:
+            print(f"❌ สร้าง TTS ไม่สำเร็จ ({lang}) หลัง primary 3 attempts + bounded fallback: {last_error}")
+    return files
+
+
+async def _play_tts_in_channel(guild, channel, files):
+    """Join one active voice channel, play all TTS files, then leave.
+
+    Robustness rules:
+    - Verify the configured room is occupied and the bot has Connect/Speak permissions.
+    - Reuse an existing connection only when it is healthy; otherwise reconnect.
+    - Retry Voice connection once after a short backoff.
+    - Wait for the audio player callback, so a successful function return means audio was actually played.
+    """
+    if not isinstance(channel, discord.VoiceChannel):
+        return False
+
+    humans = [m for m in channel.members if not m.bot]
+    print(f"🔊 Voice target: {guild.name} -> {channel.name} | humans={len(humans)}")
+    if not humans:
+        print(f"⏭️ Voice skip: {guild.name} -> {channel.name} is empty")
+        return False
+
+    me = guild.me
+    if me is not None:
+        perms = channel.permissions_for(me)
+        print(f"🔐 Voice permissions {guild.name} -> {channel.name}: connect={perms.connect} speak={perms.speak}")
+        if not perms.connect or not perms.speak:
+            print(f"❌ Voice permission denied: {guild.name}/{channel.name}")
+            return False
+
+    vc = guild.voice_client
+    connected_here = False
+    try:
+        # Remove a stale connection before starting a fresh on-demand session.
+        if vc and vc.is_connected() and vc.channel and vc.channel.id != channel.id:
+            try:
+                print(f"🔄 Voice moving: {guild.name} -> {vc.channel.name} => {channel.name}")
+                await vc.move_to(channel)
+                connected_here = True
+            except Exception as exc:
+                print(f"⚠️ Voice move failed, reconnecting: {guild.name}/{channel.name}: {exc}")
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    pass
+                vc = None
+
+        if not vc or not vc.is_connected():
+            last_exc = None
+            # Discord Voice can leave a stale VoiceClient object behind when the
+            # initial voice handshake times out. Always clean that object before
+            # retrying so the next attempt starts a fresh voice session instead of
+            # colliding with the failed session. Keep retries bounded to avoid
+            # creating an aggressive reconnect loop.
+            for attempt in range(1, 4):
+                try:
+                    stale_vc = guild.voice_client
+                    if stale_vc and not stale_vc.is_connected():
+                        try:
+                            await stale_vc.disconnect(force=True)
+                        except Exception:
+                            pass
+                        vc = None
+
+                    print(f"🔌 Voice connect attempt {attempt}/3: {guild.name} -> {channel.name}")
+                    vc = await channel.connect(reconnect=True, timeout=25, self_deaf=False, self_mute=False)
+                    if vc and vc.is_connected():
+                        connected_here = True
+                        print(f"✅ Voice connect success: {guild.name} -> {channel.name}")
+                        break
+
+                    last_exc = RuntimeError("Discord returned a VoiceClient that is not connected")
+                    try:
+                        if vc:
+                            await vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    vc = None
+                except Exception as exc:
+                    last_exc = exc
+                    print(
+                        f"⚠️ Voice connect attempt {attempt}/3 failed: "
+                        f"{guild.name}/{channel.name}: {type(exc).__name__}: {exc!r}",
+                        flush=True,
+                    )
+                    try:
+                        stale_vc = guild.voice_client
+                        if stale_vc and not stale_vc.is_connected():
+                            await stale_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    vc = None
+                    if attempt < 3:
+                        await asyncio.sleep(2.0 * attempt)
+
+            if not vc or not vc.is_connected():
+                print(
+                    f"❌ Voice connect failed: {guild.name}/{channel.name}: "
+                    f"{type(last_exc).__name__ if last_exc else 'UnknownError'}: {last_exc!r}",
+                    flush=True,
+                )
+                return False
+
+        # Give the Discord voice websocket and UDP path time to become ready.
+        await asyncio.sleep(0.8)
+        print(f"🎙️ Voice ready for playback: {guild.name} -> {channel.name}")
+
+        loop = asyncio.get_running_loop()
+        played_any = False
+        for index, (lang, filename) in enumerate(files, start=1):
+            if not os.path.exists(filename) or os.path.getsize(filename) <= 256:
+                print(f"⚠️ Skip empty/missing TTS file: {lang} -> {filename}")
+                continue
+            if not vc.is_connected():
+                print(f"❌ Voice disconnected before playback: {guild.name}/{channel.name}")
+                break
+
+            if vc.is_playing():
+                vc.stop()
+                await asyncio.sleep(0.25)
+
+            done = asyncio.Event()
+            playback_error = {"error": None}
+
+            def after(error, event=done, err_holder=playback_error, lang_name=lang):
+                err_holder["error"] = error
+                if error:
+                    print(f"❌ เล่น TTS {lang_name} ผิดพลาดใน {guild.name}: {error}")
+                loop.call_soon_threadsafe(event.set)
+
+            try:
+                # Use FFmpeg -> Opus directly for Discord voice playback. This avoids
+                # an extra PCM -> Opus encoding path and is more reliable on Render.
+                source = discord.FFmpegOpusAudio(
+                    filename,
+                    executable=get_ffmpeg_path(),
+                    before_options="-nostdin -hide_banner -loglevel error",
+                    options="-vn -application lowdelay -frame_duration 20",
+                    bitrate=128
+                )
+                print(f"▶️ กำลังเล่น TTS: {lang} | {guild.name} -> {channel.name}")
+                vc.play(source, after=after)
+                # Confirm discord.py actually transitioned into PLAYING. A callback
+                # alone can fire even when the source stops immediately.
+                playing_deadline = loop.time() + 5
+                while not vc.is_playing() and loop.time() < playing_deadline:
+                    if playback_error["error"] is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                if not vc.is_playing() and playback_error["error"] is None:
+                    print(f"❌ TTS playback did not enter PLAYING state: {guild.name}/{channel.name}/{lang}")
+                    try:
+                        source.cleanup()
+                    except Exception:
+                        pass
+                    continue
+            except Exception as exc:
+                print(f"❌ เริ่มเล่นเสียง TTS ไม่สำเร็จ: {guild.name}/{channel.name}/{lang}: {exc}")
+                continue
+
+            try:
+                await asyncio.wait_for(done.wait(), timeout=90)
+            except asyncio.TimeoutError:
+                print(f"⏱️ TTS playback timeout: {guild.name}/{channel.name}/{lang}")
+                try:
+                    if vc.is_playing():
+                        vc.stop()
+                except Exception:
+                    pass
+                continue
+
+            if playback_error["error"] is None:
+                played_any = True
+                print(f"✅ TTS playback complete: {lang} | {guild.name} -> {channel.name}")
+            if index < len(files):
+                await asyncio.sleep(0.35)
+
+        return played_any
+    except Exception as e:
+        print(f"❌ Voice broadcast failed {guild.name}/{channel.name}: {e}")
+        traceback.print_exc()
+        return False
+    finally:
+        # On-demand mode: disconnect after playback.
+        try:
+            vc_now = guild.voice_client
+            if vc_now and vc_now.is_connected():
+                await vc_now.disconnect(force=True)
+                print(f"🔌 TTS จบแล้ว ออกจาก Voice: {guild.name} -> {channel.name}")
+        except Exception as e:
+            print(f"⚠️ ออกจาก Voice ไม่สำเร็จ: {e}")
+
+
+async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_ko=None,
+                         target_channel: discord.VoiceChannel = None, prepared_files=None):
+    """
+    ON-DEMAND MULTI-CHANNEL:
+    - ถ้ามี target_channel ให้ประกาศห้องนั้น
+    - ถ้าไม่ระบุ ให้ไล่ทุกห้อง Voice ที่มีสมาชิกจริงทีละห้อง
+    - ไม่ค้าง connection หลังพูด
+    - ไม่พึ่ง /setvoice เพื่อให้ /notice และ boss notification ทำงานได้
+    """
+    if not guild:
+        return False
+
+    if guild.id not in voice_locks:
+        voice_locks[guild.id] = asyncio.Lock()
+
+    async with voice_locks[guild.id]:
+        channels = []
+        if target_channel and isinstance(target_channel, discord.VoiceChannel):
+            # V70: final occupancy check closes the race where a user leaves
+            # between the scheduler filter and the Voice connection.
+            if any(not m.bot for m in target_channel.members):
+                channels = [target_channel]
+            else:
+                print(f"⏭️ Voice target became empty before connect: {guild.name} -> {target_channel.name}")
+        else:
+            channels = [
+                ch for ch in guild.voice_channels
+                if any(not m.bot for m in ch.members)
+            ]
+
+        if not channels:
+            print(f"⏭️ ไม่มีห้อง Voice ที่มีสมาชิกสำหรับ TTS: {guild.name}")
+            return False
+
+        owns_tts_files = prepared_files is None
+        files = list(prepared_files or [])
+        if not files:
+            files = await _tts_generate_files(text_th, text_en, text_ko, guild.id)
+            owns_tts_files = True
+        if not files:
+            return False
+
+        success = False
+        try:
+            for channel in channels:
+                print(f"🔊 TTS -> {guild.name} -> {channel.name} | humans={len([m for m in channel.members if not m.bot])}")
+                if await _play_tts_in_channel(guild, channel, files):
+                    success = True
+                await asyncio.sleep(0.4)
+        finally:
+            if owns_tts_files:
+                for _, filename in files:
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except Exception:
+                        pass
+        return success
+
+# ==========================================
+# 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
+# ==========================================
+# ==========================================
+# 🤖 Discord Bot object
+# CRITICAL: must exist before any @bot.event / @bot.tree.command decorators.
+# ==========================================
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# V53: start.py owns command sync, so protect that call from a persisted REST block
+# without changing the 17 registered commands or the sync strategy itself.
+_original_tree_sync = bot.tree.sync
+async def _guarded_tree_sync(*args, **kwargs):
+    await wait_for_discord_rest_clear_confirmed(context="startup:tree-sync")
+    try:
+        result = await _original_tree_sync(*args, **kwargs)
+        # Tree sync is a confirmed successful foreground REST request. Keep the existing
+        # conservative post-sync probation, but centralize startup-hold release so the
+        # verify-first no-sync path can use the same state transition.
+        had_active_block = False
+        with discord_block_lock:
+            had_active_block = discord_block_started_at > 0
+        _clear_discord_block_after_success(context="startup:tree-sync")
+        if had_active_block:
+            _arm_background_rest_after_foreground_recovery()
+        release_discord_rest_startup_hold(
+            reason="command-sync-succeeded",
+            arm_probation=True,
+        )
+        return result
+    except discord.HTTPException as exc:
+        if getattr(exc, "status", None) == 429:
+            _apply_discord_rest_429(exc, context="startup:tree-sync")
+        raise
+
+bot.tree.sync = _guarded_tree_sync
+
+@tasks.loop(seconds=15)
+async def retry_pending_voice_confirmation_worker():
+    """Retry durable Boss-record confirmations using only cached Gateway/Firebase state.
+
+    This worker never performs Discord REST by itself.  It only asks the existing
+    confirmation queue to process records that are still pending while at least one
+    configured /setvoice room is occupied.  Existing request+room deduplication prevents
+    duplicate speech if Firebase, voice-state events, and this worker overlap.
+    """
+    try:
+        if not is_bot_ready or bot_event_loop is None:
+            return
+        for guild in list(bot.guilds):
+            try:
+                await _retry_pending_voice_confirmations_for_guild(guild)
+            except Exception as exc:
+                print(
+                    f"⚠️ Pending Voice confirmation worker guild retry failed | "
+                    f"guild={getattr(guild, 'name', guild.id)} | {exc!r}",
+                    flush=True,
+                )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ Pending Voice confirmation worker failed safely: {exc!r}", flush=True)
+
+
+async def _retry_pending_voice_confirmations_for_guild(guild: discord.Guild):
+    """Retry pending Dashboard confirmations when a human joins a configured Voice room."""
+    if not guild or not is_bot_ready:
+        return
+    # V155: only the active Gateway-lease owner may run this confirmation retry lane.
+    # This prevents a graceful Render handover from creating new confirmation tasks
+    # in the old process while the new process is taking ownership.
+    if SKYNET_RUNTIME_ROLE == "bot" and not discord_rest_runtime_lease_owned:
+        return
+    configured = get_configured_voice_channels(guild)
+    if not configured or not any(any(not m.bot for m in ch.members) for ch in configured):
+        return
+
+    candidates = []
+    with schedule_lock:
+        for boss_name, item in boss_schedule.items():
+            if not isinstance(item, dict):
+                continue
+            request_id = str(item.get("confirmationRequestId") or "").strip()
+            status = str(item.get("confirmationStatus") or "pending").strip().lower()
+            confirmation_source = str(item.get("confirmationSource") or item.get("confirmation_source") or "").strip().lower()
+            if request_id and status == "pending" and confirmation_source != "dashboard":
+                candidates.append((boss_name, dict(item)))
+
+    for boss_name, item in candidates:
+        try:
+            # V153: expire stale requests before they enter the retry queue.
+            if await _expire_stale_voice_confirmation(boss_name, item):
+                continue
+            queue_voice_confirmation(boss_name, item, source="voice-join", wait=False)
+        except Exception as exc:
+            print(f"⚠️ Pending Voice confirmation retry failed | boss={boss_name} | {exc}", flush=True)
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    global ppl_notify_enabled, vip_config
+    if member.bot: return
+
+    if before.channel != after.channel and after.channel is not None:
+        # V165: do not replay a previously-recorded Dashboard "time saved" confirmation
+        # merely because someone joins a Voice room later. VIP/PPL join notifications remain unchanged.
+        if vip_config.get("enabled", False) and member.id == vip_config.get("user_id"):
+            greeting_text = vip_config.get("message", "")
+            if greeting_text: asyncio.create_task(speak_in_guild(member.guild, text_th=greeting_text, target_channel=after.channel))
+        elif ppl_notify_enabled:
+            user_name = clean_display_name(member.display_name)
+            channel_name = clean_display_name(after.channel.name)
+            greeting_text_th = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
+            greeting_text_en = f"Welcome {user_name} to {channel_name}."
+            greeting_text_ko = f"{user_name}님, {channel_name} 방에 오신 것을 환영합니다."
+            asyncio.create_task(speak_in_guild(member.guild, text_th=greeting_text_th, text_en=greeting_text_en, text_ko=greeting_text_ko, target_channel=after.channel))
+
+@bot.event
+async def on_ready():
+    global is_bot_ready, bot_event_loop
+    bot_event_loop = asyncio.get_running_loop()
+    if is_bot_ready:
+        print("🔄 บอท Reconnect สำเร็จ (ข้ามการโหลดข้อมูลซ้ำ)")
+        return
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    print(f"🔊 ใช้ FFmpeg จากตำแหน่ง: {get_ffmpeg_path()}")
+
+    init_db()
+    # V182: start.py is the single owner of the pre-Gateway Discord REST restriction
+    # restore. Do not restore the same Firebase/SQLite restriction again inside
+    # on_ready(). In V181, the start.py on_ready listener could confirm successful
+    # Gateway recovery first, while this second restore still read the old persisted
+    # 429 record before the async clear finished and re-installed stale restriction
+    # state in memory.
+    await load_bot_settings()
+    print(f"🔐 Startup TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
+    print(f"🔔 Startup notification settings: BF={bf_notify_enabled} LIB={lib_notify_enabled} PPL={ppl_notify_enabled}")
+    print(f"📨 Per-user Discord DM notifications: opt-in | interval={DISCORD_USER_DM_MIN_INTERVAL:.1f}s | queue={PENDING_DISCORD_USER_DM_MAX}", flush=True)
+    await load_custom_bosses()
+    await load_boss_data()
+    await ensure_library_boss_schedule_records()
+    await load_live_config()
+    await load_vip_config()
+    await load_voice_config()
+    await load_inotiawar_config()
+    await load_notification_channels()
+    await load_attendance_config()
+    for _guild in list(bot.guilds):
+        _acfg = _attendance_config_snapshot(_guild.id)
+        print(
+            f"📊 AUTO ATTENDANCE CONFIG | guild={_guild.name} | "
+            f"enabled={parse_bool(_acfg.get('autoattendance_enabled'), False)} | "
+            f"summary_channel={_acfg.get('summary_channel_id') or '-'}",
+            flush=True,
+        )
+
+    # Voice is ON-DEMAND: do not connect on startup. /setvoice only stores the target channel.
+    print("🟢 Voice mode: ON-DEMAND GLOBAL (occupied-room announcements; connect only when speaking, disconnect after TTS)")
+
+    with discord_block_lock:
+        startup_gate_remaining = max(0.0, discord_block_next_probe_mono - time.monotonic()) if discord_block_started_at > 0 else 0.0
+    print(
+        f"🛡️ Discord REST startup gate status: {'BLOCKED' if startup_gate_remaining > 0 else 'READY'} | "
+        f"hold={_format_duration(startup_gate_remaining) if startup_gate_remaining > 0 else '0m 00s'}",
+        flush=True,
+    )
+
+    await asyncio.sleep(3)
+
+    # V144: rehydrate Auto Attendance panels that were created in Firebase but could not
+    # be delivered to Discord while the REST API was temporarily restricted. This does
+    # not probe Discord; the existing guarded worker remains the only sender.
+    try:
+        await _restore_pending_autoattendance_panel_delivery()
+    except Exception as exc:
+        print(f"⚠️ Auto Attendance pending-panel restore failed safely: {exc!r}", flush=True)
+    
+    if not check_boss_notifications.is_running(): check_boss_notifications.start()
+    if not check_bf_notifications.is_running(): check_bf_notifications.start()
+    if not check_library_boss_notifications.is_running(): check_library_boss_notifications.start()
+    if not update_live_embed.is_running(): update_live_embed.start()
+    if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
+    if not check_weekly_event_notifications.is_running(): check_weekly_event_notifications.start()
+    if not flush_pending_command_outputs.is_running(): flush_pending_command_outputs.start()
+    if not flush_pending_boss_rest_notification_worker.is_running(): flush_pending_boss_rest_notification_worker.start()
+    if not flush_pending_weekly_event_rest_worker.is_running(): flush_pending_weekly_event_rest_worker.start()
+    if not flush_pending_autoattendance_panel_worker.is_running(): flush_pending_autoattendance_panel_worker.start()
+    if not flush_pending_discord_user_dm_worker.is_running(): flush_pending_discord_user_dm_worker.start()
+    if not flush_pending_weekly_event_dm_worker.is_running(): flush_pending_weekly_event_dm_worker.start()
+    if not retry_pending_voice_confirmation_worker.is_running(): retry_pending_voice_confirmation_worker.start()
+    if not library_boss_daily_rotation_loop.is_running(): library_boss_daily_rotation_loop.start()
+    if not attendance_lifecycle_loop.is_running(): attendance_lifecycle_loop.start()
+    if not attendance_monthly_report_loop.is_running(): attendance_monthly_report_loop.start()
+    asyncio.create_task(restore_raid_attendance_views(), name="restore-raid-attendance-views")
+    if not getattr(discord_block_diagnostics_loop, "_started", False):
+        discord_block_diagnostics_loop._started = True
+        asyncio.create_task(discord_block_diagnostics_loop(), name="discord-block-diagnostics")
+
+    is_bot_ready = True
+    loop = bot_event_loop
+    threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
+    threading.Thread(target=start_attendance_firebase_listener, daemon=True).start()
+
+    # Drain Dashboard confirmations that arrived while Gateway was unavailable.
+    if _pending_voice_confirmations:
+        pending = list(_pending_voice_confirmations.values())
+        _pending_voice_confirmations.clear()
+        print(f"🔁 Draining pending Voice confirmations after READY: {len(pending)}")
+        for boss_name, item, source in pending:
+            req_id = str(item.get("confirmationRequestId") or "").strip()
+            confirmation_source = str(item.get("confirmationSource") or item.get("confirmation_source") or "").strip().lower()
+            if confirmation_source == "dashboard":
+                age = _confirmation_request_age_seconds(item)
+                if age is not None and age > DASHBOARD_VOICE_CONFIRMATION_MAX_AGE_SECONDS:
+                    print(
+                        f"⏭️ Dashboard Voice confirmation skipped after READY: stale request | "
+                        f"boss={boss_name} | age={_format_duration(age)} | no late retry",
+                        flush=True,
+                    )
+                    if req_id:
+                        skipped_at = datetime.now(TZ_THAI).isoformat()
+                        _confirmation_seen_ids.add(req_id)
+                        with schedule_lock:
+                            current = boss_schedule.get(boss_name)
+                            if isinstance(current, dict) and str(current.get("confirmationRequestId") or "").strip() == req_id:
+                                current["confirmationStatus"] = "skipped_no_occupied"
+                                current["confirmationSkippedAt"] = skipped_at
+                        asyncio.create_task(_persist_dashboard_confirmation_skipped(boss_name, req_id, skipped_at))
+                    continue
+                if not _has_occupied_voice_confirmation_target():
+                    print(
+                        f"⏭️ Dashboard Voice confirmation skipped after READY: no occupied /setvoice room | "
+                        f"boss={boss_name} | no late retry",
+                        flush=True,
+                    )
+                    if req_id:
+                        skipped_at = datetime.now(TZ_THAI).isoformat()
+                        _confirmation_seen_ids.add(req_id)
+                        with schedule_lock:
+                            current = boss_schedule.get(boss_name)
+                            if isinstance(current, dict) and str(current.get("confirmationRequestId") or "").strip() == req_id:
+                                current["confirmationStatus"] = "skipped_no_occupied"
+                                current["confirmationSkippedAt"] = skipped_at
+                        asyncio.create_task(_persist_dashboard_confirmation_skipped(boss_name, req_id, skipped_at))
+                    continue
+            if req_id:
+                _confirmation_queue_ids.add(req_id)
+            asyncio.create_task(_voice_confirm_boss_recording(boss_name, dict(item)))
+
+# ==========================================
+# ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
+# ==========================================
+async def _get_retry_after_seconds(exc, default=30.0):
+    """Best-effort extraction of Discord rate-limit retry delay."""
+    for attr in ("retry_after",):
+        try:
+            value = float(getattr(exc, attr))
+            if value >= 0:
+                return min(max(value, 1.0), 900.0)
+        except Exception:
+            pass
+    try:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            for key in ("Retry-After", "retry-after"):
+                raw = headers.get(key)
+                if raw is not None:
+                    value = float(raw)
+                    return min(max(value, 1.0), 900.0)
+        data = getattr(exc, "response", None)
+        payload = getattr(data, "data", None)
+        if isinstance(payload, dict) and payload.get("retry_after") is not None:
+            value = float(payload["retry_after"])
+            return min(max(value, 1.0), 900.0)
+    except Exception:
+        pass
+    return float(default)
+
+async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=True):
+    """Send exactly one time-critical initial Interaction ACK.
+
+    V132 keeps Interaction callback traffic completely outside the shared Discord REST
+    breaker. A 429 received while acknowledging an interaction is tracked only in the
+    Interaction lane so it cannot create/extend a long REST quarantine for Boss/Audit/BF.
+    Because Discord requires the initial response within 3 seconds, we never sleep and retry
+    an expired interaction callback. During an active interaction-only retry window we skip
+    the network call locally to avoid hammering the same rejected callback route.
+    """
+    global interaction_api_suppressed_until, interaction_api_last_429_log
+
+    try:
+        if interaction.response.is_done():
+            return True
+    except Exception:
+        pass
+
+    now_mono = time.monotonic()
+    shared_restriction_remaining = _interaction_shared_restriction_remaining()
+    if shared_restriction_remaining > 0:
+        interaction_api_suppressed_until = max(
+            interaction_api_suppressed_until,
+            now_mono + shared_restriction_remaining,
+        )
+        if now_mono - interaction_api_last_429_log >= 15.0:
+            interaction_api_last_429_log = now_mono
+            print(
+                f"⏭️ Interaction ACK skipped during Discord API temporary restriction | "
+                f"remaining={shared_restriction_remaining:.1f}s | no HTTP sent",
+                flush=True,
+            )
+        return False
+    if interaction_api_suppressed_until > now_mono:
+        remaining = interaction_api_suppressed_until - now_mono
+        if now_mono - interaction_api_last_429_log >= 15.0:
+            interaction_api_last_429_log = now_mono
+            print(
+                f"⏭️ Interaction ACK skipped during interaction-only cooldown | "
+                f"remaining={remaining:.1f}s | shared REST breaker unchanged",
+                flush=True,
+            )
+        return False
+
+    try:
+        # One immediate ACK attempt only. Do not sleep for Retry-After and do not touch
+        # the shared REST cooldown; Discord requires the initial response within 3 seconds.
+        await asyncio.wait_for(
+            interaction.response.defer(ephemeral=ephemeral),
+            timeout=1.75,
+        )
+        return True
+    except asyncio.TimeoutError:
+        print("⚠️ Interaction ACK timed out before Discord accepted the callback", flush=True)
+        return False
+    except discord.HTTPException as exc:
+        if getattr(exc, "status", None) == 429:
+            retry_after = 0.0
+            try:
+                retry_after = float(getattr(exc, "retry_after", 0) or 0)
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", None) or {}
+            cf_ray = headers.get("CF-RAY") or headers.get("cf-ray") or "-"
+            via = headers.get("Via") or headers.get("via") or "-"
+            date_header = headers.get("Date") or headers.get("date") or "-"
+
+            # V132: keep Interaction 429 completely local. Do NOT call
+            # _record_discord_block_observed(), do NOT persist app_settings/discord_rest_block,
+            # and do NOT change discord_rest_rate_limited_until. This prevents one rejected
+            # interaction callback from quarantining otherwise healthy REST lanes.
+            cooldown = max(1.0, retry_after) if retry_after > 0 else 60.0
+            interaction_api_suppressed_until = max(
+                interaction_api_suppressed_until,
+                time.monotonic() + cooldown,
+            )
+            now_log = time.monotonic()
+            if now_log - interaction_api_last_429_log >= 5.0:
+                interaction_api_last_429_log = now_log
+                print(
+                    f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
+                    f"cf_ray={cf_ray} | via={via} | date={date_header} | "
+                    "lane=INTERACTION_ONLY | shared REST breaker unchanged",
+                    flush=True,
+                )
+            return False
+        print(f"❌ Interaction ACK failed: {exc}", flush=True)
+        return False
+    except Exception as exc:
+        print(f"❌ Interaction ACK failed unexpectedly: {exc!r}", flush=True)
+        return False
+
+
+async def _safe_interaction_send_message(interaction: discord.Interaction, content=None, *, ephemeral=True, **kwargs):
+    """Best-effort initial interaction response for short-lived acknowledgement lanes."""
+    global discord_rest_rate_limited_until, discord_block_next_probe_mono
+    shared_restriction_remaining = _interaction_shared_restriction_remaining()
+    if shared_restriction_remaining > 0:
+        print(
+            f"⏭️ Interaction initial response skipped during Discord API temporary restriction | "
+            f"remaining={shared_restriction_remaining:.1f}s | no HTTP sent",
+            flush=True,
+        )
+        return False
+    try:
+        if interaction.response.is_done():
+            return False
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(
+            interaction.response.send_message(content, ephemeral=ephemeral, **kwargs),
+            timeout=1.75,
+        )
+        return True
+    except asyncio.TimeoutError:
+        print("⚠️ Interaction initial response timed out before Discord accepted the callback", flush=True)
+        return False
+    except discord.HTTPException as exc:
+        retry_after = 0.0
+        try:
+            retry_after = float(getattr(exc, "retry_after", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        if getattr(exc, "status", None) == 429:
+            # V57: interaction callback failures are logged in their own lane.
+            # They must not create or extend the background REST circuit breaker.
+            print(
+                f"⚠️ Interaction initial response rejected by Discord 429 | retry_after={retry_after:.2f}s | "
+                "REST circuit breaker unchanged | lane=INTERACTION_ONLY",
+                flush=True,
+            )
+        else:
+            print(f"⚠️ Interaction initial response failed: {exc}", flush=True)
+        return False
+    except Exception as exc:
+        print(f"⚠️ Interaction initial response failed unexpectedly: {exc!r}", flush=True)
+        return False
+
+
+# ==========================================
+# V36 RESTORED DEFINITIONS
+# ==========================================
+
+@bot.tree.command(name="panel", description="ส่งข้อความ Interactive Embed พร้อมปุ่มกด Quick Actions ในช่องนี้")
+@has_allowed_role()
+async def send_quick_panel(interaction: discord.Interaction):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    embed = discord.Embed(
+        title="⚡ Quick Actions - แผงควบคุมเวลาบอส",
+        description="เลือกชื่อบอสจากเมนูด้านล่าง แล้วกดปุ่มสั่งการได้ทันที:\n\n"
+                    "• **🔻 เมนูเลือกบอส**: เลือกชื่อบอสที่ต้องการ\n"
+                    "• **⚔️ บอสตายแล้ว**: กดเพื่อเปิดช่องพิมพ์ระบุเวลาตาย (เช่น `17:30`, `1730` หรือเว้นว่างไว้เพื่อใช้เวลาปัจจุบัน)\n"
+                    "• **🔔 เรียกคน**: แท็กยศคนลุยบอส + ส่งเสียง TTS ประกาศตามในห้องเสียงทุกห้องที่มีคนอยู่",
+        color=discord.Color.dark_purple()
+    )
+    embed.set_footer(text="ระบบปุ่มกดอัตโนมัติ 24/7 • Boss Control Panel")
+    view = QuickActionsView()
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed, view=view)
+    embed_summary, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
+    if tts_text_th and interaction.guild:
+        asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
+
+
+@bot.tree.command(name="tts", description="ตั้งค่าเปิด-ปิดการแจ้งเตือนเสียง TTS แยกตามภาษา (ไทย, อังกฤษ, เกาหลี)")
+@app_commands.describe(lang="เลือกภาษาที่ต้องการตั้งค่า", status="เลือกเปิด (on) หรือปิด (off)")
+@app_commands.choices(
+    lang=[
+        app_commands.Choice(name="🇹🇭 ภาษาไทย (TH)", value="th"),
+        app_commands.Choice(name="🇺🇸 ภาษาอังกฤษ (EN)", value="en"),
+        app_commands.Choice(name="🇰🇷 ภาษาเกาหลี (KO)", value="ko")
+    ],
+    status=[
+        app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
+        app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
+    ]
+)
+@has_allowed_role()
+async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Choice[str], status: app_commands.Choice[str]):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    is_on = (status.value == "on")
+    lang_name = ""
+    
+    if lang.value == "th":
+        tts_th_enabled = is_on
+        lang_name = "🇹🇭 ภาษาไทย"
+    elif lang.value == "en":
+        tts_en_enabled = is_on
+        lang_name = "🇺🇸 ภาษาอังกฤษ"
+    elif lang.value == "ko":
+        tts_ko_enabled = is_on
+        lang_name = "🇰🇷 ภาษาเกาหลี"
+
+    await save_bot_settings()
+    status_text = "🟢 **เปิด**" if is_on else "🔴 **ปิด**"
+    color = discord.Color.green() if is_on else discord.Color.red()
+    embed = discord.Embed(
+        title="⚙️ ตั้งค่าการแจ้งเตือนด้วยเสียง (TTS)",
+        description=f"{status_text} การแจ้งเตือนเสียง {lang_name} เรียบร้อยแล้ว!\n*(ข้อมูลซิงค์กับ Dashboard และ Firebase)*",
+        color=color
+    )
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่า TTS เสียง (/tts)", f"ภาษา: `{lang.value.upper()}` | สถานะ: `{status.value.upper()}`", color)
+
+
+@bot.tree.command(name="notify", description="เปิดหรือปิดระบบแจ้งเตือนสงคราม Battlefield (BF)")
+@app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
+@app_commands.choices(status=[app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"), app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")])
+@has_allowed_role()
+async def toggle_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    global bf_notify_enabled
+    if status.value == "on":
+        bf_notify_enabled = True
+        msg = "🟢 **เปิด** ระบบแจ้งเตือน Battlefield (BF) เรียบร้อยแล้ว!"
+        color = discord.Color.green()
+    else:
+        bf_notify_enabled = False
+        msg = "🔴 **ปิด** ระบบแจ้งเตือน Battlefield (BF) เรียบร้อยแล้ว!"
+        color = discord.Color.red()
+    await save_bot_settings()
+    embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือน BF", description=msg, color=color)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือน BF (/notify)", f"เปลี่ยนสถานะเป็น: `{status.value.upper()}`", color)
+
+
+@bot.tree.command(name="ppl", description="เปิดหรือปิดระบบแจ้งเตือนเสียงต้อนรับสมาชิกเข้าห้องเสียง (ทั่วไป)")
+@app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
+@app_commands.choices(status=[app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"), app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")])
+@has_allowed_role()
+async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    global ppl_notify_enabled
+    if status.value == "on":
+        ppl_notify_enabled = True
+        msg = "🟢 **เปิด** ระบบแจ้งเตือนต้อนรับสมาชิกเข้าห้องเสียงเรียบร้อยแล้ว!"
+        color = discord.Color.green()
+    else:
+        ppl_notify_enabled = False
+        msg = "🔴 **ปิด** ระบบแจ้งเตือนต้อนรับสมาชิกเข้าห้องเสียงเรียบร้อยแล้ว!"
+        color = discord.Color.red()
+    await save_bot_settings()
+    embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้องเสียง", description=msg, color=color)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)", f"เปลี่ยนสถานะเป็น: `{status.value.upper()}`", color)
+
+
+@bot.tree.command(name="vip", description="[Admin Only] เปิด/ปิดและตั้งค่าระบบทักทายคนพิเศษ")
+@app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) ระบบทักทายคนพิเศษ", user="เลือกสมาชิกคนพิเศษ", message="ข้อความพูดทักทายคนพิเศษ")
+@app_commands.choices(status=[app_commands.Choice(name="เปิดระบบทักทายคนพิเศษ (on)", value="on"), app_commands.Choice(name="ปิดระบบทักทายคนพิเศษ (off)", value="off")])
+@app_commands.checks.has_permissions(administrator=True)
+async def toggle_vip_greet(interaction: discord.Interaction, status: app_commands.Choice[str], user: discord.Member = None, message: str = None):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    global vip_config
+    if status.value == "on":
+        if not user or not message:
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ **ข้อมูลไม่ครบถ้วน!** กรุณาระบุทั้ง **user** และ **message**", ephemeral=True)
+            return
+        vip_config = {"enabled": True, "user_id": user.id, "user_name": user.display_name, "message": message}
+        await save_vip_config()
+        embed = discord.Embed(title="🌟 เปิดใช้งานระบบทักทายคนพิเศษ (VIP)", description=f"🟢 **สถานะ:** เปิดใช้งาน\n👤 **คนพิเศษ:** {user.mention}\n💬 **คำทักทาย:** \"{message}\"", color=discord.Color.gold())
+        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+        await send_audit_log(interaction.guild, interaction.user, "เปิดระบบทักทายคนพิเศษ (/vip)", f"👤 คนพิเศษ: `{user.display_name}`\n💬 ข้อความ: {message}", discord.Color.gold())
+    else:
+        vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
+        await save_vip_config()
+        embed = discord.Embed(title="⚙️ ปิดระบบทักทายคนพิเศษ (VIP)", description="🔴 **สถานะ:** ปิดใช้งานเรียบร้อยแล้ว", color=discord.Color.red())
+        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+        await send_audit_log(interaction.guild, interaction.user, "ปิดระบบทักทายคนพิเศษ (/vip)", "ยกเลิกข้อมูลคนพิเศษเรียบร้อยแล้ว", discord.Color.red())
+
+
+@bot.tree.command(name="set-notification", description="ตั้งค่าห้อง Text Channel สำหรับรับการแจ้งเตือน Boss (บันทึก Channel ID ลงฐานข้อมูล)")
+@app_commands.describe(
+    channel="ห้อง Text Channel ที่ต้องการรับการแจ้งเตือน",
+    action="เพิ่ม/เปิด, ปิด/ลบ หรือแสดงรายการห้องที่ตั้งไว้"
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="เพิ่ม/เปิด", value="add"),
+    app_commands.Choice(name="ปิด/ลบ", value="remove"),
+    app_commands.Choice(name="แสดงรายการ", value="list"),
+    app_commands.Choice(name="ตั้งห้องสรุป Attendance", value="attendance_summary"),
+])
+@has_allowed_role()
+async def set_notification_channel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel = None,
+    action: app_commands.Choice[str] = None,
+):
+    """Persist one or more Discord text-notification targets per guild."""
+    try:
+        await _safe_interaction_ack(interaction, ephemeral=True)
+    except Exception as e:
+        print(f"❌ /set-notification defer failed: {e}")
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            "❌ คำสั่งนี้ใช้ได้เฉพาะใน Server เท่านั้น",
+            ephemeral=True,
+        )
+        return
+
+    action_value = (action.value if action else "add")
+    guild_key = str(guild.id)
+
+    if action_value == "attendance_summary":
+        if not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
+            await guarded_interaction_followup_send(
+                interaction, "interaction-followup",
+                "❌ การตั้งห้องสรุป Attendance อนุญาตเฉพาะ Admin หรือ Server Owner",
+                ephemeral=True,
+            )
+            return
+        if channel is None:
+            await guarded_interaction_followup_send(
+                interaction, "interaction-followup",
+                "❌ กรุณาเลือก Text Channel สำหรับสรุป Attendance",
+                ephemeral=True,
+            )
+            return
+        me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+        if me is not None:
+            perms = channel.permissions_for(me)
+            missing = []
+            if not perms.view_channel: missing.append("View Channel")
+            if not perms.send_messages: missing.append("Send Messages")
+            if not perms.embed_links: missing.append("Embed Links")
+            if missing:
+                await guarded_interaction_followup_send(
+                    interaction, "interaction-followup",
+                    "❌ บอทไม่มีสิทธิ์ในห้องสรุปนี้: " + ", ".join(missing),
+                    ephemeral=True,
+                )
+                return
+        with schedule_lock:
+            previous_cfg = dict(attendance_config.get(guild_key, {}) or {})
+            attendance_config[guild_key] = {
+                "guild_id": guild.id,
+                "summary_channel_id": int(channel.id),
+                "channel_name": channel.name,
+                "updated_by": str(interaction.user.id),
+                "updated_at": datetime.now(TZ_THAI).isoformat(),
+                "autoattendance_enabled": parse_bool(previous_cfg.get("autoattendance_enabled"), False),
+                "autoattendance_updated_by": str(previous_cfg.get("autoattendance_updated_by") or ""),
+                "autoattendance_updated_at": str(previous_cfg.get("autoattendance_updated_at") or ""),
+            }
+        await save_attendance_config()
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            f"📊 ตั้งห้องสรุป Attendance เป็น **#{channel.name}** สำเร็จ",
+            ephemeral=True,
+        )
+        return
+    action_value = (action.value if action else "add")
+    guild_key = str(guild.id)
+    with schedule_lock:
+        current = dict(notification_channels.get(guild_key, {}) or {})
+
+    if action_value == "list":
+        enabled = []
+        for cfg in current.values():
+            if not isinstance(cfg, dict) or not parse_bool(cfg.get("enabled"), True):
+                continue
+            cid = cfg.get("channel_id")
+            if not cid:
+                continue
+            resolved = guild.get_channel(int(cid))
+            label = resolved.mention if resolved else f"`{cid}`"
+            name = resolved.name if isinstance(resolved, discord.TextChannel) else (cfg.get("channel_name") or "unknown")
+            enabled.append(f"• {label} — **#{name}** (`{cid}`)")
+        text = "\n".join(enabled) if enabled else "- ยังไม่มีห้อง Text Channel ที่เปิดใช้งาน"
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            f"📋 **ห้องแจ้งเตือน Boss ที่ตั้งไว้ใน {guild.name}**\n{text}",
+            ephemeral=True,
+        )
+        return
+
+    if channel is None:
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            "❌ กรุณาเลือก Text Channel เช่น `#boss-notify`",
+            ephemeral=True,
+        )
+        return
+
+    me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    if me is not None:
+        perms = channel.permissions_for(me)
+        missing = []
+        if not perms.view_channel:
+            missing.append("View Channel")
+        if not perms.send_messages:
+            missing.append("Send Messages")
+        if not perms.embed_links:
+            missing.append("Embed Links")
+        if missing:
+            await guarded_interaction_followup_send(
+                interaction, "interaction-followup",
+                "❌ บอทไม่มีสิทธิ์ในห้องนี้: " + ", ".join(missing),
+                ephemeral=True,
+            )
+            return
+
+    now_iso = datetime.now(TZ_THAI).isoformat()
+    cid_key = str(channel.id)
+    if action_value == "remove":
+        current.pop(cid_key, None)
+        with schedule_lock:
+            if current:
+                notification_channels[guild_key] = current
+            else:
+                notification_channels.pop(guild_key, None)
+        await save_notification_channels()
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            f"🔕 ปิดห้องแจ้งเตือน **#{channel.name}** (`{channel.id}`) แล้ว",
+            ephemeral=True,
+        )
+        print(f"🔕 /set-notification removed | guild={guild.name} | channel={channel.name} ({channel.id})")
+        return
+
+    current[cid_key] = {
+        "guild_id": guild.id,
+        "channel_id": int(channel.id),
+        "channel_name": channel.name,
+        "enabled": True,
+        "updated_by": str(interaction.user.id),
+        "updated_at": now_iso,
+    }
+    with schedule_lock:
+        notification_channels[guild_key] = current
+    await save_notification_channels()
+
+    configured_count = sum(
+        1 for cfg in current.values()
+        if isinstance(cfg, dict) and parse_bool(cfg.get("enabled"), True)
+    )
+    await guarded_interaction_followup_send(
+        interaction, "interaction-followup",
+        f"🔔 ตั้งห้องแจ้งเตือน **#{channel.name}** (`{channel.id}`) สำเร็จ\n"
+        f"📋 ห้องที่เปิดใช้งานใน Server นี้: **{configured_count} ห้อง**\n"
+        f"✅ Channel ID ถูกบันทึกลง `notification_channels` ใน Firebase แล้ว",
+        ephemeral=True,
+    )
+    print(f"🔔 /set-notification saved | guild={guild.name} | channel={channel.name} ({channel.id}) | total={configured_count}")
+
+
+@bot.tree.command(name="setvoice", description="เพิ่มห้อง Voice สำหรับ Boss TTS (เข้าเฉพาะตอนแจ้งเตือน)")
+@app_commands.describe(channel="ห้อง Voice ที่ต้องการให้บอทใช้ประกาศ (เว้นว่าง = ห้องที่คุณอยู่)")
+@has_allowed_role()
+async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
+    """Add one Voice channel to the guild's persistent /setvoice targets."""
+    try:
+        await _safe_interaction_ack(interaction, ephemeral=True)
+    except Exception as e:
+        print(f"❌ /setvoice defer failed: {e}")
+        return
+
+    try:
+        target = channel
+        if target is None:
+            if not interaction.user.voice or not interaction.user.voice.channel:
+                await guarded_interaction_followup_send(interaction, "interaction-followup", 
+                    "❌ กรุณาเข้าห้อง Voice ก่อน หรือเลือกห้อง Voice ในคำสั่ง /setvoice",
+                    ephemeral=True
+                )
+                return
+            target = interaction.user.voice.channel
+
+        guild_id = interaction.guild.id
+        cfg = voice_config.get(str(guild_id), {})
+        channels = dict(cfg.get("channels") or {}) if isinstance(cfg, dict) else {}
+
+        # Migrate a legacy single-channel record in memory before adding.
+        legacy_id = cfg.get("voice_channel_id") if isinstance(cfg, dict) else None
+        if legacy_id and not channels:
+            try:
+                legacy_id = int(legacy_id)
+                channels[str(legacy_id)] = {
+                    "voice_channel_id": legacy_id,
+                    "guild_id": guild_id,
+                    "channel_name": cfg.get("channel_name", ""),
+                    "enabled": True,
+                    "updated_by": cfg.get("updated_by", ""),
+                    "updated_at": cfg.get("updated_at", "")
+                }
+            except (TypeError, ValueError):
+                pass
+
+        now_iso = datetime.now(TZ_THAI).isoformat()
+        channels[str(target.id)] = {
+            "voice_channel_id": int(target.id),
+            "guild_id": guild_id,
+            "channel_name": target.name,
+            "enabled": True,
+            "updated_by": str(interaction.user.id),
+            "updated_at": now_iso
+        }
+        voice_config[str(guild_id)] = {
+            "guild_id": guild_id,
+            "channels": channels,
+            "enabled": True,
+            "mode": "on-demand",
+            "updated_by": str(interaction.user.id),
+            "updated_at": now_iso
+        }
+
+        await asyncio.wait_for(save_voice_config(), timeout=10)
+
+        # Never keep a persistent Voice connection. Disconnect any stale one.
+        vc = interaction.guild.voice_client
+        if vc:
+            try:
+                if vc.is_playing():
+                    vc.stop()
+                await vc.disconnect(force=True)
+            except Exception as e:
+                print(f"⚠️ /setvoice could not clear old Voice connection: {e}")
+
+        configured_names = []
+        for c in get_configured_voice_channels(interaction.guild):
+            configured_names.append(f"• **{c.name}** (`{c.id}`)")
+        targets_text = "\n".join(configured_names) if configured_names else "-"
+
+        await guarded_interaction_followup_send(interaction, "interaction-followup", 
+            f"🔊 เพิ่มห้อง Voice **{target.name}** สำเร็จ\n"
+            f"\n📋 ห้องที่ตั้ง /setvoice ไว้ทั้งหมด ({len(configured_names)} ห้อง):\n{targets_text}\n"
+            f"\n🟢 โหมด: **ON-DEMAND** — บอทจะเข้าเฉพาะห้องที่มีสมาชิกอยู่ตอนแจ้งเตือน แล้วออกหลังพูดจบ",
+            ephemeral=True
+        )
+        print(f"🔊 /setvoice saved ON-DEMAND: {interaction.guild.name} -> {target.name} ({target.id}) | total={len(configured_names)}")
+    except Exception as e:
+        print(f"❌ /setvoice error: {e}")
+        traceback.print_exc()
+        try:
+            await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ ตั้งค่าห้อง Voice ไม่สำเร็จ: `{e}`", ephemeral=True)
+        except Exception:
+            pass
+
+
+@bot.tree.command(name="inotiawar", description="เปิดหรือปิดการแจ้งเตือน Inotia War ทุกวันอาทิตย์")
+@app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน Inotia War")
+@app_commands.choices(status=[
+    app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
+    app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off"),
+])
+@has_allowed_role()
+async def inotiawar_command(interaction: discord.Interaction, status: app_commands.Choice[str]):
+    # Toggle weekly Sunday Inotia War voice announcements for this guild.
+    global inotiawar_config
+    try:
+        await _safe_interaction_ack(interaction, ephemeral=True)
+    except Exception as exc:
+        print(f"❌ /inotiawar defer failed: {exc}", flush=True)
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            "❌ คำสั่งนี้ใช้ได้เฉพาะภายใน Server", ephemeral=True
+        )
+        return
+
+    enabled = status.value == "on"
+    now_iso = datetime.now(TZ_THAI).isoformat()
+    with schedule_lock:
+        inotiawar_config[str(guild.id)] = {
+            "guild_id": guild.id,
+            "enabled": enabled,
+            "updated_by": str(interaction.user.id),
+            "updated_at": now_iso,
+        }
+    await save_inotiawar_config()
+
+    state_text = "🟢 **เปิด**" if enabled else "🔴 **ปิด**"
+    await guarded_interaction_followup_send(
+        interaction, "interaction-followup",
+        f"{state_text} ระบบแจ้งเตือน **Inotia War** ทุกวันอาทิตย์เรียบร้อยแล้ว\n"
+        f"🕐 เวลา: **10:50, 11:00, 11:02, 11:05, 11:08, 11:10, 11:15 น. (เวลาไทย)**\n"
+        f"🔊 ใช้เฉพาะห้อง Voice ที่ตั้งด้วย `/setvoice` และต้องมีสมาชิกอยู่ในห้อง\n"
+        f"🌐 ภาษาเสียง: ใช้การตั้งค่า TTS เดิม (TH / EN / KO)",
+        ephemeral=True,
+    )
+    print(
+        f"⚙️ /inotiawar {'enabled' if enabled else 'disabled'} | "
+        f"guild={guild.name} | by={interaction.user.id}",
+        flush=True,
+    )
+
+
+@bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
+async def join_voice(interaction: discord.Interaction):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ คุณต้องเชื่อมต่ออยู่ในห้องเสียงก่อนใช้คำสั่งนี้!", ephemeral=True)
+        return
+    voice_channel = interaction.user.voice.channel
+    guild = interaction.guild
+    if guild.voice_client is not None: await guild.voice_client.move_to(voice_channel)
+    else: await voice_channel.connect()
+    embed = discord.Embed(title="🔊 เชื่อมต่อห้องเสียงสำเร็จ", description=f"บอทเข้าสู่ห้องเสียง **{voice_channel.name}** เรียบร้อยแล้ว!", color=discord.Color.green())
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+
+
+@bot.tree.command(name="leave", description="สั่งให้บอทออกจากห้องเสียง")
+async def leave_voice(interaction: discord.Interaction):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    guild = interaction.guild
+    if guild.voice_client:
+        await guild.voice_client.disconnect()
+    if str(guild.id) in voice_config:
+        voice_config[str(guild.id)]["enabled"] = False
+        await save_voice_config()
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "👋 ออกจากห้องเสียงแล้ว และปิดการเชื่อมต่อถาวรของ /setvoice ชั่วคราวแล้วครับ")
+    else:
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ บอทไม่ได้อยู่ในห้องเสียงใดๆ ในขณะนี้", ephemeral=True)
+
+
+@bot.tree.command(name="disconnect", description="ตัดการเชื่อมต่อเสียงและหยุดการเล่นเสียงของบอททันที")
+async def disconnect_voice(interaction: discord.Interaction):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    try:
+        vc = interaction.guild.voice_client
+        if vc and vc.is_connected():
+            if vc.is_playing(): vc.stop()
+            await vc.disconnect()
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "⏹️ บอทหยุดการทำงานและออกจากห้องเสียงเรียบร้อยแล้ว!")
+        else:
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ บอทไม่ได้อยู่ในห้องเสียงครับ", ephemeral=True)
+    except Exception as e:
+        await guarded_interaction_followup_send(interaction, "interaction-followup", f"⚠️ เกิดข้อผิดพลาด: `{e}`")
+
+
+@tasks.loop(seconds=0.2)
+async def check_bf_notifications():
+    """Trigger BF warning at the exact 3-minute-before boundary.
+
+    Example: BF starts at 14:00 -> warning target is exactly 13:57:00.
+    Voice/TTS remains on-demand and only speaks in occupied configured /setvoice rooms.
+    Text remains behind the central guarded time-critical Discord REST lane.
+    """
+    global last_bf_notified_hour, last_bf_text_notified_hour, last_bf_voice_success_hour
+    global bf_notify_enabled, bf_voice_diag_last_ts
+    if not bf_notify_enabled:
+        return
+
+    try:
+        now = datetime.now(TZ_THAI)
+        candidate = now.replace(minute=0, second=0, microsecond=0)
+        while candidate.hour % 2 != 0:
+            candidate += timedelta(hours=1)
+        if candidate <= now:
+            candidate += timedelta(hours=2)
+
+        warning_time = candidate - timedelta(seconds=BF_WARNING_LEAD_SECONDS)
+        seconds_until_warning = (warning_time - now).total_seconds()
+        trigger_key = candidate.strftime('%Y-%m-%d-%H')
+        next_bf_time = candidate.strftime('%H:%M')
+        now_mono = time.monotonic()
+
+        # Pre-generate only while a configured /setvoice room currently has a human.
+        # This removes Edge-TTS generation from the exact :57 trigger without joining Voice early.
+        if 0 < seconds_until_warning <= BF_TTS_PREWARM_LEAD_SECONDS:
+            for guild in list(bot.guilds):
+                try:
+                    configured = get_configured_voice_channels(guild)
+                    occupied = [ch for ch in configured if any(not m.bot for m in ch.members)]
+                except Exception:
+                    occupied = []
+                if not occupied:
+                    continue
+                cache_key = (trigger_key, int(guild.id))
+                task = bf_tts_prewarm_tasks.get(cache_key)
+                if task is None or task.done():
+                    print(
+                        f"🔥 BF TTS PREWARM | guild={guild.name} | next={next_bf_time} | "
+                        f"warning_in={seconds_until_warning:.2f}s | rooms={len(occupied)}",
+                        flush=True,
+                    )
+                    task = asyncio.create_task(
+                        _prepare_bf_tts_cache(guild, trigger_key),
+                        name=f"bf-tts-prewarm-{guild.id}-{trigger_key}",
+                    )
+                    bf_tts_prewarm_tasks[cache_key] = task
+            return
+
+        diag_key = f"boundary:{trigger_key}"
+        if abs(seconds_until_warning) <= 1.0 and now_mono - bf_voice_diag_last_ts.get(diag_key, 0.0) >= 1.0:
+            bf_voice_diag_last_ts[diag_key] = now_mono
+            print(
+                f"⏰ BF EXACT WARNING WINDOW | now={now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} | "
+                f"warning_target={warning_time.isoformat()} | seconds_until_warning={seconds_until_warning:.3f} | "
+                f"bf_start={candidate.isoformat()}",
+                flush=True,
+            )
+
+        # Trigger only at the boundary (with a small late grace). Do not announce stale BF
+        # warnings at :58/:59 and do not start a late Voice retry when somebody enters later.
+        if not (-BF_WARNING_LATE_GRACE_SECONDS <= seconds_until_warning <= 0.35):
+            return
+
+        for guild in list(bot.guilds):
+            try:
+                configured = get_configured_voice_channels(guild)
+                occupied = [ch for ch in configured if any(not m.bot for m in ch.members)]
+            except Exception:
+                configured, occupied = [], []
+            undelivered = [
+                ch for ch in occupied
+                if _bf_voice_room_key(trigger_key, guild.id, ch.id) not in bf_voice_room_completed
+            ]
+
+            voice_task_key = ("bf", trigger_key, int(guild.id))
+            if undelivered and voice_task_key not in _boss_voice_stage_inflight:
+                _boss_voice_stage_inflight.add(voice_task_key)
+                print(
+                    f"📢 Schedule BF VOICE task | guild={guild.name} | next={next_bf_time} | "
+                    f"occupied={len(undelivered)} | seconds_until_warning={seconds_until_warning:.3f}",
+                    flush=True,
+                )
+                asyncio.create_task(
+                    _run_bf_voice_for_guild(guild, trigger_key, seconds_until_warning),
+                    name=f"bf-voice-{guild.id}-{trigger_key}",
+                )
+            else:
+                wait_key = f"bf-boundary:{trigger_key}:{guild.id}"
+                if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
+                    bf_voice_diag_last_ts[wait_key] = now_mono
+                    print(
+                        f"⏭️ BF VOICE SKIP | guild={guild.name} | no occupied /setvoice rooms at warning boundary | "
+                        "no late voice retry",
+                        flush=True,
+                    )
+
+            # Text is built from the already loaded language switches. No Firebase read is
+            # inserted into the exact-boundary path, so the notification can enter the guarded
+            # time-critical REST lane immediately.
+            if last_bf_text_notified_hour == trigger_key:
+                continue
+            retry_at = bf_text_retry_after_ts.get(trigger_key, 0.0)
+            if time.monotonic() < retry_at:
+                continue
+
+            mentions = []
+            for role_id in BF_ROLE_IDS:
+                role = guild.get_role(role_id)
+                if role:
+                    mentions.append(role.mention)
+            mention_target = " ".join(mentions) if mentions else ""
+            text_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+            if not text_channel:
+                text_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+            if not text_channel:
+                bf_text_retry_after_ts[trigger_key] = time.monotonic() + 5.0
+                continue
+
+            enabled = get_enabled_discord_notification_languages() or ["th"]
+            primary = enabled[0]
+            title_map = {
+                "th":"⚔️ แจ้งเตือนสงคราม Battlefield (BF)!",
+                "en":"⚔️ Battlefield (BF) Alert!",
+                "ko":"⚔️ Battlefield (BF) 알림!",
+            }
+            body_map = {
+                "th": f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
+                "en": f"Battlefield **BF** will start in **3 minutes** (at **{next_bf_time}**)!\nPlease get ready.",
+                "ko": f"Battlefield **BF**가 **3분 후** 시작됩니다 (시간 **{next_bf_time}**)!\n준비해 주세요.",
+            }
+            embed = discord.Embed(title=title_map[primary], color=discord.Color.red())
+            for lang in enabled:
+                embed.add_field(
+                    name={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang],
+                    value=body_map[lang],
+                    inline=False,
+                )
+
+            bf_text_retry_after_ts[trigger_key] = time.monotonic() + 5.0
+            try:
+                send_result = await guarded_channel_send(
+                    text_channel,
+                    context=f"bf:{guild.name}",
+                    content=mention_target or None,
+                    embed=embed,
+                    background=True,
+                )
+                if send_result is not None:
+                    last_bf_text_notified_hour = trigger_key
+                    bf_text_retry_after_ts.pop(trigger_key, None)
+                    print(
+                        f"✅ BF text notification sent | guild={guild.name} | "
+                        f"warning_target={warning_time.strftime('%H:%M:%S')} | "
+                        f"trigger_lag={max(0.0, -seconds_until_warning):.3f}s",
+                        flush=True,
+                    )
+                else:
+                    print(f"⏭️ BF text skipped/held by Discord REST Guard | guild={guild.name}", flush=True)
+            except discord.HTTPException as exc:
+                if getattr(exc, "status", None) == 429:
+                    wait_for = await _get_retry_after_seconds(exc, default=30.0)
+                    bf_text_retry_after_ts[trigger_key] = float("inf")
+                    print(
+                        f"⚠️ BF text rate-limited | guild={guild.name} | "
+                        f"automatic retry disabled for trigger | discord_retry_after={wait_for:.1f}s",
+                        flush=True,
+                    )
+                else:
+                    bf_text_retry_after_ts[trigger_key] = time.monotonic() + 30.0
+                    print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {guild.name}: {exc}", flush=True)
+            except Exception as exc:
+                bf_text_retry_after_ts[trigger_key] = time.monotonic() + 30.0
+                print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {guild.name}: {exc}", flush=True)
+
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}", flush=True)
+        traceback.print_exc()
+
+
+async def _prepare_bf_tts_cache(guild: discord.Guild, trigger_key: str):
+    """Pre-generate BF TTS before :57 without entering Voice or sending Discord HTTP."""
+    cache_key = (str(trigger_key), int(guild.id))
+    old = bf_tts_prewarm_cache.pop(cache_key, None)
+    if old:
+        for _, filename in old:
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+            except Exception:
+                pass
+    try:
+        files = await _tts_generate_files(
+            "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ",
+            "Battlefield will start in 3 minutes.",
+            "배틀필드가 3분 후에 시작됩니다.",
+            guild.id,
+        )
+        if files:
+            bf_tts_prewarm_cache[cache_key] = files
+            print(
+                f"✅ BF TTS PREWARM READY | guild={guild.name} | trigger={trigger_key} | files={len(files)}",
+                flush=True,
+            )
+        else:
+            print(f"⚠️ BF TTS PREWARM EMPTY | guild={guild.name} | trigger={trigger_key}", flush=True)
+    except Exception as exc:
+        print(f"⚠️ BF TTS PREWARM failed safely | guild={guild.name} | trigger={trigger_key} | {exc!r}", flush=True)
+
+
+def _take_bf_tts_cache(trigger_key: str, guild_id: int):
+    return bf_tts_prewarm_cache.pop((str(trigger_key), int(guild_id)), None)
+
+
+async def _cleanup_bf_tts_task_refs():
+    for key, task in list(bf_tts_prewarm_tasks.items()):
+        if task.done():
+            bf_tts_prewarm_tasks.pop(key, None)
+
+
+async def _run_bf_voice_for_guild(guild: discord.Guild, trigger_key: str, seconds_until_warning: float):
+    """Run BF Voice once at the exact warning boundary, using prewarmed TTS when available."""
+    voice_started_at = time.monotonic()
+    prepared_files = None
+    try:
+        configured = get_configured_voice_channels(guild)
+        occupied = [ch for ch in configured if any(not m.bot for m in ch.members)]
+        undelivered = [
+            ch for ch in occupied
+            if _bf_voice_room_key(trigger_key, guild.id, ch.id) not in bf_voice_room_completed
+        ]
+        if not undelivered:
+            print(
+                f"⏭️ BF VOICE SKIP NOW EMPTY | guild={guild.name} | trigger={trigger_key} | "
+                "no occupied room at warning boundary",
+                flush=True,
+            )
+            return
+
+        prepared_files = _take_bf_tts_cache(trigger_key, guild.id)
+        prepared_files_all = list(prepared_files or [])
+        if prepared_files_all:
+            # Do not perform a Firebase round-trip at the exact :57 boundary. The prewarm
+            # step already captured the live TTS switches shortly beforehand; using that
+            # prepared set keeps the warning timing deterministic.
+            enabled = {"th": tts_th_enabled, "en": tts_en_enabled, "ko": tts_ko_enabled}
+            prepared_files = [(lang, filename) for lang, filename in prepared_files_all if enabled.get(lang, False)]
+            print(
+                f"⚡ BF TTS PREWARM USE | guild={guild.name} | trigger={trigger_key} | "
+                f"files={len(prepared_files)} | warning_lag={max(0.0, -seconds_until_warning):.3f}s",
+                flush=True,
+            )
+
+        spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
+        spoken_text_en = "Battlefield will start in 3 minutes."
+        spoken_text_ko = "배틀필드가 3분 후에 시작됩니다."
+        results = []
+        for room in undelivered:
+            try:
+                current_humans = len([m for m in room.members if not m.bot])
+                print(
+                    f"📢 BF VOICE START | guild={guild.name} | channel={room.name} | "
+                    f"humans={current_humans} | boundary_lag={max(0.0, -seconds_until_warning):.3f}s | "
+                    f"trigger_to_start={time.monotonic() - voice_started_at:.2f}s",
+                    flush=True,
+                )
+                if not any(not m.bot for m in room.members):
+                    print(f"⏭️ BF VOICE SKIP NOW EMPTY | guild={guild.name} | channel={room.name}", flush=True)
+                    results.append(False)
+                    continue
+                try:
+                    ok = await asyncio.wait_for(
+                        speak_in_guild(
+                            guild,
+                            text_th=spoken_text_th,
+                            text_en=spoken_text_en,
+                            text_ko=spoken_text_ko,
+                            target_channel=room,
+                            prepared_files=prepared_files,
+                        ),
+                        timeout=120,
+                    )
+                except Exception as exc:
+                    ok = False
+                    print(f"❌ BF VOICE ERROR | guild={guild.name}/{room.name} | {exc!r}", flush=True)
+                results.append(bool(ok))
+                if ok:
+                    _mark_bf_voice_room_completed(_bf_voice_room_key(trigger_key, guild.id, room.id))
+                print(f"📣 BF VOICE RESULT | guild={guild.name} | channel={room.name} | success={ok}", flush=True)
+            except Exception as exc:
+                results.append(False)
+                print(f"❌ BF VOICE ERROR | guild={guild.name}/{room.name} | {exc}", flush=True)
+
+        current_occupied_rooms = [ch for ch in configured if any(not m.bot for m in ch.members)]
+        current_delivered = sum(
+            1 for room in current_occupied_rooms
+            if _bf_voice_room_key(trigger_key, guild.id, room.id) in bf_voice_room_completed
+        )
+        if current_occupied_rooms and current_delivered == len(current_occupied_rooms):
+            global last_bf_voice_success_hour, last_bf_notified_hour
+            last_bf_voice_success_hour = trigger_key
+            last_bf_notified_hour = trigger_key
+        print(
+            f"✅ BF VOICE COMPLETE | guild={guild.name} | success={sum(1 for x in results if x)}/{len(results)} | "
+            f"delivered={current_delivered}/{len(current_occupied_rooms)} | "
+            f"boundary_lag={max(0.0, -seconds_until_warning):.3f}s | "
+            f"trigger_to_complete={time.monotonic() - voice_started_at:.2f}s",
+            flush=True,
+        )
+    finally:
+        for _, filename in list(locals().get("prepared_files_all", []) or []):
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+            except Exception:
+                pass
+        _boss_voice_stage_inflight.discard(("bf", trigger_key, int(guild.id)))
+        await _cleanup_bf_tts_task_refs()
+
+
+@tasks.loop(seconds=1)
+async def check_library_boss_notifications():
+    global last_lib_notified_key, lib_notify_enabled
+    if not lib_notify_enabled: return
+
+    try:
+        now = datetime.now(TZ_THAI)
+        if (now.hour == 8 and now.minute == 50) or (now.hour == 20 and now.minute == 50):
+            current_key = f"{now.strftime('%Y-%m-%d')}_{now.hour}:{now.minute}"
+            if last_lib_notified_key != current_key:
+                last_lib_notified_key = current_key
+                time_str = "08:50 น." if now.hour == 8 else "20:50 น."
+
+                for guild in bot.guilds:
+                    mentions = []
+                    for role_id in BF_ROLE_IDS:
+                        role = guild.get_role(role_id)
+                        if role: mentions.append(role.mention)
+                    mention_target = " ".join(mentions) if mentions else ""
+
+                    channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+                    if not channel:
+                        channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+
+                    # V167: schedule Voice immediately at the timing boundary. Do not let
+                    # Discord text REST or Firebase language refresh delay the Voice announcement.
+                    asyncio.create_task(
+                        speak_in_guild(guild, text_th="Library Boss ถึงเวลาเตรียมตัวแล้วค่ะ",
+                                       text_en="It's time to prepare for Library Boss.",
+                                       text_ko="도서관 보스 준비 시간입니다.")
+                    )
+
+                    if channel:
+                        await refresh_discord_notification_languages()
+                        enabled=get_enabled_discord_notification_languages() or ["th"]
+                        primary=enabled[0]
+                        title_map={"th":"⚔️ แจ้งเตือน Library Boss!","en":"⚔️ Library Boss Alert!","ko":"⚔️ Library Boss 알림!"}
+                        body_map={"th":f"บอส **Library Boss** ถึงเวลาเตรียมตัวแล้ว! (เวลา **{time_str}**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!","en":f"**Library Boss** is ready! (Time **{time_str}**)!\nPlease get ready.","ko":f"**Library Boss** 등장 시간입니다! (시간 **{time_str}**)!\n준비해 주세요."}
+                        embed=discord.Embed(title=title_map[primary],color=discord.Color.purple())
+                        for lang in enabled: embed.add_field(name={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang],value=body_map[lang],inline=False)
+                        try:
+                            send_content = mention_target if mention_target.strip() else None
+                            await guarded_channel_send(
+                                channel,
+                                context="library-boss",
+                                content=send_content,
+                                embed=embed,
+                                background=True,
+                            )
+                        except Exception as e: print(f"❌ ส่งข้อความเตือน Library Boss ไม่สำเร็จ: {e}")
+
+
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_library_boss_notifications': {e}")
+
+
+def get_enabled_discord_notification_languages():
+    """Return enabled Discord text-notification languages in TH/EN/KO order."""
+    langs = []
+    if discord_notify_th_enabled:
+        langs.append("th")
+    if discord_notify_en_enabled:
+        langs.append("en")
+    if discord_notify_ko_enabled:
+        langs.append("ko")
+    return langs
+
+
+def build_boss_discord_notification(boss_name: str, stage: str, spawn_time: datetime, notice_minutes: int):
+    """Build one Discord embed containing only the enabled TH/EN/KO text."""
+    enabled = get_enabled_discord_notification_languages()
+    time_str = spawn_time.strftime('%H:%M:%S')
+    title_by_lang = {
+        "th": f"⚠️ {boss_name} ใกล้เกิด!" if stage == "advance" else f"⚔️ {boss_name} เกิดแล้ว!",
+        "en": f"⚠️ {boss_name} Spawning Soon!" if stage == "advance" else f"⚔️ {boss_name} Spawned!",
+        "ko": f"⚠️ {boss_name} 젠 임박!" if stage == "advance" else f"⚔️ {boss_name} 젠 완료!",
+    }
+    body_by_lang = {
+        "th": (f"บอส **{boss_name}** จะเกิดในอีก **{notice_minutes} นาที**!\nเวลาเกิด: **{time_str} น.**" if stage == "advance" else f"บอส **{boss_name}** เกิดแล้วในขณะนี้!\nเวลาเกิด: **{time_str} น.**"),
+        "en": (f"Boss **{boss_name}** will spawn in **{notice_minutes} minutes**.\nSpawn time: **{time_str}**" if stage == "advance" else f"Boss **{boss_name}** has spawned!\nSpawn time: **{time_str}**"),
+        "ko": (f"보스 **{boss_name}**가 **{notice_minutes}분 후에** 나타납니다.\n생성 시간: **{time_str}**" if stage == "advance" else f"보스 **{boss_name}**가 지금 나타났습니다!\n생성 시간: **{time_str}**"),
+    }
+    if not enabled:
+        return discord.Embed(
+            title=f"⚔️ Boss Timer • {boss_name}",
+            description=f"{time_str} • {('ADVANCE' if stage == 'advance' else 'SPAWN')}",
+            color=discord.Color.gold() if stage == "advance" else discord.Color.green(),
+        )
+    primary_lang = enabled[0]
+    embed = discord.Embed(title=title_by_lang[primary_lang], color=discord.Color.gold() if stage == "advance" else discord.Color.green())
+    labels = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}
+    for lang in enabled:
+        embed.add_field(name=labels[lang], value=body_by_lang[lang], inline=False)
+    return embed
+
+
+def get_notification_mentions(guild: discord.Guild) -> str:
+    if not guild:
+        return ""
+    roles = []
+    seen = set()
+    for role_id in TARGET_ROLE_IDS:
+        try:
+            role = guild.get_role(int(role_id))
+        except (TypeError, ValueError):
+            role = None
+        if role and role.id not in seen:
+            roles.append(role)
+            seen.add(role.id)
+    for role_name in TARGET_ROLE_NAMES:
+        role = discord.utils.find(lambda r: r.name.casefold() == role_name.casefold(), guild.roles)
+        if role and role.id not in seen:
+            roles.append(role)
+            seen.add(role.id)
+    return " ".join(role.mention for role in roles)
+
+
+def build_weekly_event_discord_notification(event_name: str, event_time: datetime, texts: dict):
+    """Build a public Discord embed using the same TH/EN/KO switches as Boss alerts."""
+    enabled = get_enabled_discord_notification_languages()
+    event_key = str(event_name or "Weekly Guild Event").strip()
+    time_str = event_time.strftime("%H:%M:%S")
+    title_maps = {
+        "inotia": {"th": "⚔️ Inotia War แจ้งเตือน!", "en": "⚔️ Inotia War Alert!", "ko": "⚔️ Inotia War 알림!"},
+        "guild": {"th": "🛡️ Guild Siege แจ้งเตือน!", "en": "🛡️ Guild Siege Alert!", "ko": "🛡️ Guild Siege 알림!"},
+    }
+    kind = "guild" if "guild siege" in event_key.casefold() else "inotia"
+    title_by_lang = title_maps[kind]
+    labels = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}
+    if not enabled:
+        return discord.Embed(
+            title=f"📅 {event_key}",
+            description=f"🕐 {time_str} (Thailand)",
+            color=discord.Color.orange() if kind == "guild" else discord.Color.purple(),
+            timestamp=event_time,
+        )
+    primary = enabled[0]
+    embed = discord.Embed(
+        title=title_by_lang[primary],
+        description=f"🕐 {time_str} (Thailand)",
+        color=discord.Color.orange() if kind == "guild" else discord.Color.purple(),
+        timestamp=event_time,
+    )
+    for lang in enabled:
+        message = str((texts or {}).get(lang) or "").strip()
+        if not message:
+            continue
+        embed.add_field(name=labels[lang], value=message, inline=False)
+    return embed
+
+
+def _weekly_notification_channels_for_guild(guild: discord.Guild):
+    """Resolve only already-cached text channels, mirroring Boss fallback behavior without probing."""
+    if not guild:
+        return []
+    channels = []
+    seen = set()
+    try:
+        configured_ids = _notification_channel_ids_from_memory()
+    except Exception:
+        configured_ids = []
+    for raw_id in configured_ids:
+        try:
+            channel_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if channel_id in seen:
+            continue
+        channel = guild.get_channel(channel_id)
+        if isinstance(channel, discord.TextChannel):
+            channels.append(channel)
+            seen.add(channel.id)
+    if channels:
+        return channels
+    channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+    if not channel:
+        channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+    if isinstance(channel, discord.TextChannel):
+        channels.append(channel)
+    return channels
+
+
+def _queue_weekly_event_public_notifications(guild: discord.Guild, event_key: str, event_name: str, event_time: datetime, texts: dict) -> int:
+    channels = _weekly_notification_channels_for_guild(guild)
+    if not channels:
+        print(
+            f"⏭️ Weekly Discord text notification skipped: no cached text channel | "
+            f"guild={guild.name} | event={event_name} | key={event_key}",
+            flush=True,
+        )
+        return 0
+    try:
+        content = get_notification_mentions(guild) or None
+    except Exception:
+        content = None
+    embed = build_weekly_event_discord_notification(event_name, event_time, texts)
+    queued = 0
+    with pending_weekly_event_rest_lock:
+        for channel in channels:
+            key = (str(event_key), int(channel.id))
+            if key in pending_weekly_event_rest_keys:
+                continue
+            if len(pending_weekly_event_rest_notifications) >= PENDING_WEEKLY_EVENT_REST_MAX:
+                print(
+                    f"⚠️ Weekly Discord text queue full; drop newest | guild={guild.name} | event={event_name}",
+                    flush=True,
+                )
+                break
+            pending_weekly_event_rest_keys.add(key)
+            pending_weekly_event_rest_notifications.append({
+                "key": key,
+                "guild_id": int(guild.id),
+                "channel_id": int(channel.id),
+                "event_key": str(event_key),
+                "event_name": str(event_name),
+                "event_time": event_time.isoformat(),
+                "content": content,
+                "embed": embed,
+                "queued_at": time.time(),
+            })
+            queued += 1
+    if queued:
+        print(
+            f"📨 Weekly Discord text notification queued | guild={guild.name} | event={event_name} | "
+            f"queued={queued} | role_mentions={str(content or '').count('<@&')}",
+            flush=True,
+        )
+    return queued
+
+
+async def flush_pending_weekly_event_rest_notifications_once():
+    if _discord_rest_rate_limit_remaining() > 0 or not _autoattendance_background_rest_ready_now():
+        return
+    with pending_weekly_event_rest_lock:
+        if not pending_weekly_event_rest_notifications:
+            return
+        item = pending_weekly_event_rest_notifications[0]
+    event_time = parse_to_thai_datetime(item.get("event_time")) or datetime.now(TZ_THAI)
+    if (datetime.now(TZ_THAI) - event_time).total_seconds() > 120.0:
+        with pending_weekly_event_rest_lock:
+            if pending_weekly_event_rest_notifications and pending_weekly_event_rest_notifications[0] is item:
+                pending_weekly_event_rest_notifications.popleft()
+            pending_weekly_event_rest_keys.discard(item.get("key"))
+        print(
+            f"⏭️ Weekly Discord text notification dropped as stale | event={item.get('event_name')} | key={item.get('event_key')}",
+            flush=True,
+        )
+        return
+    channel = bot.get_channel(int(item.get("channel_id") or 0))
+    if channel is None:
+        with pending_weekly_event_rest_lock:
+            if pending_weekly_event_rest_notifications and pending_weekly_event_rest_notifications[0] is item:
+                pending_weekly_event_rest_notifications.popleft()
+            pending_weekly_event_rest_keys.discard(item.get("key"))
+        return
+    try:
+        result = await guarded_channel_send(
+            channel,
+            context=f"weekly-event:{item.get('event_name')}:{item.get('event_key')}",
+            content=item.get("content"),
+            embed=item.get("embed"),
+            background=True,
+        )
+    except discord.HTTPException as exc:
+        print(
+            f"⏸️ Weekly Discord text notification held | event={item.get('event_name')} | "
+            f"status={getattr(exc, 'status', None)} | error={exc!r}",
+            flush=True,
+        )
+        return
+    except Exception as exc:
+        print(f"⚠️ Weekly Discord text notification failed safely | {exc!r}", flush=True)
+        return
+    if result is None:
+        return
+    with pending_weekly_event_rest_lock:
+        if pending_weekly_event_rest_notifications and pending_weekly_event_rest_notifications[0] is item:
+            pending_weekly_event_rest_notifications.popleft()
+        pending_weekly_event_rest_keys.discard(item.get("key"))
+    print(
+        f"✅ Weekly Discord text notification sent | event={item.get('event_name')} | "
+        f"channel_id={item.get('channel_id')} | role_mentions={str(item.get('content') or '').count('<@&')}",
+        flush=True,
+    )
+
+
+def _build_weekly_event_user_dm_embed(event_name: str, event_time: datetime, language: str, texts: dict):
+    language = _normalize_discord_user_language(language)
+    kind = "Guild Siege" if "guild siege" in str(event_name).casefold() else "Inotia War"
+    titles = {
+        "th": f"🔔 {kind} แจ้งเตือน",
+        "en": f"🔔 {kind} Alert",
+        "ko": f"🔔 {kind} 알림",
+    }
+    text = str((texts or {}).get(language) or "").strip()
+    return discord.Embed(
+        title=titles[language],
+        description=text,
+        color=discord.Color.orange() if kind == "Guild Siege" else discord.Color.purple(),
+        timestamp=event_time,
+    )
+
+
+def _weekly_event_dm_is_stale(event_time: datetime) -> bool:
+    try:
+        elapsed = (datetime.now(TZ_THAI) - event_time).total_seconds()
+    except Exception:
+        return True
+    return elapsed > 120.0
+
+
+async def queue_discord_user_weekly_event_notifications(
+    guild: discord.Guild,
+    event_key: str,
+    event_name: str,
+    event_time: datetime,
+    texts: dict,
+):
+    """Queue opt-in DMs using the exact same dashboard user preferences as Boss DMs."""
+    if not guild or _discord_user_dm_recovery_quiet_remaining() > 0:
+        return
+    if _weekly_event_dm_is_stale(event_time):
+        print(f"⏭️ Weekly per-user Discord DM skipped as stale | event={event_name} | key={event_key}", flush=True)
+        return
+    stale_due_block, remaining = _discord_user_dm_block_state("spawn", event_time)
+    if stale_due_block:
+        print(
+            f"⏭️ Weekly per-user Discord DM skipped during active REST restriction | event={event_name} | "
+            f"remaining={remaining:.1f}s | key={event_key}",
+            flush=True,
+        )
+        return
+    preferences = await _load_discord_user_dm_preferences()
+    queued = 0
+    for pref in preferences:
+        user_id = pref["discord_user_id"]
+        key = (str(event_key), str(user_id))
+        with pending_weekly_event_dm_lock:
+            if key in pending_weekly_event_dm_keys:
+                continue
+            if len(pending_weekly_event_dm_notifications) >= PENDING_WEEKLY_EVENT_DM_MAX:
+                print(f"⚠️ Weekly per-user DM queue full; drop newest | event={event_name}", flush=True)
+                break
+            pending_weekly_event_dm_keys.add(key)
+            pending_weekly_event_dm_notifications.append({
+                "key": key,
+                "event_key": str(event_key),
+                "event_name": str(event_name),
+                "event_time": event_time.isoformat(),
+                "discord_user_id": user_id,
+                "language": pref["language"],
+                "texts": dict(texts or {}),
+                "attempts": 0,
+            })
+            queued += 1
+    if queued:
+        print(
+            f"📨 Weekly per-user Discord DM queued | event={event_name} | queued={queued} | key={event_key}",
+            flush=True,
+        )
+
+
+async def flush_pending_weekly_event_dms_once():
+    if _has_higher_priority_background_rest_work():
+        return
+    if _discord_user_dm_recovery_quiet_remaining() > 0 or _discord_rest_rate_limit_remaining() > 0:
+        return
+    with pending_weekly_event_dm_lock:
+        if not pending_weekly_event_dm_notifications:
+            return
+        item = pending_weekly_event_dm_notifications[0]
+    event_time = parse_to_thai_datetime(item.get("event_time")) or datetime.now(TZ_THAI)
+    if _weekly_event_dm_is_stale(event_time):
+        with pending_weekly_event_dm_lock:
+            if pending_weekly_event_dm_notifications and pending_weekly_event_dm_notifications[0] is item:
+                pending_weekly_event_dm_notifications.popleft()
+            pending_weekly_event_dm_keys.discard(item.get("key"))
+        print(
+            f"⏭️ Weekly per-user Discord DM dropped as stale | event={item.get('event_name')} | "
+            f"user={item.get('discord_user_id')}",
+            flush=True,
+        )
+        return
+
+    user = _resolve_cached_discord_user(item.get("discord_user_id"))
+    try:
+        context = f"weekly-event-dm:{item.get('event_name')}:{item.get('event_key')}:{item.get('discord_user_id')}"
+        if user is None:
+            user = await guarded_discord_call(
+                lambda: bot.fetch_user(int(item.get("discord_user_id"))),
+                context=f"{context}:fetch-user",
+                background=True,
+            )
+            if user is None:
+                return
+        embed = _build_weekly_event_user_dm_embed(
+            item.get("event_name", "Weekly Guild Event"),
+            event_time,
+            item.get("language", "th"),
+            item.get("texts", {}),
+        )
+        result = await guarded_discord_call(
+            lambda: user.send(embed=embed),
+            context=context,
+            background=True,
+        )
+        if result is None:
+            return
+        with pending_weekly_event_dm_lock:
+            if pending_weekly_event_dm_notifications and pending_weekly_event_dm_notifications[0] is item:
+                pending_weekly_event_dm_notifications.popleft()
+            pending_weekly_event_dm_keys.discard(item.get("key"))
+        print(
+            f"✅ Weekly per-user Discord DM sent | event={item.get('event_name')} | "
+            f"user={item.get('discord_user_id')} | language={item.get('language')}",
+            flush=True,
+        )
+        await asyncio.sleep(DISCORD_USER_DM_MIN_INTERVAL)
+    except (discord.NotFound, discord.Forbidden) as exc:
+        with pending_weekly_event_dm_lock:
+            if pending_weekly_event_dm_notifications and pending_weekly_event_dm_notifications[0] is item:
+                pending_weekly_event_dm_notifications.popleft()
+            pending_weekly_event_dm_keys.discard(item.get("key"))
+        print(
+            f"⚠️ Weekly per-user Discord DM unavailable ({getattr(exc, 'status', 403)}) | "
+            f"event={item.get('event_name')} | user={item.get('discord_user_id')} | drop item | {exc}",
+            flush=True,
+        )
+    except discord.HTTPException as exc:
+        if getattr(exc, "status", None) == 429:
+            print(
+                f"⏸️ Weekly per-user Discord DM held by REST 429 | event={item.get('event_name')} | "
+                f"user={item.get('discord_user_id')} | retryable=True",
+                flush=True,
+            )
+            return
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        if item["attempts"] >= 3:
+            with pending_weekly_event_dm_lock:
+                if pending_weekly_event_dm_notifications and pending_weekly_event_dm_notifications[0] is item:
+                    pending_weekly_event_dm_notifications.popleft()
+                pending_weekly_event_dm_keys.discard(item.get("key"))
+            print(
+                f"⚠️ Weekly per-user Discord DM exhausted after 3 attempts | event={item.get('event_name')} | "
+                f"user={item.get('discord_user_id')} | status={getattr(exc, 'status', None)}",
+                flush=True,
+            )
+    except Exception as exc:
+        item["attempts"] = int(item.get("attempts") or 0) + 1
+        if item["attempts"] >= 3:
+            with pending_weekly_event_dm_lock:
+                if pending_weekly_event_dm_notifications and pending_weekly_event_dm_notifications[0] is item:
+                    pending_weekly_event_dm_notifications.popleft()
+                pending_weekly_event_dm_keys.discard(item.get("key"))
+            print(
+                f"⚠️ Weekly per-user Discord DM exhausted after 3 attempts | event={item.get('event_name')} | "
+                f"user={item.get('discord_user_id')} | error={exc!r}",
+                flush=True,
+            )
+
+
+boss_notification_diag_last_ts = {}
+_boss_voice_stage_inflight = set()
+BOSS_VOICE_ROOM_COMPLETED_MAX = 4000
+_boss_voice_room_completed = set()
+_boss_voice_room_completed_order = deque(maxlen=BOSS_VOICE_ROOM_COMPLETED_MAX)
+bf_voice_room_completed = set()
+bf_voice_room_completed_order = deque(maxlen=4000)
+
+def _queue_boss_rest_notification(
+    boss_name: str,
+    stage: str,
+    channel,
+    *,
+    content=None,
+    embed=None,
+    spawn_time: datetime | None = None,
+) -> bool:
+    """Queue one non-essential boss text notification without probing Discord.
+
+    V152: retain the queue semantics but attach the Boss spawn time so stale queued
+    notices cannot be delivered after the Boss has already spawned.
+    """
+    try:
+        channel_id = int(channel.id)
+    except Exception:
+        return False
+    key = (str(boss_name), str(stage), channel_id)
+    with pending_boss_rest_lock:
+        if key in pending_boss_rest_keys:
+            return False
+        if len(pending_boss_rest_notifications) >= PENDING_BOSS_REST_MAX:
+            print(f"⚠️ Boss REST queue full; dropping newest non-essential text notification | key={key}", flush=True)
+            return False
+        pending_boss_rest_keys.add(key)
+        pending_boss_rest_notifications.append({
+            "key": key,
+            "boss_name": str(boss_name),
+            "stage": str(stage),
+            "channel_id": channel_id,
+            "content": content,
+            "embed": embed,
+            "queued_at": time.time(),
+            "spawn_time": spawn_time.isoformat() if isinstance(spawn_time, datetime) else None,
+        })
+    print(
+        f"⏸️ Boss text notification queued | boss={boss_name} | stage={stage} | channel={channel_id} | "
+        f"target={spawn_time.isoformat() if isinstance(spawn_time, datetime) else '-'} | "
+        f"queued_at={datetime.now(TZ_THAI).isoformat()}",
+        flush=True,
+    )
+    return True
+
+
+async def _purge_expired_pending_boss_rest_notifications(now: datetime | None = None) -> int:
+    """Drop only genuinely stale queued Boss text notices.
+
+    V174: a notice intentionally queued at the exact spawn boundary remains eligible
+    briefly after spawn_time so normal REST scheduling can deliver it. Voice, Auto
+    Attendance, and command-output queues remain untouched.
+    """
+    current = now or datetime.now(TZ_THAI)
+    expired = []
+    survivors = []
+    with pending_boss_rest_lock:
+        while pending_boss_rest_notifications:
+            item = pending_boss_rest_notifications.popleft()
+            spawn_dt = parse_to_thai_datetime(item.get("spawn_time"))
+            if spawn_dt is not None:
+                stage = str(item.get("stage") or "").strip().lower()
+                late_grace = (
+                    BOSS_REST_ADVANCE_LATE_GRACE_SECONDS
+                    if stage == "advance"
+                    else BOSS_REST_SPAWN_LATE_GRACE_SECONDS
+                )
+                if current > (spawn_dt + timedelta(seconds=late_grace)):
+                    expired.append(item)
+                    pending_boss_rest_keys.discard(item.get("key"))
+                    continue
+            survivors.append(item)
+        pending_boss_rest_notifications.extend(survivors)
+
+    if not expired:
+        return 0
+
+    expired_flags = {}
+    with schedule_lock:
+        for item in expired:
+            boss_name = str(item.get("boss_name") or "")
+            stage = str(item.get("stage") or "").strip().lower()
+            record = boss_schedule.get(boss_name)
+            if not isinstance(record, dict):
+                continue
+            flags = expired_flags.setdefault(boss_name, {})
+            if stage == "advance":
+                record["notified_advance"] = True
+                flags["notified_advance"] = True
+            elif stage == "spawn":
+                record["notified_spawn"] = True
+                flags["notified_spawn"] = True
+
+    # Persist the terminal state once per Boss rather than once per expired channel.
+    for boss_name, flags in expired_flags.items():
+        try:
+            await save_boss_notification_flags(boss_name, **flags)
+        except Exception as e:
+            print(
+                f"⚠️ Expired Boss queue flag persistence failed | boss={boss_name} | {e}",
+                flush=True,
+            )
+
+    print(
+        f"🧹 Expired Boss REST queue items dropped | count={len(expired)} | "
+        "reason=boss-already-spawned",
+        flush=True,
+    )
+    return len(expired)
+
+
+async def _flush_one_boss_rest_notification() -> bool:
+    """Send at most one queued boss text notification per worker pass."""
+    await _purge_expired_pending_boss_rest_notifications()
+    with pending_boss_rest_lock:
+        if not pending_boss_rest_notifications:
+            return False
+        item = pending_boss_rest_notifications[0]
+
+    channel = bot.get_channel(int(item["channel_id"]))
+    if channel is None:
+        with pending_boss_rest_lock:
+            if pending_boss_rest_notifications and pending_boss_rest_notifications[0] is item:
+                pending_boss_rest_notifications.popleft()
+                pending_boss_rest_keys.discard(item["key"])
+        print(f"⚠️ Boss REST queue target channel unavailable | boss={item['boss_name']} | stage={item['stage']}", flush=True)
+        return False
+
+    try:
+        result = await guarded_channel_send(
+            channel,
+            context=f"boss-notify:{item['boss_name']}:queue:{item['stage']}",
+            content=item.get("content"),
+            embed=item.get("embed"),
+            background=True,
+        )
+    except discord.HTTPException as exc:
+        # Keep the item queued. The central guard records the 429 and quarantines background REST.
+        print(
+            f"⏸️ Boss REST queue held after Discord HTTP error | boss={item['boss_name']} | "
+            f"stage={item['stage']} | status={getattr(exc, 'status', None)}",
+            flush=True,
+        )
+        return False
+    except Exception as exc:
+        print(f"⚠️ Boss REST queue send failed safely | boss={item['boss_name']} | stage={item['stage']} | {exc!r}", flush=True)
+        return False
+
+    if result is None:
+        return False
+
+    with pending_boss_rest_lock:
+        if pending_boss_rest_notifications and pending_boss_rest_notifications[0] is item:
+            pending_boss_rest_notifications.popleft()
+            pending_boss_rest_keys.discard(item["key"])
+
+    try:
+        if item["stage"] == "advance":
+            await save_boss_notification_flags(item["boss_name"], notified_advance=True)
+        elif item["stage"] == "spawn":
+            await save_boss_notification_flags(item["boss_name"], notified_spawn=True)
+    except Exception as exc:
+        print(f"⚠️ Boss notification flag update after queued send failed: {item['boss_name']}: {exc}", flush=True)
+
+    try:
+        queue_age = max(0.0, time.time() - float(item.get("queued_at") or time.time()))
+    except Exception:
+        queue_age = 0.0
+    sent_now = datetime.now(TZ_THAI)
+    target_dt = parse_to_thai_datetime(item.get("spawn_time"))
+    target_lag = (sent_now - target_dt).total_seconds() if target_dt is not None else None
+    print(
+        f"🟢 Boss REST queue sent: {item['boss_name']} | stage={item['stage']} | "
+        f"queue_age={queue_age:.1f}s | target_lag={max(0.0, target_lag) if target_lag is not None else '-'}s | "
+        f"sent_at={sent_now.isoformat()}",
+        flush=True,
+    )
+    return True
+
+
+async def flush_pending_boss_rest_notifications_once():
+    """V58 queue worker: one background REST attempt max per scheduler pass."""
+    await _flush_one_boss_rest_notification()
+
+
+async def save_boss_notification_flags(boss_name: str, **flags):
+    clean = {k: bool(v) for k, v in flags.items()}
+    if not clean:
+        return
+    with schedule_lock:
+        if boss_name in boss_schedule:
+            boss_schedule[boss_name].update(clean)
+    mapping = {
+        "notified_advance": "notifiedNotice",
+        "notified_spawn": "notifiedSpawn",
+        "voice_notice_sent": "voiceNoticeSent",
+        "voice_spawn_sent": "voiceSpawnSent",
+    }
+    try:
+        await asyncio.to_thread(
+            db.reference(f"boss_schedule/{boss_name}").update,
+            {mapping.get(k, k): v for k, v in clean.items()}
+        )
+    except Exception as e:
+        print(f"⚠️ Firebase notification flag update failed: {boss_name}: {e}")
+
+
+def _boss_voice_room_key(boss_name: str, stage: str, spawn_time: datetime | None, guild_id: int, channel_id: int):
+    spawn_key = int(spawn_time.timestamp() * 1000) if isinstance(spawn_time, datetime) else 0
+    return (str(boss_name), str(stage), spawn_key, int(guild_id), int(channel_id))
+
+
+def _mark_boss_voice_room_completed(key):
+    if key in _boss_voice_room_completed:
+        return
+    if len(_boss_voice_room_completed_order) >= BOSS_VOICE_ROOM_COMPLETED_MAX:
+        old_key = _boss_voice_room_completed_order.popleft()
+        _boss_voice_room_completed.discard(old_key)
+    _boss_voice_room_completed.add(key)
+    _boss_voice_room_completed_order.append(key)
+
+
+def _bf_voice_room_key(trigger_key: str, guild_id: int, channel_id: int):
+    return (str(trigger_key), int(guild_id), int(channel_id))
+
+
+def _mark_bf_voice_room_completed(key):
+    if key in bf_voice_room_completed:
+        return
+    if len(bf_voice_room_completed_order) >= 4000:
+        old_key = bf_voice_room_completed_order.popleft()
+        bf_voice_room_completed.discard(old_key)
+    bf_voice_room_completed.add(key)
+    bf_voice_room_completed_order.append(key)
+
+
+@tasks.loop(seconds=15)
+async def _run_boss_voice_stage(boss_name: str, stage: str, notice_minutes: int, target_guilds, spawn_time: datetime | None = None):
+    """Run one Boss Voice announcement without blocking the Boss scheduler loop.
+
+    The previous V75 scheduler awaited Voice/TTS directly. A slow advance announcement
+    could therefore delay the scheduler past the real spawn time, after which the stale
+    guard could mark voice_spawn_sent=True without ever speaking the spawn announcement.
+    This helper keeps the same occupancy and Voice/TTS rules but runs independently.
+    """
+    key = (str(boss_name), str(stage))
+    try:
+        spoken_name = get_boss_pronunciation(boss_name)
+        all_ok = True
+        spoken_rooms = 0
+        for guild in list(target_guilds):
+            configured_rooms = get_configured_voice_channels(guild)
+            rooms = [r for r in configured_rooms if any(not m.bot for m in r.members)]
+            print(
+                f"🔎 Boss VOICE {stage.upper()} targets | guild={guild.name} | "
+                f"configured={len(configured_rooms)} | occupied={len(rooms)}",
+                flush=True,
+            )
+            if not rooms:
+                print(
+                    f"⏭️ Boss VOICE SKIP | guild={guild.name} | configured={len(configured_rooms)} | "
+                    f"occupied=0 | stage={stage} | role-tag/text notification only",
+                    flush=True,
+                )
+                continue
+
+            undelivered_rooms = []
+            for room in rooms:
+                room_key = _boss_voice_room_key(boss_name, stage, spawn_time, guild.id, room.id)
+                if room_key in _boss_voice_room_completed:
+                    print(
+                        f"⏭️ Boss VOICE room already delivered | boss={boss_name} | stage={stage} | "
+                        f"guild={guild.name} | channel={room.name}",
+                        flush=True,
+                    )
+                    continue
+                undelivered_rooms.append(room)
+
+            for room in undelivered_rooms:
+                try:
+                    if stage == "advance":
+                        text_th = f"บอส {spoken_name} จะเกิดในอีก {notice_minutes} นาทีค่ะ"
+                        text_en = f"Boss {boss_name} will spawn in {notice_minutes} minutes."
+                        text_ko = f"보스 {boss_name}가 {notice_minutes}분 후에 나타납니다."
+                    else:
+                        text_th = f"บอส {spoken_name} เกิดแล้วค่ะ"
+                        text_en = f"Boss {boss_name} has spawned."
+                        text_ko = f"보스 {boss_name}가 나타났습니다."
+
+                    result = await asyncio.wait_for(
+                        speak_in_guild(
+                            guild,
+                            text_th=text_th,
+                            text_en=text_en,
+                            text_ko=text_ko,
+                            target_channel=room,
+                        ),
+                        timeout=180,
+                    )
+                    if result:
+                        spoken_rooms += 1
+                        _mark_boss_voice_room_completed(
+                            _boss_voice_room_key(boss_name, stage, spawn_time, guild.id, room.id)
+                        )
+                    else:
+                        all_ok = False
+                except Exception as exc:
+                    all_ok = False
+                    print(
+                        f"⚠️ {stage.title()} TTS failed ({boss_name}/{guild.name}/{room.name}): {exc}",
+                        flush=True,
+                    )
+
+        print(
+            f"🔊 Boss VOICE {stage.upper()} RESULT | boss={boss_name} | "
+            f"spoken_rooms={spoken_rooms} | all_ok={all_ok}",
+            flush=True,
+        )
+        any_occupied_room = any(
+            any(any(not m.bot for m in room.members) for room in get_configured_voice_channels(guild))
+            for guild in target_guilds
+        )
+        if spoken_rooms == 0 and not any_occupied_room:
+            # V152: no occupied /setvoice room is a terminal result for this one
+            # Boss Voice stage. There is no useful Voice work to retry every 15s.
+            if stage == "spawn":
+                await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
+                print(
+                    f"⏭️ Boss VOICE SPAWN skipped: no occupied configured Voice room | "
+                    f"boss={boss_name} | role-tag/text notification only",
+                    flush=True,
+                )
+            else:
+                await save_boss_notification_flags(boss_name, voice_notice_sent=True)
+                print(
+                    f"⏭️ Boss VOICE ADVANCE completed without speech: no occupied configured Voice room | "
+                    f"boss={boss_name} | no retry",
+                    flush=True,
+                )
+        else:
+            current_occupied = []
+            for guild in list(target_guilds):
+                for room in get_configured_voice_channels(guild):
+                    if any(not m.bot for m in room.members):
+                        current_occupied.append(_boss_voice_room_key(boss_name, stage, spawn_time, guild.id, room.id))
+            current_delivered = sum(1 for key in current_occupied if key in _boss_voice_room_completed)
+            if current_occupied and current_delivered == len(current_occupied):
+                if stage == "advance":
+                    await save_boss_notification_flags(boss_name, voice_notice_sent=True)
+                    print(f"🔊 Advance TTS complete: {boss_name} -> {current_delivered} occupied room(s)", flush=True)
+                else:
+                    await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
+                    print(f"🔊 Spawn TTS complete: {boss_name} -> {current_delivered} occupied room(s)", flush=True)
+            elif spoken_rooms > 0:
+                print(
+                    f"⏳ Boss VOICE {stage.upper()} partial delivery | boss={boss_name} | "
+                    f"newly_spoken={spoken_rooms} | current_delivered={current_delivered}/{len(current_occupied)} | "
+                    f"retry_failed_rooms=True",
+                    flush=True,
+                )
+    finally:
+        _boss_voice_stage_inflight.discard(key)
+
+
+@tasks.loop(seconds=0.5)
+async def check_boss_notifications():
+    try:
+        now = datetime.now(TZ_THAI)
+        with schedule_lock:
+            schedule_copy = {boss: dict(data) for boss, data in boss_schedule.items() if isinstance(data, dict)}
+
+        for boss_name, data in schedule_copy.items():
+            spawn_time = parse_to_thai_datetime(data.get("spawn_time") or data.get("spawnTimeMs"))
+            if not spawn_time:
+                print(f"⚠️ Boss notification skip: {boss_name} has invalid spawn time")
+                continue
+
+            time_left = (spawn_time - now).total_seconds()
+
+            # Library Boss rows exist in boss_schedule for Dashboard/Auto Attendance,
+            # but their legacy 08:50/20:50 notification task remains the sole text/TTS
+            # notifier. This prevents duplicate generic Boss alerts.
+            if parse_bool(data.get("suppressBossNotifications"), False):
+                continue
+
+            try:
+                notice_minutes = max(1, int(data.get("noticeMinutes") or get_boss_advance_notice_seconds(boss_name) / 60))
+            except (TypeError, ValueError):
+                notice_minutes = max(1, int(get_boss_advance_notice_seconds(boss_name) / 60))
+            notice_seconds = notice_minutes * 60
+            notified_advance = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
+            notified_spawn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
+            voice_advance = parse_bool(data.get("voice_notice_sent", data.get("voiceNoticeSent", False)))
+            voice_spawn = parse_bool(data.get("voice_spawn_sent", data.get("voiceSpawnSent", False)))
+
+            # Never replay an old boss after a Render restart/deploy.
+            # A schedule more than 120 seconds past spawn is considered stale.
+            # Mark every notification flag complete before continuing.
+            if time_left < -120:
+                if not (notified_advance and notified_spawn and voice_advance and voice_spawn):
+                    await save_boss_notification_flags(
+                        boss_name,
+                        notified_advance=True,
+                        notified_spawn=True,
+                        voice_notice_sent=True,
+                        voice_spawn_sent=True,
+                    )
+                    print(f"⏭️ Stale boss suppressed: {boss_name} | left={time_left:.1f}s")
+                continue
+
+            # Do not spam Render logs every 5 seconds while nothing is changing.
+            # Log only when a real notification action is due.
+            # Report only when a notification state can actually change. During a
+            # global REST cooldown, a pending text notification is expected to remain
+            # false; do not flood logs every scheduler tick while Voice has already
+            # succeeded.
+            rest_blocked = _discord_rest_rate_limit_remaining() > 0
+            advance_text_due = (0 < time_left <= notice_seconds and not notified_advance)
+            advance_voice_due = (0 < time_left <= notice_seconds and not voice_advance)
+            spawn_text_due = (time_left <= 0 and not notified_spawn)
+            spawn_voice_due = (-120 <= time_left <= 0 and not voice_spawn)
+            notification_action_due = advance_text_due or advance_voice_due or spawn_text_due or spawn_voice_due
+
+            if notification_action_due:
+                # Throttle informational "action due" lines to once per boss/stage per
+                # 60 seconds. This does not alter the actual send/retry behavior.
+                stage_key = (
+                    "advance" if advance_voice_due or advance_text_due
+                    else "spawn" if spawn_voice_due or spawn_text_due
+                    else "none"
+                )
+                diag_key = (boss_name, stage_key)
+                now_mono = time.monotonic()
+                last_diag = boss_notification_diag_last_ts.get(diag_key, 0.0)
+                if now_mono - last_diag >= 60.0:
+                    boss_notification_diag_last_ts[diag_key] = now_mono
+                    print(
+                        f"🔎 Boss notification action due: {boss_name} | spawn={spawn_time.isoformat()} | "
+                        f"left={time_left:.1f}s | notice={notice_minutes}m | advance={notified_advance} | "
+                        f"spawn_sent={notified_spawn} | voice_advance={voice_advance} | voice_spawn={voice_spawn}"
+                    )
+
+            # V167: no notification is due for this Boss, so skip all Firebase channel
+            # resolution work and move to the next schedule row. This reduces scheduler
+            # latency and avoids unnecessary Firebase reads on every 2-second tick.
+            if not notification_action_due:
+                continue
+
+            # V174: use the live in-memory notification-channel cache on the exact event path.
+            # /set-notification updates this cache immediately, so a Firebase read cannot
+            # delay the Discord notification at the scheduled boundary. Existing fallbacks
+            # below remain unchanged.
+            configured_notification_ids = _notification_channel_ids_from_memory()
+            channels_to_notify = []
+            seen_channel_ids = set()
+            for target_channel_id in configured_notification_ids:
+                try:
+                    target_channel_id = int(target_channel_id)
+                except (TypeError, ValueError):
+                    continue
+                if target_channel_id in seen_channel_ids:
+                    continue
+                ch = bot.get_channel(target_channel_id)
+                if ch is None:
+                    try:
+                        ch = await guarded_fetch_channel(target_channel_id, context=f"boss-notify:fetch-configured-channel:{boss_name}")
+                    except Exception:
+                        ch = None
+                if isinstance(ch, discord.TextChannel):
+                    if ch.id not in seen_channel_ids:
+                        channels_to_notify.append(ch)
+                        seen_channel_ids.add(ch.id)
+
+            if not channels_to_notify:
+                # Backward-compatible fallback for deployments that have not run
+                # /set-notification yet. Do not remove the existing boss channel/fallback.
+                channel = None
+                channel_id = data.get("channel_id") or data.get("channelId")
+                if channel_id:
+                    try:
+                        channel = bot.get_channel(int(channel_id))
+                        if channel is None:
+                            channel = await guarded_fetch_channel(int(channel_id), context=f"boss-notify:fetch-channel:{boss_name}")
+                    except Exception:
+                        channel = None
+                if channel:
+                    channels_to_notify.append(channel)
+
+                if not channels_to_notify:
+                    for guild in bot.guilds:
+                        fb_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+                        if not fb_channel:
+                            fb_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+                        if fb_channel and fb_channel.id not in seen_channel_ids:
+                            channels_to_notify.append(fb_channel)
+                            seen_channel_ids.add(fb_channel.id)
+
+            # Voice notifications must not depend on text-channel resolution or REST availability.
+            # Always evaluate configured /setvoice targets directly from the READY guild cache.
+            target_guilds = set(bot.guilds)
+
+            # Advance: text and voice are independent one-shot states.
+            await _purge_expired_pending_boss_rest_notifications(now)
+            advance_stage_queued = False
+            spawn_stage_queued = False
+            with pending_boss_rest_lock:
+                advance_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "advance" for item in pending_boss_rest_notifications)
+                spawn_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "spawn" for item in pending_boss_rest_notifications)
+
+            if 0 < time_left <= notice_seconds and not notified_advance and not advance_stage_queued:
+                embed = build_boss_discord_notification(boss_name, "advance", spawn_time, notice_minutes)
+                for ch in channels_to_notify:
+                    try:
+                        mentions = get_notification_mentions(getattr(ch, "guild", None))
+                        _queue_boss_rest_notification(
+                            boss_name,
+                            "advance",
+                            ch,
+                            content=mentions or None,
+                            embed=embed,
+                            spawn_time=spawn_time,
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Queue advance notification failed ({boss_name}): {e}", flush=True)
+                # The queue owns the text send and flag update. Do not call Discord REST here.
+
+            if 0 < time_left <= notice_seconds:
+                await queue_web_push_stage(boss_name, "advance", spawn_time, notice_minutes)
+                asyncio.create_task(
+                    queue_discord_user_boss_notifications(boss_name, "advance", spawn_time, notice_minutes),
+                    name=f"boss-user-dm-advance-{boss_name}",
+                )
+
+            if 0 < time_left <= notice_seconds and not voice_advance:
+                voice_key = (str(boss_name), "advance")
+                if voice_key not in _boss_voice_stage_inflight:
+                    _boss_voice_stage_inflight.add(voice_key)
+                    print(
+                        f"📢 Schedule Boss VOICE ADVANCE task | boss={boss_name} | "
+                        f"left={time_left:.1f}s | notice={notice_minutes}m",
+                        flush=True,
+                    )
+                    asyncio.create_task(
+                        _run_boss_voice_stage(boss_name, "advance", notice_minutes, target_guilds, spawn_time),
+                        name=f"boss-voice-advance-{boss_name}",
+                    )
+
+            # Spawn: only notify at the actual crossing. Old schedules >60s late
+            # are marked complete instead of replaying after every deploy/reload.
+            if time_left <= 0 and not notified_spawn and not spawn_stage_queued:
+                embed = build_boss_discord_notification(boss_name, "spawn", spawn_time, notice_minutes)
+                for ch in channels_to_notify:
+                    try:
+                        mentions = get_notification_mentions(getattr(ch, "guild", None))
+                        _queue_boss_rest_notification(
+                            boss_name,
+                            "spawn",
+                            ch,
+                            content=mentions or None,
+                            embed=embed,
+                            spawn_time=spawn_time,
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Queue spawn notification failed ({boss_name}): {e}", flush=True)
+                # The queue owns the text send and flag update. Do not call Discord REST here.
+
+            if time_left <= 0 and not notified_spawn:
+                await queue_web_push_stage(boss_name, "spawn", spawn_time, notice_minutes)
+                asyncio.create_task(
+                    queue_discord_user_boss_notifications(boss_name, "spawn", spawn_time, notice_minutes),
+                    name=f"boss-user-dm-spawn-{boss_name}",
+                )
+
+            # V152: Boss SPAWN Voice is a real spawn-time announcement. Do not run
+            # this stage during the old -120s pre-spawn window. The 15s scheduler
+            # provides a small timing safety window around the actual crossing.
+            if -30 <= time_left <= 0 and not voice_spawn:
+                voice_key = (str(boss_name), "spawn")
+                if voice_key not in _boss_voice_stage_inflight:
+                    _boss_voice_stage_inflight.add(voice_key)
+                    print(
+                        f"📢 Schedule Boss VOICE SPAWN task | boss={boss_name} | "
+                        f"left={time_left:.1f}s | guilds={len(target_guilds)}",
+                        flush=True,
+                    )
+                    asyncio.create_task(
+                        _run_boss_voice_stage(boss_name, "spawn", notice_minutes, target_guilds, spawn_time),
+                        name=f"boss-voice-spawn-{boss_name}",
+                    )
+            elif time_left < -120 and not voice_spawn:
+                await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
+                print(f"⏭️ Legacy expired boss marked complete: {boss_name} (left={time_left:.1f}s)")
+
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_boss_notifications': {e}")
+
+
+@tasks.loop(seconds=60)
+async def update_live_embed():
+    global cached_live_message
+    try:
+        if not live_message_config: return
+        channel_id = live_message_config.get("channel_id")
+        message_id = live_message_config.get("message_id")
+        if not channel_id or not message_id: return
+
+        if cached_live_message is None or cached_live_message.id != message_id:
+            channel = bot.get_channel(channel_id)
+            if not channel:
+                try: channel = await guarded_fetch_channel(channel_id, context="live:fetch-channel")
+                except Exception: return
+            try: cached_live_message = await guarded_fetch_message(channel, message_id, context="live:fetch-message")
+            except Exception: return
+
+        now = datetime.now(TZ_THAI)
+        embed = discord.Embed(title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time", description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.teal())
+
+        with schedule_lock:
+            schedule_copy = boss_schedule.copy()
+
+        if not schedule_copy:
+            embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
+        else:
+            sorted_bosses = sorted(
+                schedule_copy.items(), 
+                key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
+            )
+            
+            display_bosses = sorted_bosses[:20]
+            for boss, data in display_bosses:
+                spawn_time = parse_to_thai_datetime(data["spawn_time"])
+                if not spawn_time: continue
+                time_left_sec = (spawn_time - now).total_seconds()
+                
+                if time_left_sec <= 0: time_left_str = "เกิดแล้ว!"
+                else:
+                    m, s = divmod(int(time_left_sec), 60)
+                    h, m = divmod(m, 60)
+                    if h > 0: time_left_str = f"อีก {h} ชม. {m} นาที"
+                    else: time_left_str = f"อีก {m} นาที {s} วินาที"
+
+                notice_text = get_boss_advance_notice_text(boss)
+                rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
+                embed.add_field(
+                    name=f"👾 {boss}",
+                    value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*",
+                    inline=False
+                )
+            
+            if len(sorted_bosses) > 20:
+                embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
+
+        embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
+        try: await guarded_message_edit(cached_live_message, context="live:edit", embed=embed)
+        except Exception as e: print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'update_live_embed': {e}")
+
+
+async def _weekly_event_voice_announce(
+    guild: discord.Guild, event_name: str, texts: dict, event_key: str
+) -> bool:
+    """Announce only in occupied /setvoice rooms. Empty rooms are not retried later."""
+    if not guild or not is_bot_ready:
+        return False
+    if SKYNET_RUNTIME_ROLE == "bot" and not discord_rest_runtime_lease_owned:
+        return False
+
+    configured = get_configured_voice_channels(guild)
+    occupied = [
+        ch for ch in configured
+        if any(not member.bot for member in (getattr(ch, "members", []) or []))
+    ]
+    if not occupied:
+        print(
+            f"⏭️ Weekly voice event skipped: no occupied /setvoice room | "
+            f"guild={guild.name} | event={event_name} | key={event_key}",
+            flush=True,
+        )
+        return False
+
+    prepared = await _tts_generate_files(
+        texts.get("th"), texts.get("en"), texts.get("ko"), guild.id
+    )
+    if not prepared:
+        print(
+            f"⚠️ Weekly voice event TTS unavailable | guild={guild.name} | event={event_name}",
+            flush=True,
+        )
+        return False
+
+    success_count = 0
+    try:
+        for channel in occupied:
+            if not any(not member.bot for member in (getattr(channel, "members", []) or [])):
+                continue
+            if await speak_in_guild(
+                guild, target_channel=channel, prepared_files=prepared
+            ):
+                success_count += 1
+            await asyncio.sleep(0.4)
+    finally:
+        for _, filename in prepared:
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+            except Exception:
+                pass
+
+    print(
+        f"🔊 Weekly voice event result | event={event_name} | guild={guild.name} | "
+        f"delivered={success_count}/{len(occupied)}",
+        flush=True,
+    )
+    return success_count > 0
+
+
+@tasks.loop(seconds=0.5)
+async def check_weekly_event_notifications():
+    """Run fixed weekly Voice + Discord text/DM alerts at exact Thailand time."""
+    if not is_bot_ready:
+        return
+    if SKYNET_RUNTIME_ROLE == "bot" and not discord_rest_runtime_lease_owned:
+        return
+
+    now = datetime.now(WEEKLY_EVENT_TIMEZONE)
+    minute_stamp = now.strftime("%Y-%m-%d %H:%M")
+
+    async with weekly_event_lock:
+        for guild in list(bot.guilds):
+            if not guild:
+                continue
+
+            if now.weekday() == 6 and is_inotiawar_enabled(guild.id):
+                for slot_key, hour, minute in INOTIAWAR_SCHEDULE:
+                    if now.hour == hour and now.minute == minute:
+                        event_key = f"inotiawar:{guild.id}:{minute_stamp}:{slot_key}"
+                        if event_key in inotiawar_last_fired_keys:
+                            continue
+                        # One-shot per scheduled minute. Empty Voice rooms are not retried.
+                        inotiawar_last_fired_keys.add(event_key)
+                        event_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        await _weekly_event_voice_announce(
+                            guild,
+                            f"Inotia War:{slot_key}",
+                            INOTIAWAR_MESSAGES[slot_key],
+                            event_key,
+                        )
+                        # Public role-tag notification and opt-in personal DM use the same
+                        # notification settings as Boss alerts and remain behind the REST guard.
+                        _queue_weekly_event_public_notifications(
+                            guild, event_key, f"Inotia War:{slot_key}", event_time, INOTIAWAR_MESSAGES[slot_key]
+                        )
+                        asyncio.create_task(
+                            queue_discord_user_weekly_event_notifications(
+                                guild, event_key, f"Inotia War:{slot_key}", event_time, INOTIAWAR_MESSAGES[slot_key]
+                            ),
+                            name=f"weekly-event-dm-inotiawar-{guild.id}-{slot_key}",
+                        )
+
+            for slot_key, weekday, hour, minute in GUILD_SIEGE_SCHEDULE:
+                if now.weekday() == weekday and now.hour == hour and now.minute == minute:
+                    event_key = f"guild-siege:{guild.id}:{minute_stamp}:{weekday}:{hour:02d}:{minute:02d}"
+                    if event_key in inotiawar_last_fired_keys:
+                        continue
+                    inotiawar_last_fired_keys.add(event_key)
+                    event_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    await _weekly_event_voice_announce(
+                        guild, "Guild Siege:prepare", GUILD_SIEGE_MESSAGES[slot_key], event_key
+                    )
+                    _queue_weekly_event_public_notifications(
+                        guild, event_key, "Guild Siege:prepare", event_time, GUILD_SIEGE_MESSAGES[slot_key]
+                    )
+                    asyncio.create_task(
+                        queue_discord_user_weekly_event_notifications(
+                            guild, event_key, "Guild Siege:prepare", event_time, GUILD_SIEGE_MESSAGES[slot_key]
+                        ),
+                        name=f"weekly-event-dm-guild-siege-{guild.id}-{weekday}",
+                    )
+
+
+@tasks.loop(seconds=60)
+async def check_auto_disconnect():
+    try:
+        now = datetime.now(TZ_THAI)
+        for guild in bot.guilds:
+            vc = guild.voice_client
+            if vc and vc.is_connected() and vc.channel and not vc.is_playing():
+                human_members = [m for m in vc.channel.members if not m.bot]
+                if len(human_members) == 0:
+                    if guild.id not in voice_empty_start:
+                        voice_empty_start[guild.id] = now
+                    else:
+                        elapsed = (now - voice_empty_start[guild.id]).total_seconds()
+                        if elapsed >= 180:
+                            try:
+                                await vc.disconnect()
+                                print(f"🔌 Auto-disconnected จาก {vc.channel.name} เนื่องจากไม่มีสมาชิกอยู่ในห้องเกิน 3 นาที")
+                            except Exception as e: print(f"❌ ตัดสายไม่สำเร็จ: {e}")
+                            del voice_empty_start[guild.id]
+                else:
+                    if guild.id in voice_empty_start:
+                        del voice_empty_start[guild.id]
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_auto_disconnect': {e}")
+
+
+@bot.tree.command(name="notice", description="ประกาศข้อความเสียงไปยังทุกห้องสนทนาที่มีคนอยู่")
+@app_commands.describe(message="ข้อความที่ต้องการให้บอทประกาศ")
+@has_allowed_role()
+async def notice_command(interaction: discord.Interaction, message: str):
+    global NOTICE_LAST_RUN_TS
+    # Serialize /notice calls so one operator cannot create a REST/Voice burst.
+    if NOTICE_COMMAND_LOCK.locked():
+        try:
+            await _safe_interaction_send_message(interaction, "⏳ /notice กำลังทำงานอยู่ กรุณารอสักครู่", ephemeral=True)
+        except discord.HTTPException as exc:
+            print(f"⚠️ /notice busy response failed: {exc}", flush=True)
+        return
+
+    if time.monotonic() - NOTICE_LAST_RUN_TS < 2.0:
+        try:
+            await _safe_interaction_send_message(interaction, "⏳ /notice เพิ่งถูกเรียกไป กรุณารอสักครู่", ephemeral=True)
+        except discord.HTTPException as exc:
+            print(f"⚠️ /notice cooldown response failed: {exc}", flush=True)
+        return
+
+    async with NOTICE_COMMAND_LOCK:
+        NOTICE_LAST_RUN_TS = time.monotonic()
+        ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
+        if not ack_ok:
+            # Do NOT discard the actual work merely because the initial interaction callback
+            # hit a transient/global 429.  Run the notice anyway; if Discord REST is available
+            # the Voice path can still complete.  The command UI may still show a timeout when
+            # Discord blocks the acknowledgement endpoint itself, which cannot be fixed client-side.
+            print("⚠️ /notice ACK unavailable due to Discord 429; continuing Voice notice attempt", flush=True)
+
+        if not message.strip():
+            if ack_ok:
+                try:
+                    await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
+                except discord.HTTPException as exc:
+                    print(f"⚠️ /notice empty-message response failed: {exc}", flush=True)
+            return
+
+        # Global notice: every occupied Voice channel in the current guild.
+        occupied = []
+        for vc in interaction.guild.voice_channels:
+            humans = [m for m in vc.members if not m.bot]
+            if humans:
+                occupied.append(vc)
+
+        if not occupied:
+            if ack_ok:
+                try:
+                    await guarded_interaction_followup_send(interaction, "interaction-followup", "⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย", ephemeral=True)
+                except discord.HTTPException as exc:
+                    print(f"⚠️ /notice empty-room response failed: {exc}", flush=True)
+            else:
+                print(f"⚠️ /notice no occupied Voice rooms | guild={interaction.guild.name}", flush=True)
+            return
+
+        names = ", ".join(f"**{vc.name}**" for vc in occupied)
+        if ack_ok:
+            try:
+                await guarded_interaction_edit_original(interaction, "interaction-edit-original", 
+                    content=f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\nบอทจะเข้า → พูด → ออกทีละห้อง"
+                )
+            except discord.HTTPException as exc:
+                print(f"⚠️ /notice progress update failed: {exc}", flush=True)
+
+        results = []
+        for vc in occupied:
+            try:
+                ok = await asyncio.wait_for(
+                    speak_in_guild(
+                        interaction.guild,
+                        text_th=message,
+                        text_en=message,
+                        text_ko=message,
+                        target_channel=vc,
+                    ),
+                    timeout=180,
+                )
+                results.append((vc.name, bool(ok)))
+            except Exception as exc:
+                print(f"❌ /notice TTS failed in {vc.name}: {exc}", flush=True)
+                results.append((vc.name, False))
+
+        ok_count = sum(1 for _, ok in results if ok)
+        print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms", flush=True)
+
+        if ack_ok:
+            failed = [name for name, ok in results if not ok]
+            try:
+                if failed:
+                    await guarded_interaction_edit_original(interaction, "interaction-edit-original", 
+                        content=(
+                            f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n"
+                            f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}"
+                        )
+                    )
+                else:
+                    await guarded_interaction_edit_original(interaction, "interaction-edit-original", 
+                        content=f"✅ /notice ประกาศสำเร็จ {ok_count}/{len(results)} ห้อง"
+                    )
+            except discord.HTTPException as exc:
+                print(f"⚠️ /notice final response update failed: {exc}", flush=True)
+        else:
+            # Best-effort text audit only.  This does not fix a Discord interaction callback 429,
+            # but gives Render logs a deterministic completion result.
+            print(
+                f"📣 /notice completed without interaction ACK | success={ok_count}/{len(results)} | "
+                f"guild={interaction.guild.name}",
+                flush=True,
+            )
+
+def generate_boss_time_summary():
+    """Build the /time embed and the multilingual TTS summary from current boss_schedule."""
+    now = datetime.now(TZ_THAI)
+    with schedule_lock:
+        schedule_copy = boss_schedule.copy()
+
+    if not schedule_copy:
+        return (
+            None,
+            "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ",
+            None,
+            None,
+        )
+
+    sorted_bosses = sorted(
+        schedule_copy.items(),
+        key=lambda x: parse_to_thai_datetime(x[1].get("spawn_time")) or now,
+    )
+    embed = discord.Embed(
+        title="⌛ สรุปเวลาที่เหลือของบอสทุกตัว (เรียงจากน้อยไปมาก)",
+        description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`",
+        color=discord.Color.purple(),
+    )
+
+    tts_lines_th = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
+    tts_lines_en = ["Boss time summary from earliest to latest."]
+    tts_lines_ko = ["보스 스폰 시간 요약입니다."]
+
+    for boss, data in sorted_bosses[:20]:
+        spawn_time = parse_to_thai_datetime(data.get("spawn_time"))
+        if not spawn_time:
+            continue
+
+        time_left_sec = (spawn_time - now).total_seconds()
+        spoken_name = get_boss_pronunciation(boss)
+        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
+
+        if time_left_sec <= 0:
+            time_left_str = "เกิดแล้ว!"
+            tts_lines_th.append(f"บอส {spoken_name} เกิดแล้วค่ะ")
+            tts_lines_en.append(f"Boss {boss} has spawned.")
+            tts_lines_ko.append(f"보스 {boss}가 나타났습니다.")
+        else:
+            total_seconds = max(0, int(time_left_sec))
+            m, s = divmod(total_seconds, 60)
+            h, m = divmod(m, 60)
+
+            parts = []
+            if h > 0:
+                parts.append(f"{h} ชม.")
+            if m > 0 or h > 0:
+                parts.append(f"{m} นาที")
+            parts.append(f"{s} วินาที")
+            time_left_str = f"อีก {' '.join(parts)}"
+
+            if h > 0:
+                tts_time_th = f"{h} ชั่วโมง {m} นาที"
+                tts_time_en = f"{h} hours and {m} minutes"
+                tts_time_ko = f"{h}시간 {m}분" if m > 0 else f"{h}시간"
+            elif m > 0:
+                tts_time_th = f"{m} นาที"
+                tts_time_en = f"{m} minutes"
+                tts_time_ko = f"{m}분"
+            else:
+                tts_time_th = f"{s} วินาที"
+                tts_time_en = f"{s} seconds"
+                tts_time_ko = f"{s}초"
+
+            tts_lines_th.append(f"บอส {spoken_name} เหลืออีก {tts_time_th}")
+            tts_lines_en.append(f"Boss {boss} in {tts_time_en}.")
+            tts_lines_ko.append(f"보스 {boss}가 {tts_time_ko} 남았습니다.")
+
+        embed.add_field(
+            name=f"👾 {boss}",
+            value=(
+                f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | "
+                f"นับถอยหลัง: **{time_left_str}**\n"
+                f"*(บันทึกโดย: {rec_by})*"
+            ),
+            inline=False,
+        )
+
+    if len(sorted_bosses) > 20:
+        embed.add_field(
+            name="📌 หมายเหตุ",
+            value=f"*ยังมีบอสอีก {len(sorted_bosses) - 20} ตัว สามารถดูเพิ่มเติมได้บน Dashboard*",
+            inline=False,
+        )
+
+    return (
+        embed,
+        " ".join(tts_lines_th),
+        " ".join(tts_lines_en),
+        " ".join(tts_lines_ko),
+    )
+
+async def _time_channel_fallback(interaction: discord.Interaction, *, embed=None, content=None):
+    """Legacy /time fallback kept only for non-rate-limit failures.
+
+    V157: never turn an Interaction-only 429 into a normal Discord REST request.
+    The previous behavior attempted channel.send() immediately after the initial
+    interaction callback was rejected, which is exactly the extra REST request seen
+    in the V156 log. That fallback request can receive the Cloudflare temporary
+    restriction and start a long shared REST quarantine.
+
+    V157 therefore refuses the fallback whenever the interaction lane or shared REST
+    lane is already restricted, and it never queues a stale /time result for later
+    REST delivery in those cases. The initial interaction callback remains a single
+    bounded attempt, as required by Discord's interaction timing.
+    """
+    now_mono = time.monotonic()
+
+    # Initial /time ACK was explicitly rejected by Discord with an Interaction-only
+    # 429, or another interaction callback is currently suppressed. Do NOT send a
+    # second normal-channel HTTP request.
+    if interaction_api_suppressed_until > now_mono:
+        print(
+            "⏭️ /time channel fallback skipped: interaction-only cooldown active | "
+            "no normal REST request and no deferred fallback queue",
+            flush=True,
+        )
+        return False
+
+    # Do not become an additional REST caller while the shared Discord REST circuit
+    # is already blocked. A delayed /time result is not useful enough to justify a
+    # future message-create request.
+    if _discord_rest_rate_limit_remaining() > 0:
+        print(
+            f"⏭️ /time channel fallback skipped: shared REST cooldown active | "
+            f"remaining={_discord_rest_rate_limit_remaining():.1f}s | no queued fallback",
+            flush=True,
+        )
+        return False
+    with discord_block_lock:
+        temp_restriction = bool(discord_block_temp_restriction)
+        next_probe_mono = float(discord_block_next_probe_mono or 0.0)
+        server_until = float(discord_block_server_until or 0.0)
+    if temp_restriction and (next_probe_mono > now_mono or (server_until > 0 and time.time() >= server_until)):
+        remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
+        print(
+            f"⏭️ /time channel fallback skipped: Discord REST restriction active | "
+            f"remaining={remaining:.1f}s | no queued fallback",
+            flush=True,
+        )
+        return False
+
+    channel = getattr(interaction, "channel", None)
+    if channel is None:
+        print("⚠️ /time channel fallback unavailable: interaction.channel is None", flush=True)
+        return False
+
+    try:
+        message = await asyncio.wait_for(
+            guarded_discord_call(
+                lambda: channel.send(
+                    content=content,
+                    embed=embed,
+                ),
+                context="time-channel-fallback",
+                # Do not sleep for a Discord rate limit. This path exists only as a
+                # bounded fallback for non-rate-limit interaction failures.
+                wait_for_cooldown=False,
+            ),
+            timeout=4.0,
+        )
+        if message is not None:
+            print("✅ /time channel fallback sent successfully", flush=True)
+            return True
+        print("⚠️ /time channel fallback produced no message; no deferred fallback queued", flush=True)
+        return False
+    except asyncio.TimeoutError:
+        print("⚠️ /time channel fallback timed out safely; no deferred fallback queued", flush=True)
+        return False
+    except discord.HTTPException as exc:
+        print(
+            f"⚠️ /time channel fallback failed | status={getattr(exc, 'status', None)} | {exc} | "
+            "no deferred fallback queued",
+            flush=True,
+        )
+        return False
+    except Exception as exc:
+        print(f"⚠️ /time channel fallback failed unexpectedly: {exc!r} | no deferred fallback queued", flush=True)
+        return False
+
+
+@bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
+async def boss_time_slash(interaction: discord.Interaction):
+    # Discord requires the initial interaction callback to be acknowledged promptly.
+    # Defer FIRST, then build the summary, and edit the original response afterward.
+    # This preserves the existing /time result and Voice/TTS behavior while avoiding
+    # a preventable timeout caused by doing work before the initial ACK.
+    ack_ok = False
+    ack_rate_limited = False
+    fallback_sent = False
+    response_content = None
+    response_embed = None
+    tts_text_th = tts_text_en = tts_text_ko = ""
+    try:
+        ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
+        # Capture the reason immediately after the ACK attempt. A false result caused
+        # by the interaction-only 429 path arms this local suppression window. Do not
+        # let a later summary-generation delay make the command fall through into a
+        # normal Discord REST fallback/audit request.
+        ack_rate_limited = (not ack_ok) and interaction_api_suppressed_until > time.monotonic()
+
+        embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
+        response_content = None if embed is not None else tts_text_th
+        response_embed = embed if embed is not None else None
+
+        if ack_ok:
+            edited = await guarded_interaction_edit_original(
+                interaction,
+                "time-interaction-result",
+                content=response_content,
+                embed=response_embed,
+            )
+            if edited is None:
+                print("⚠️ /time initial ACK succeeded but original response edit was unavailable", flush=True)
+        else:
+            # V157: an Interaction-only 429 must end the Discord-response path for /time.
+            # Do not create a second message-create request and do not queue a delayed
+            # fallback. For non-rate-limit ACK failures, the legacy bounded fallback is
+            # still available and is independently guarded by _time_channel_fallback().
+            if ack_rate_limited:
+                print(
+                    "⏭️ /time initial ACK was rate-limited; no normal-channel fallback "
+                    "will be attempted and no fallback result will be queued",
+                    flush=True,
+                )
+            else:
+                print(
+                    "⚠️ /time ACK unavailable; normal-channel fallback is strictly guarded "
+                    "against REST rate-limit conditions",
+                    flush=True,
+                )
+                fallback_sent = await _time_channel_fallback(
+                    interaction,
+                    content=response_content,
+                    embed=response_embed,
+                )
+
+        if embed is not None:
+            print("✅ /time summary prepared and response delivery attempted", flush=True)
+        else:
+            print("ℹ️ /time summary generated without embed", flush=True)
+
+        # Keep the original Voice/TTS behavior unchanged.
+        if interaction.guild is not None:
+            asyncio.create_task(
+                speak_in_guild(
+                    interaction.guild,
+                    text_th=tts_text_th,
+                    text_en=tts_text_en,
+                    text_ko=tts_text_ko,
+                )
+            )
+
+        # V157: once the initial /time ACK is rate-limited, do not create another
+        # Discord REST request through the audit path either. The audit message is
+        # diagnostic only; it is not worth turning an Interaction-only 429 into an
+        # additional channel/audit REST request. Successful ACKs and non-rate-limit
+        # fallback cases keep the existing audit behavior.
+        if ack_ok or not ack_rate_limited:
+            await send_audit_log(
+                interaction.guild,
+                interaction.user,
+                "เช็กเวลาบอสพร้อม TTS (/time)",
+                (
+                    "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย"
+                    if ack_ok
+                    else "คำนวณสรุปเวลาบอสสำเร็จ แต่ Discord ปฏิเสธ interaction callback; "
+                         f"ส่งผลลัพธ์ผ่านข้อความในห้อง = {'สำเร็จ' if fallback_sent else 'ไม่สำเร็จ'}"
+                ),
+                discord.Color.purple(),
+            )
+        else:
+            print(
+                "⏭️ /time audit skipped after Interaction-only 429 | "
+                "no Discord REST audit request",
+                flush=True,
+            )
+        if not ack_ok and not fallback_sent:
+            print("⚠️ /time result could not be posted to Discord; response/audit paths were safely suppressed", flush=True)
+    except Exception as exc:
+        print(f"❌ /time command failed safely: {exc!r}", flush=True)
+        if ack_ok:
+            try:
+                await guarded_interaction_edit_original(
+                    interaction,
+                    "time-interaction-error",
+                    content="⚠️ ไม่สามารถสร้าง/ส่งผลลัพธ์ /time กลับไปใน Discord ได้ในขณะนี้",
+                    embed=None,
+                )
+            except Exception as response_exc:
+                print(f"⚠️ /time error response failed: {response_exc!r}", flush=True)
+
+@bot.command(name="time")
+async def boss_time_prefix(ctx: commands.Context):
+    embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
+    if embed is None:
+        await guarded_context_send(ctx, tts_text_th, context="prefix-time")
+        return
+    await guarded_context_send(ctx, context="prefix-time", embed=embed)
+    asyncio.create_task(speak_in_guild(ctx.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
+    await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
+
+async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Discord autocomplete must finish fast and return <=25 valid choices."""
+    try:
+        needle = (current or "").strip().casefold()
+        names = sorted(
+            {str(x).strip() for x in BOSS_RESPAWN_TIMES.keys() if str(x).strip()},
+            key=str.casefold,
+        )
+        if needle:
+            names = [x for x in names if needle in x.casefold()]
+        result = []
+        for boss in names[:25]:
+            value = boss[:100]
+            label = boss[:100]
+            result.append(app_commands.Choice(name=label, value=value))
+        return result
+    except Exception as e:
+        print(f"⚠️ boss autocomplete error: {e}")
+        return []
+
+@bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
+@app_commands.describe(
+    boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
+    kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน",
+    kill_date="วันที่ (DD/MM/YYYY) (เว้นว่าง = วันนี้)"
+)
+
+@has_allowed_role()
+async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None, kill_date: str = None):
+    # Acknowledge immediately.  /kill intentionally has NO autocomplete callback
+    # so typing the boss name cannot trigger a separate autocomplete interaction.
+    ack_ok = False
+    try:
+        ack_ok = await _safe_interaction_ack(interaction, ephemeral=False)
+    except Exception as e:
+        print(f"❌ /kill initial ACK failed: {e}", flush=True)
+        return
+
+    try:
+        canonical_name = get_boss_canonical_name(boss_name)
+        now = datetime.now(TZ_THAI)
+
+        try:
+            selected_date = parse_date_input(kill_date, now)
+            if kill_time and kill_time.strip():
+                parsed_time = parse_time_input(kill_time, now)
+                boss_died_at = datetime(selected_date.year, selected_date.month, selected_date.day, parsed_time.hour, parsed_time.minute, parsed_time.second, tzinfo=TZ_THAI)
+            else:
+                boss_died_at = datetime(selected_date.year, selected_date.month, selected_date.day, now.hour, now.minute, now.second, tzinfo=TZ_THAI)
+        except ValueError:
+            if ack_ok:
+                await guarded_interaction_followup_send(interaction, "interaction-followup",
+                    "❌ วันที่/เวลาไม่ถูกต้อง! วันที่ใช้รูปแบบ **DD/MM/YYYY** เช่น **29/08/2026** และเวลาใช้ **17:30** หรือ **1730**",
+                    ephemeral=True
+                )
+            else:
+                print("⚠️ /kill input validation failed but interaction ACK was unavailable; followup skipped safely", flush=True)
+            return
+
+        respawn_time = get_boss_respawn_time(canonical_name)
+        next_spawn = boss_died_at + respawn_time
+        is_already_past = next_spawn <= now
+        user_name = interaction.user.display_name
+
+        record = {
+            "spawn_time": next_spawn.isoformat(),
+            "killTimeMs": int(boss_died_at.timestamp() * 1000),
+            "killDate": boss_died_at.strftime("%Y-%m-%d"),
+            "channelId": interaction.channel_id,
+            "notifiedNotice": is_already_past,
+            "notifiedSpawn": is_already_past,
+            "voiceNoticeSent": is_already_past,
+            "voiceSpawnSent": is_already_past,
+            "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
+            "recordedBy": user_name,
+            "recordedByDisplayName": user_name,
+            "recordedByUserId": str(interaction.user.id),
+            "spawnTimeMs": int(next_spawn.timestamp() * 1000),
+            "confirmationRequestId": (uuid.uuid4().hex),
+            "confirmationRequestedAt": datetime.now(TZ_THAI).isoformat(),
+            "confirmationStatus": "pending"
+        }
+
+        with schedule_lock:
+            boss_schedule[canonical_name] = {
+                "spawn_time": next_spawn,
+                "killTimeMs": record["killTimeMs"],
+                "killDate": record["killDate"],
+                "channel_id": interaction.channel_id,
+                "notified_advance": is_already_past,
+                "notified_spawn": is_already_past,
+                "voice_notice_sent": is_already_past,
+                "voice_spawn_sent": is_already_past,
+                "noticeMinutes": record["noticeMinutes"],
+                "recorded_by": user_name,
+                "recordedByUserId": str(interaction.user.id),
+                "confirmationRequestId": record["confirmationRequestId"],
+                "confirmationRequestedAt": record["confirmationRequestedAt"],
+                "confirmationStatus": "pending"
+            }
+
+        cd_text = get_boss_cd_text(canonical_name)
+
+        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
+        embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
+        embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
+        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
+        embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
+        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
+        embed.set_footer(text=f"บันทึกโดย {user_name}")
+
+        # Only send a followup when the initial interaction ACK succeeded.
+        # If Discord rejected the initial callback (for example HTTP 429), a followup
+        # would be invalid and would create avoidable REST traffic during the restriction.
+        if ack_ok:
+            await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+        else:
+            print(
+                f"⚠️ /kill saved locally but initial interaction ACK was unavailable | "
+                f"boss={canonical_name} | followup skipped safely",
+                flush=True,
+            )
+
+        async def persist_kill():
+            try:
+                with schedule_lock:
+                    current = dict(boss_schedule.get(canonical_name, {}))
+                firebase_record = _schedule_record_to_firebase(canonical_name, current)
+                await asyncio.wait_for(
+                    asyncio.to_thread(db.reference(f"boss_schedule/{canonical_name}").set, firebase_record),
+                    timeout=10
+                )
+                print(f"💾 /kill saved: {canonical_name} | kill={boss_died_at.strftime("%d/%m/%Y %H:%M:%S")} | spawn={next_spawn.isoformat()}")
+                try:
+                    with schedule_lock:
+                        confirm_data = dict(boss_schedule.get(canonical_name, {}))
+                    await _voice_confirm_boss_recording(canonical_name, confirm_data)
+                except Exception as confirmation_error:
+                    print(f"⚠️ /kill confirmation failed: {confirmation_error}")
+            except Exception as e:
+                print(f"❌ /kill Firebase save failed: {e}")
+                traceback.print_exc()
+
+            try:
+                await send_audit_log(
+                    interaction.guild,
+                    interaction.user,
+                    "บันทึกเวลาบอสตาย (/kill)",
+                    f"👾 บอส: `{canonical_name}`\n"
+                    f"👤 ผู้บันทึก: `{user_name}`\n"
+                    f"🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}",
+                    discord.Color.red()
+                )
+            except Exception as e:
+                print(f"⚠️ /kill audit log failed: {e}")
+
+        asyncio.create_task(persist_kill())
+
+    except Exception as e:
+        print(f"❌ /kill unexpected error: {e}", flush=True)
+        traceback.print_exc()
+        if ack_ok:
+            try:
+                await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ /kill เกิดข้อผิดพลาด: `{e}`", ephemeral=True)
+            except Exception:
+                pass
+        else:
+            print("⚠️ /kill error response skipped because initial interaction ACK was unavailable", flush=True)
+
+add_group = app_commands.Group(name="add", description="คำสั่งจัดการข้อมูลบอส")
+bot.tree.add_command(add_group)
+
+@add_group.command(name="boss", description="เพิ่มบอสใหม่เข้าไปในระบบ (ไม่สร้าง Timer)")
+@app_commands.describe(
+    name="ชื่อบอสใหม่",
+    hours="คูลดาวน์ชั่วโมง (ใช้กำหนดค่าให้ /kill; ไม่สร้าง Timer)",
+    minutes="คูลดาวน์นาที",
+    seconds="คูลดาวน์วินาที",
+    notice_minutes="แจ้งเตือนล่วงหน้ากี่นาที"
+)
+@has_allowed_role()
+async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, minutes: int = 30, seconds: int = 0, notice_minutes: int = 5):
+    # Initial interaction ACK is time-critical and intentionally isolated from
+    # background REST cooldown.  If Discord rejects it (for example during a
+    # temporary API restriction), we still complete the Firebase write but do
+    # not generate additional followup/audit REST traffic that is known to fail.
+    # Critical initial response: use a direct message rather than defer(), then
+    # update the original response after Firebase persistence. This is still
+    # subject to Discord's interaction callback rate limits; no retry storm is
+    # attempted when Discord returns HTTP 429.
+    ack_ok = await _safe_interaction_send_message(
+        interaction,
+        "⏳ กำลังเพิ่มบอสเข้า Boss Definition...",
+        ephemeral=False,
+    )
+    name = (name or "").strip()
+    if not name:
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ กรุณาระบุชื่อบอส", ephemeral=True)
+        return
+    if any(c in name for c in "/\\.#$[]"):
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ ชื่อบอสมีอักขระที่ Firebase ไม่อนุญาต (/ . # $ [ ])", ephemeral=True)
+        return
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    if total_seconds <= 0 or notice_minutes < 1:
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ CD ต้องมากกว่า 0 วินาที และ notice ต้องอย่างน้อย 1 นาที", ephemeral=True)
+        return
+    canonical = get_boss_canonical_name(name)
+    if canonical in BOSS_RESPAWN_TIMES and canonical in DEFAULT_BOSS_NAMES:
+        await guarded_interaction_followup_send(interaction, "interaction-followup", f"⚠️ บอส **{canonical}** มีอยู่ในระบบแล้ว — /addboss ใช้เพิ่มชื่อบอสใหม่เท่านั้น ไม่สร้าง Timer", ephemeral=True)
+        return
+    if "wadangka" in canonical.lower() or "วาดังการ์" in canonical:
+        notice_minutes = 30
+    BOSS_RESPAWN_TIMES[canonical] = timedelta(seconds=total_seconds)
+    BOSS_CD_TEXT[canonical] = (f"{hours} ชั่วโมง " if hours else "") + (f"{minutes} นาที " if minutes else "") + (f"{seconds} วินาที" if seconds else "")
+    BOSS_CD_TEXT[canonical] = BOSS_CD_TEXT[canonical].strip() or "0 วินาที"
+    ADVANCE_NOTICE_SECONDS[canonical] = notice_minutes * 60
+    ADVANCE_NOTICE_TEXT[canonical] = f"{notice_minutes} นาที"
+    BOSS_PRONUNCIATION.setdefault(canonical, canonical)
+    now_iso = datetime.now(TZ_THAI).isoformat()
+    custom_bosses[canonical] = {
+        "respawnSeconds": int(total_seconds),
+        "noticeMinutes": int(notice_minutes),
+        "cdText": BOSS_CD_TEXT[canonical],
+        "pronunciation": BOSS_PRONUNCIATION[canonical],
+        "createdAt": custom_bosses.get(canonical, {}).get("createdAt", now_iso),
+        "updatedAt": now_iso,
+        "createdBy": str(interaction.user.display_name),
+        "createdById": str(interaction.user.id)
+    }
+    saved_ok = await save_custom_bosses_to_github()
+    if not saved_ok:
+        if ack_ok:
+            await guarded_interaction_edit_original(
+                interaction,
+                "interaction-edit",
+                content="❌ เพิ่มบอสไม่สำเร็จในการบันทึก Firebase — ไม่ถือว่าสำเร็จจนกว่าจะบันทึกได้",
+            )
+        else:
+            print(f"⚠️ /add boss Firebase save failed and interaction ACK unavailable | boss={canonical}", flush=True)
+        return
+    # IMPORTANT: /addboss never writes boss_schedule.
+    success_text = (
+        f"✅ เพิ่มบอส **{canonical}** เข้า Boss Definition สำเร็จ\n"
+        f"⏳ CD สำหรับ /kill: **{BOSS_CD_TEXT[canonical]}**\n"
+        f"🔔 แจ้งเตือนล่วงหน้า: **{notice_minutes} นาที**\n"
+        f"📌 ยังไม่ได้สร้าง Timer — ใช้ `/kill {canonical}` เมื่อบอสตาย"
+    )
+    if ack_ok:
+        await guarded_interaction_edit_original(
+            interaction,
+            "interaction-edit",
+            content=success_text,
+        )
+    else:
+        # Firebase persistence is still completed, but do not send followups/audit
+        # while Discord has rejected the interaction callback.  This avoids creating
+        # another guaranteed-failing REST request during the active restriction.
+        print(
+            f"⚠️ /add boss saved successfully but Discord interaction ACK unavailable | "
+            f"boss={canonical} | followup skipped safely",
+            flush=True,
+        )
+        return
+    await send_audit_log(interaction.guild, interaction.user, "เพิ่มบอส (/addboss)", f"➕ `{canonical}` | CD {BOSS_CD_TEXT[canonical]} | ไม่มีการสร้าง boss_schedule", discord.Color.green())
+
+@bot.tree.command(name="delboss", description="ลบบอสออกจากตารางนับถอยหลัง")
+@app_commands.describe(boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการลบ")
+@app_commands.autocomplete(boss_name=boss_autocomplete)
+@has_allowed_role()
+async def del_boss(interaction: discord.Interaction, boss_name: str):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    matched_key = None
+    with schedule_lock:
+        for k in list(boss_schedule.keys()):
+            if k.lower() == boss_name.lower():
+                matched_key = k
+                break
+        if matched_key: del boss_schedule[matched_key]
+
+    if matched_key:
+        try: await asyncio.to_thread(db.reference(f'boss_schedule/{matched_key}').delete)
+        except Exception: pass
+        await save_boss_data()
+        
+        embed = discord.Embed(title="🗑️ ลบบอสสำเร็จ", description=f"ทำการลบข้อมูลเวลาของบอส **{matched_key}** ออกจากระบบเรียบร้อยแล้ว", color=discord.Color.orange())
+        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+        await send_audit_log(interaction.guild, interaction.user, "ลบบอส (/delboss)", f"🗑️ ลบบอส: `{matched_key}`", discord.Color.orange())
+    else:
+        await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ ไม่พบบอส **{boss_name}** ในตารางนับถอยหลังขณะนี้", ephemeral=True)
+
+@bot.tree.command(name="status", description="เช็กสถานะเวลาบอสทั้งหมดที่กำลังนับถอยหลัง")
+async def boss_status(interaction: discord.Interaction):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    with schedule_lock: schedule_copy = boss_schedule.copy()
+    if not schedule_copy:
+        embed = discord.Embed(title="📜 ตารางเวลาบอส", description="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ\nใช้คำสั่ง `/kill [ชื่อบอส]` เพื่อเริ่มบันทึกเวลาได้เลยครับ", color=discord.Color.blue())
+        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+        return
+
+    now = datetime.now(TZ_THAI)
+    embed = discord.Embed(title="📜 ตารางเวลาบอสเกิดทั้งหมด", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.blue())
+    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
+    
+    display_bosses = sorted_bosses[:20]
+    for boss, data in display_bosses:
+        spawn_time = parse_to_thai_datetime(data["spawn_time"])
+        if not spawn_time: continue
+        time_left_sec = (spawn_time - now).total_seconds()
+        
+        if time_left_sec <= 0: time_left_str = "เกิดแล้ว!"
+        else:
+            m, s = divmod(int(time_left_sec), 60)
+            h, m = divmod(m, 60)
+            if h > 0: time_left_str = f"อีก {h} ชม. {m} นาที"
+            else: time_left_str = f"อีก {m} นาที {s} วินาที"
+
+        notice_text = get_boss_advance_notice_text(boss)
+        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
+        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*", inline=False)
+
+    if len(sorted_bosses) > 20:
+        embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+
+@bot.tree.command(name="setlive", description="ตั้งค่าป้ายไฟนับถอยหลังเวลาบอสเกิด Real-time ในช่องนี้")
+@has_allowed_role()
+async def set_live(interaction: discord.Interaction):
+    await _safe_interaction_ack(interaction, ephemeral=False)
+    now = datetime.now(TZ_THAI)
+    embed = discord.Embed(title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time", description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.teal())
+    embed.add_field(name="📌 สถานะ", value="กำลังเริ่มต้นระบบ...", inline=False)
+    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
+
+    msg = await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+    if msg is None:
+        print("⏭️ /setlive skipped while Discord REST global cooldown is active", flush=True)
+        return
+    global live_message_config, cached_live_message
+    live_message_config = {"channel_id": interaction.channel_id, "message_id": msg.id}
+    cached_live_message = msg
+    await save_live_config()
+    await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", f"📌 ช่อง: <#{interaction.channel_id}>\nMessage ID: `{msg.id}`", discord.Color.teal())
+
+
+# ==========================================
+# ⚔️ BOSS RAID ATTENDANCE SYSTEM (V78)
+# ใช้ Firebase root ใหม่ raid_attendance แยกจาก boss_schedule
+# ==========================================
+
+def is_guild_admin_or_owner(member: discord.Member) -> bool:
+    if not isinstance(member, discord.Member) or not member.guild:
+        return False
+    return bool(member.id == member.guild.owner_id or member.guild_permissions.administrator)
+
+
+def _attendance_config_snapshot(guild_id: int):
+    with schedule_lock:
+        cfg = dict(attendance_config.get(str(guild_id), {}) or {})
+    return cfg
+
+
+def _autoattendance_enabled_for_guild(guild_id: int) -> bool:
+    cfg = _attendance_config_snapshot(guild_id)
+    return parse_bool(cfg.get("autoattendance_enabled"), False)
+
+
+def _safe_firebase_key(value: str, max_len: int = 64) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(value or "").strip()).strip("_")
+    return (cleaned or "item")[:max_len]
+
+
+def _next_library_boss_occurrence(now: datetime, hour: int) -> datetime:
+    candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+LIBRARY_BOSS_SCHEDULE_SPECS = (
+    ("Library Boss 09-00", 9, "09-00"),
+    ("Library Boss 21-00", 21, "21-00"),
+)
+
+
+def _canonical_library_boss_key(key: str) -> str:
+    cleaned = str(key or "").strip()
+    compact = cleaned.replace("_", " ").replace(":", "-")
+    aliases = {
+        "Library Boss 09-00": "Library Boss 09-00",
+        "Library Boss 09-00": "Library Boss 09-00",
+        "Library Boss 09 00": "Library Boss 09-00",
+        "Library_Boss_09-00": "Library Boss 09-00",
+        "Library_Boss_09_00": "Library Boss 09-00",
+        "Library Boss 21-00": "Library Boss 21-00",
+        "Library Boss 21 00": "Library Boss 21-00",
+        "Library_Boss_21-00": "Library Boss 21-00",
+        "Library_Boss_21_00": "Library Boss 21-00",
+    }
+    return aliases.get(cleaned, aliases.get(compact, cleaned))
+
+
+def _library_schedule_alias_keys(canonical_key: str) -> set[str]:
+    if canonical_key == "Library Boss 09-00":
+        return {"Library_Boss_09-00", "Library_Boss_09_00", "Library Boss 09 00"}
+    if canonical_key == "Library Boss 21-00":
+        return {"Library_Boss_21-00", "Library_Boss_21_00", "Library Boss 21 00"}
+    return set()
+
+
+async def ensure_library_boss_schedule_records(*, force_refresh: bool = False) -> None:
+    """Ensure exactly two canonical recurring Library Boss rows exist in boss_schedule.
+
+    V164: recurring Library Boss rotation is now deterministic and independent of the
+    Auto Attendance panel scheduler. When a fixed daily slot has passed, the old
+    schedule record is replaced with the next occurrence for that same slot. The
+    canonical Firebase key is retained, so Dashboard displays one current row per slot.
+    Legacy alias keys are still cleaned up.
+    """
+    global is_updating_from_bot
+
+    now = datetime.now(TZ_THAI)
+    migrated = 0
+    changed = 0
+    aliases_deleted = 0
+    rotations = 0
+
+    try:
+        root = await asyncio.wait_for(asyncio.to_thread(db.reference("boss_schedule").get), timeout=8)
+    except Exception as exc:
+        root = None
+        print(f"⚠️ Library Boss schedule root read failed safely: {exc}", flush=True)
+    if not isinstance(root, dict):
+        root = {}
+
+    try:
+        is_updating_from_bot = True
+
+        for canonical_key, hour, slot_text in LIBRARY_BOSS_SCHEDULE_SPECS:
+            candidates = []
+            for raw_key, raw_data in root.items():
+                if not isinstance(raw_data, dict):
+                    continue
+                if _canonical_library_boss_key(raw_key) == canonical_key:
+                    candidates.append((str(raw_key), dict(raw_data)))
+
+            existing_key = canonical_key if any(k == canonical_key for k, _ in candidates) else (candidates[0][0] if candidates else None)
+            existing = next((d for k, d in candidates if k == existing_key), {}) if existing_key else {}
+            existing_spawn = parse_to_thai_datetime(
+                existing.get("spawn_time") or existing.get("spawnTimeMs")
+            )
+            desired_spawn = _next_library_boss_occurrence(now, hour)
+            expired = not existing_spawn or existing_spawn <= now
+
+            # Preserve a live future occurrence. Once the fixed slot has passed,
+            # rotate immediately to the next calendar day rather than carrying the
+            # expired row forward.
+            target_spawn = desired_spawn if expired else existing_spawn
+            if not target_spawn:
+                continue
+
+            target_ms = int(target_spawn.timestamp() * 1000)
+            existing_ms = int(existing_spawn.timestamp() * 1000) if existing_spawn else None
+            metadata_ok = (
+                parse_bool(existing.get("is_library_boss_schedule"), False)
+                and str(existing.get("library_slot") or "") == slot_text
+                and str(existing.get("recurrence") or "") == "daily"
+            )
+            needs_write = force_refresh or existing_ms != target_ms or not metadata_ok or existing_key != canonical_key
+
+            record = {
+                "spawnTimeMs": target_ms,
+                "spawn_time": target_spawn.isoformat(),
+                "noticeMinutes": 30,
+                "recordedBy": "SYSTEM",
+                "recordedByDisplayName": "SKYNET Auto Schedule",
+                "recordedByUserId": "",
+                "confirmationRequestId": "",
+                "confirmationRequestedAt": None,
+                "confirmationStatus": "",
+                "notifiedNotice": False,
+                "notifiedSpawn": False,
+                "voiceNoticeSent": False,
+                "voiceSpawnSent": False,
+                "suppressBossNotifications": True,
+                "is_library_boss_schedule": True,
+                "library_slot": slot_text,
+                "recurrence": "daily",
+                "autoAttendanceEligible": True,
+            }
+
+            rotated = bool(existing_spawn and existing_ms != target_ms and expired and existing_key == canonical_key)
+
+            if needs_write:
+                try:
+                    if rotated and not force_refresh:
+                        # V164: explicitly remove the expired row before adding the next
+                        # daily occurrence. If the new write fails, restore the exact old
+                        # record so the schedule cannot be lost.
+                        old_record = dict(existing)
+                        await asyncio.wait_for(
+                            asyncio.to_thread(db.reference(f"boss_schedule/{canonical_key}").delete),
+                            timeout=8,
+                        )
+                        changed += 1
+                        print(
+                            f"🗑️ Library Boss old schedule removed | key={canonical_key} | "
+                            f"slot={slot_text} | old_spawn={existing_spawn.isoformat()}",
+                            flush=True,
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(db.reference(f"boss_schedule/{canonical_key}").set, record),
+                                timeout=8,
+                            )
+                        except Exception:
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(db.reference(f"boss_schedule/{canonical_key}").set, old_record),
+                                    timeout=8,
+                                )
+                            except Exception as restore_exc:
+                                print(
+                                    f"🚨 Library Boss old schedule restore failed | key={canonical_key} | {restore_exc}",
+                                    flush=True,
+                                )
+                            raise
+                        rotations += 1
+                        print(
+                            f"➕ Library Boss new daily schedule added | key={canonical_key} | "
+                            f"slot={slot_text} | next_spawn={target_spawn.isoformat()}",
+                            flush=True,
+                        )
+                    else:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(db.reference(f"boss_schedule/{canonical_key}").set, record),
+                            timeout=8,
+                        )
+                        changed += 1
+                        if existing_key and existing_key != canonical_key:
+                            migrated += 1
+                except Exception as exc:
+                    print(f"⚠️ Library Boss canonical schedule write/rotate failed | key={canonical_key} | {exc}", flush=True)
+                    continue
+
+            # Remove all known legacy alias keys so the root has one row per fixed slot.
+            alias_keys = _library_schedule_alias_keys(canonical_key)
+            for alias_key in alias_keys:
+                if alias_key not in root:
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(db.reference(f"boss_schedule/{alias_key}").delete), timeout=8
+                    )
+                    aliases_deleted += 1
+                except Exception as exc:
+                    print(f"⚠️ Library Boss alias cleanup failed | key={alias_key} | {exc}", flush=True)
+
+            with schedule_lock:
+                if existing_key and existing_key != canonical_key:
+                    boss_schedule.pop(existing_key, None)
+                boss_schedule[canonical_key] = _firebase_to_internal(canonical_key, record) or {
+                    "spawn_time": target_spawn,
+                    "noticeMinutes": 30,
+                    "notified_advance": False,
+                    "notified_spawn": False,
+                    "voice_notice_sent": False,
+                    "voice_spawn_sent": False,
+                    "recorded_by": "SYSTEM",
+                    "recordedByDisplayName": "SKYNET Auto Schedule",
+                    "is_library_boss_schedule": True,
+                    "library_slot": slot_text,
+                    "suppressBossNotifications": True,
+                    "autoAttendanceEligible": True,
+                }
+
+        # Remove stale alias keys from the local in-memory cache too.
+        with schedule_lock:
+            for raw_key in list(boss_schedule.keys()):
+                canonical = _canonical_library_boss_key(raw_key)
+                if canonical in {spec[0] for spec in LIBRARY_BOSS_SCHEDULE_SPECS} and raw_key != canonical:
+                    boss_schedule.pop(raw_key, None)
+    finally:
+        is_updating_from_bot = False
+
+    if changed or migrated or aliases_deleted or rotations:
+        print(
+            f"📚 Library Boss schedule ensured | changed={changed} | rotations={rotations} | "
+            f"migrated={migrated} | aliases_deleted={aliases_deleted} | slots=09:00,21:00",
+            flush=True,
+        )
+
+
+async def save_attendance_config():
+    with schedule_lock:
+        data = {str(k): dict(v) for k, v in (attendance_config or {}).items()}
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("attendance_config").set, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก attendance_config ลง Firebase ไม่สำเร็จ: {e}", flush=True)
+    await asyncio.to_thread(set_db_value, "attendance_config", data)
+    await asyncio.to_thread(save_json_local, "attendance_config.json", data)
+
+
+async def load_attendance_config():
+    global attendance_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("attendance_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด attendance_config จาก Firebase ไม่สำเร็จ: {e}", flush=True)
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("attendance_config", None)
+    normalized = {}
+    if isinstance(data, dict):
+        for guild_id, cfg in data.items():
+            if not isinstance(cfg, dict):
+                continue
+            cid = cfg.get("summary_channel_id")
+            try:
+                cid = int(cid)
+            except (TypeError, ValueError):
+                continue
+            try:
+                gid = int(cfg.get("guild_id", guild_id))
+            except (TypeError, ValueError):
+                continue
+            normalized[str(gid)] = {
+                "guild_id": gid,
+                "summary_channel_id": cid,
+                "channel_name": str(cfg.get("channel_name") or ""),
+                "updated_by": str(cfg.get("updated_by") or ""),
+                "updated_at": str(cfg.get("updated_at") or ""),
+                # Auto Attendance is opt-in. Missing legacy values remain OFF.
+                "autoattendance_enabled": parse_bool(cfg.get("autoattendance_enabled"), False),
+                "autoattendance_updated_by": str(cfg.get("autoattendance_updated_by") or ""),
+                "autoattendance_updated_at": str(cfg.get("autoattendance_updated_at") or ""),
+            }
+    attendance_config = normalized
+    print(f"✅ load_attendance_config สำเร็จ ({len(attendance_config)} server(s))", flush=True)
+    return attendance_config
+
+
+def _attendance_now_iso():
+    return datetime.now(TZ_THAI).isoformat()
+
+
+def _attendance_normalize_time_text(time_text: str) -> str | None:
+    """Accept Attendance time as HH:MM or HHMM and return canonical HH:MM."""
+    raw = str(time_text or "").strip().replace(".", ":")
+    if not raw:
+        return None
+    try:
+        if re.fullmatch(r"\d{1,2}:\d{2}", raw):
+            hour_text, minute_text = raw.split(":", 1)
+        elif re.fullmatch(r"\d{3,4}", raw):
+            hour_text, minute_text = (raw[0], raw[1:]) if len(raw) == 3 else (raw[:2], raw[2:])
+        else:
+            return None
+        hour, minute = int(hour_text), int(minute_text)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return f"{hour:02d}:{minute:02d}"
+    except (TypeError, ValueError):
+        return None
+
+def _attendance_parse_local(date_text: str, time_text: str) -> datetime | None:
+    normalized = _attendance_normalize_time_text(time_text)
+    if not normalized:
+        return None
+    try:
+        dt = datetime.strptime(f"{date_text} {normalized}", "%d/%m/%Y %H:%M")
+        return dt.replace(tzinfo=TZ_THAI)
+    except Exception:
+        return None
+
+
+def _attendance_activity_path(guild_id: int, activity_id: str) -> str:
+    return f"raid_attendance/{int(guild_id)}/{activity_id}"
+
+
+def _attendance_member_display(member: discord.Member | discord.User) -> str:
+    return clean_display_name(getattr(member, "display_name", getattr(member, "name", "member")))
+
+
+def _attendance_language_blocks(activity: dict, participants: list[dict], *, closed=False):
+    enabled = get_enabled_discord_notification_languages()
+    if not enabled:
+        enabled = ["th"]
+    count = sum(1 for p in participants if str(p.get("status")) == "checked_in")
+    cancelled = sum(1 for p in participants if str(p.get("status")) == "cancelled")
+    boss = str(activity.get("boss_name") or "Boss")
+    attack = str(activity.get("attack_time") or "-")
+    date_text = str(activity.get("activity_date") or "-")
+    status = str(activity.get("status") or "scheduled")
+    title_by_lang = {
+        "th": "🔒 BOSS RAID ปิดเช็คชื่อ" if closed else "⚔️ BOSS RAID ATTENDANCE",
+        "en": "🔒 BOSS RAID CHECK-IN CLOSED" if closed else "⚔️ BOSS RAID ATTENDANCE",
+        "ko": "🔒 보스 레이드 출석 마감" if closed else "⚔️ 보스 레이드 출석",
+    }
+    line_by_lang = {
+        "th": f"⚔️ บอส: **{boss}**\n📅 วันที่: **{date_text}**\n⏰ เวลาโจมตี: **{attack} น.**\n👥 ผู้เข้าร่วม: **{count} คน**",
+        "en": f"⚔️ Boss: **{boss}**\n📅 Date: **{date_text}**\n⏰ Attack Time: **{attack}**\n👥 Checked in: **{count}**",
+        "ko": f"⚔️ 보스: **{boss}**\n📅 날짜: **{date_text}**\n⏰ 공격 시간: **{attack}**\n👥 참석: **{count}명**",
+    }
+    return enabled, title_by_lang, line_by_lang, count, cancelled, status
+
+
+def build_raid_activity_embed(activity: dict, participants: list[dict], *, closed=False):
+    enabled, title_map, body_map, count, cancelled, status = _attendance_language_blocks(activity, participants, closed=closed)
+    primary = enabled[0]
+    embed = discord.Embed(title=title_map[primary], color=discord.Color.red() if closed else discord.Color.blurple(), timestamp=datetime.now(TZ_THAI))
+    for lang in enabled:
+        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+        embed.add_field(name=prefix, value=body_map[lang], inline=False)
+    if not closed:
+        open_text = str(activity.get("checkin_open") or "-")
+        close_text = str(activity.get("checkin_close") or "-")
+        extra = {
+            "th": f"🟢 เปิดเช็คชื่อ: **{open_text} น.**\n🔴 ปิดเช็คชื่อ: **{close_text} น.**",
+            "en": f"🟢 Check-in opens: **{open_text}**\n🔴 Check-in closes: **{close_text}**",
+            "ko": f"🟢 출석 시작: **{open_text}**\n🔴 출석 마감: **{close_text}**",
+        }
+        for lang in enabled:
+            prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+            embed.add_field(name=f"{prefix} • Schedule", value=extra[lang], inline=False)
+    else:
+        extra = {
+            "th": f"✅ เช็กชื่อ: **{count}**\n❌ ยกเลิก: **{cancelled}**",
+            "en": f"✅ Checked in: **{count}**\n❌ Cancelled: **{cancelled}**",
+            "ko": f"✅ 출석: **{count}명**\n❌ 취소: **{cancelled}명**",
+        }
+        for lang in enabled:
+            prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+            embed.add_field(name=f"{prefix} • Result", value=extra[lang], inline=False)
+    embed.set_footer(text=f"Activity ID: {activity.get('activity_id', '-')} | Status: {status}")
+    return embed
+
+
+def build_raid_summary_embed(activity: dict, participants: list[dict]):
+    enabled, title_map, body_map, count, cancelled, _ = _attendance_language_blocks(activity, participants, closed=True)
+    primary = enabled[0]
+    embed = discord.Embed(title=title_map[primary], color=discord.Color.green(), timestamp=datetime.now(TZ_THAI))
+    for lang in enabled:
+        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+        embed.add_field(name=prefix, value=body_map[lang], inline=False)
+    checked = [p for p in participants if p.get("status") == "checked_in"]
+    names = []
+    for idx, p in enumerate(checked, 1):
+        names.append(f"{idx}. {p.get('display_name') or p.get('username') or p.get('user_id')}")
+    name_text = "\n".join(names) if names else "-"
+    if len(name_text) > 3900:
+        name_text = name_text[:3890] + "\n…"
+    labels = {"th": "📋 รายชื่อสมาชิก", "en": "📋 Participants", "ko": "📋 참석자"}
+    embed.add_field(name=labels[primary], value=name_text, inline=False)
+    return embed
+
+
+async def _attendance_fetch_activity(guild_id: int, activity_id: str):
+    try:
+        data = await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(guild_id, activity_id)).get), timeout=8)
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f"⚠️ อ่าน Attendance activity ไม่สำเร็จ: {guild_id}/{activity_id}: {e}", flush=True)
+        return None
+
+
+async def _attendance_fetch_activity_for_close(guild_id: int, activity_id: str, *, attempts: int = 3):
+    """Read one Attendance activity with short Firebase retry for exact-close deadlines.
+
+    A transient TLS/socket failure on /raid_attendance must not consume the one-shot
+    exact-close task. Retries are local Firebase reads only and do not touch Discord.
+    """
+    last_exc = None
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            data = await asyncio.wait_for(
+                asyncio.to_thread(db.reference(_attendance_activity_path(guild_id, activity_id)).get),
+                timeout=8,
+            )
+            return (data if isinstance(data, dict) else None), True
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max(1, int(attempts)):
+                delay = min(2.0, 0.5 * attempt)
+                print(
+                    f"⚠️ Exact-close Firebase read retry | guild_id={guild_id} | activity={activity_id} | "
+                    f"attempt={attempt + 1}/{max(1, int(attempts))} | retry_in={delay:.1f}s | error={exc!r}",
+                    flush=True,
+                )
+                await asyncio.sleep(delay)
+    print(
+        f"⚠️ Exact-close Firebase read failed after retries | guild_id={guild_id} | "
+        f"activity={activity_id} | attempts={max(1, int(attempts))} | error={last_exc!r}",
+        flush=True,
+    )
+    return None, False
+
+
+async def _attendance_fetch_participants(guild_id: int, activity_id: str):
+    activity = await _attendance_fetch_activity(guild_id, activity_id)
+    if not activity:
+        return None, []
+    participants = activity.get("participants") if isinstance(activity.get("participants"), dict) else {}
+    rows = []
+    for uid, p in participants.items():
+        if not isinstance(p, dict):
+            continue
+        row = dict(p)
+        row.setdefault("user_id", str(uid))
+        rows.append(row)
+    rows.sort(key=lambda p: str(p.get("checked_in_at") or p.get("updated_at") or ""))
+    return activity, rows
+
+
+async def _attendance_refresh_panel(guild: discord.Guild, activity: dict, participants: list[dict], *, closed=False):
+    try:
+        channel_id = int(activity.get("panel_channel_id") or 0)
+        message_id = int(activity.get("panel_message_id") or 0)
+    except (TypeError, ValueError):
+        return
+    if not channel_id or not message_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        message = channel.get_partial_message(message_id)
+        view = RaidAttendanceView(str(activity.get("activity_id"))) if not closed else RaidAttendanceView(str(activity.get("activity_id")), disabled=True)
+        result = await guarded_message_edit(
+            message,
+            context=f"attendance:panel-edit:{activity.get('activity_id')}",
+            embed=build_raid_activity_embed(activity, participants, closed=closed),
+            view=view,
+            background=True,
+        )
+        if closed and result is not None:
+            target_dt = parse_to_thai_datetime(activity.get("close_at"))
+            closed_dt = parse_to_thai_datetime(activity.get("closed_at")) or datetime.now(TZ_THAI)
+            lag = (closed_dt - target_dt).total_seconds() if target_dt else 0.0
+            print(
+                f"✅ Auto Attendance Discord panel closed | guild={guild.name} | "
+                f"activity={activity.get('activity_id')} | target_close="
+                f"{target_dt.isoformat() if target_dt else '-'} | panel_edit_lag={lag:.3f}s",
+                flush=True,
+            )
+        elif closed and result is None:
+            print(
+                f"⏭️ Auto Attendance Discord panel close deferred by REST guard | guild={guild.name} | "
+                f"activity={activity.get('activity_id')} | target_close={activity.get('close_at') or '-'}",
+                flush=True,
+            )
+    except Exception as e:
+        print(f"⚠️ อัปเดต Attendance panel ไม่สำเร็จ: {e}", flush=True)
+
+
+def _ensure_attendance_exact_close_task(guild_id: int, activity_id: str, close_at) -> None:
+    """Schedule one local exact-close asyncio task immediately.
+
+    The wait is entirely local (asyncio sleep); it does not call Discord. When the
+    deadline arrives, close_raid_activity performs the existing Firebase state
+    update and the existing guarded panel/summary operations.
+
+    This helper intentionally remains a regular function: it performs no awaited
+    I/O and only registers the in-memory asyncio task. Keeping it synchronous
+    prevents an accidental un-awaited coroutine from silently disabling exact
+    Auto Attendance closes.
+    """
+    try:
+        gid = int(guild_id)
+        aid = str(activity_id)
+    except (TypeError, ValueError):
+        return
+    close_dt = parse_to_thai_datetime(close_at)
+    if not close_dt:
+        return
+    key = (gid, aid)
+    existing = _attendance_exact_close_tasks.get(key)
+    if existing is not None and not existing.done():
+        return
+
+    async def _runner():
+        try:
+            while True:
+                remaining = (close_dt - datetime.now(TZ_THAI)).total_seconds()
+                if remaining <= 0:
+                    break
+                # Short chunks keep restart/cancellation responsive without polling Firebase.
+                await asyncio.sleep(min(remaining, 15.0))
+            guild = bot.get_guild(gid)
+            if guild is None:
+                return
+            now_at_fire = datetime.now(TZ_THAI)
+            lag = max(0.0, (now_at_fire - close_dt).total_seconds())
+            print(
+                f"⏰ Attendance exact close due | guild={guild.name} | activity={aid} | "
+                f"scheduled_close={close_dt.strftime('%Y-%m-%d %H:%M:%S')} | close_lag={lag:.3f}s",
+                flush=True,
+            )
+            # Firebase can have a transient TLS/socket failure exactly at the deadline.
+            # V176: the visible Discord panel-close edit uses the time-critical REST lane so
+            # a non-critical/background queue cannot delay the UI transition past spawn time.
+            # Retry only the local Firebase close operation for a short bounded period;
+            # no Discord request is made by this retry loop.
+            retry_deadline = time.monotonic() + 60.0
+            retry_no = 0
+            while True:
+                result = await close_raid_activity(guild, aid, reason="scheduled-close-exact")
+                if result is not None:
+                    break
+                retry_no += 1
+                if time.monotonic() >= retry_deadline:
+                    print(
+                        f"⚠️ Attendance exact close retry window exhausted safely | guild={guild.name} | "
+                        f"activity={aid} | retries={retry_no}",
+                        flush=True,
+                    )
+                    break
+                await asyncio.sleep(2.0)
+                print(
+                    f"🔁 Attendance exact close retry | guild={guild.name} | activity={aid} | retry={retry_no + 1}",
+                    flush=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ Attendance exact close task failed safely | activity={aid} | {exc!r}", flush=True)
+        finally:
+            current = _attendance_exact_close_tasks.get(key)
+            if current is asyncio.current_task():
+                _attendance_exact_close_tasks.pop(key, None)
+
+    _attendance_exact_close_tasks[key] = asyncio.create_task(
+        _runner(), name=f"attendance-exact-close-{gid}-{aid}"
+    )
+
+
+async def close_raid_activity(guild: discord.Guild, activity_id: str, *, reason="scheduled-close"):
+    """Close an Attendance activity without holding the lifecycle lock during Discord REST.
+
+    V169: Firebase status is committed immediately at the scheduled deadline. Panel edit and
+    summary delivery stay on the existing guarded Discord path but no longer block another
+    Attendance activity from being marked closed. This preserves the existing data/permissions
+    behavior while removing multi-minute close drift caused by a slow/guarded Discord request.
+    V171: a transient Firebase read failure is distinguishable from a missing/already-closed
+    activity so the exact-close task can retry safely for a bounded period.
+    """
+    async with attendance_lifecycle_lock:
+        activity, fetch_ok = await _attendance_fetch_activity_for_close(guild.id, activity_id, attempts=3)
+        if not fetch_ok:
+            return None
+        if not activity or str(activity.get("status")) == "closed":
+            return False
+        participants = []
+        raw_participants = activity.get("participants") if isinstance(activity.get("participants"), dict) else {}
+        for uid, p in raw_participants.items():
+            if not isinstance(p, dict):
+                continue
+            row = dict(p)
+            row.setdefault("user_id", str(uid))
+            participants.append(row)
+        participants.sort(key=lambda p: str(p.get("checked_in_at") or p.get("updated_at") or ""))
+        activity["status"] = "closed"
+        activity["closed_at"] = _attendance_now_iso()
+        activity["closed_reason"] = reason
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    db.reference(_attendance_activity_path(guild.id, activity_id)).update,
+                    {
+                        "status": "closed",
+                        "closed_at": activity["closed_at"],
+                        "closed_reason": reason,
+                    },
+                ),
+                timeout=8,
+            )
+        except Exception as e:
+            print(f"⚠️ ปิด Attendance activity ไม่สำเร็จ: {guild.id}/{activity_id}: {e}", flush=True)
+            return False
+
+    # IMPORTANT: Do not hold attendance_lifecycle_lock while waiting on Discord REST.
+    # A slow panel edit/summary send must not delay the next exact close deadline.
+    await _attendance_refresh_panel(guild, activity, participants, closed=True)
+    cfg = _attendance_config_snapshot(guild.id)
+    summary_id = cfg.get("summary_channel_id")
+    channel = guild.get_channel(int(summary_id)) if summary_id else None
+    if isinstance(channel, discord.TextChannel):
+        try:
+            embed = build_raid_summary_embed(activity, participants)
+            await guarded_channel_send(channel, context=f"attendance:summary:{activity_id}", embed=embed, background=True)
+        except Exception as e:
+            print(f"⚠️ ส่ง Attendance summary ไม่สำเร็จ: {guild.name}: {e}", flush=True)
+    checked_count = sum(1 for p in participants if p.get("status") == "checked_in")
+    print(
+        f"📊 Attendance activity closed | guild={guild.name} | activity={activity_id} | "
+        f"participants={checked_count} | scheduled_close={str(activity.get('close_at') or '-') } | "
+        f"closed_at={activity.get('closed_at')}",
+        flush=True,
+    )
+    return True
+
+
+class RaidAttendanceCreateModal(discord.ui.Modal, title="⚔️ Create Boss Raid Activity"):
+    def __init__(self, boss_name: str):
+        super().__init__(timeout=300)
+        self.boss_name = discord.ui.TextInput(label="Boss", default=boss_name[:100], max_length=100, required=True)
+        self.activity_date = discord.ui.TextInput(label="วันที่ (DD/MM/YYYY)", placeholder="09/09/2026", max_length=10, required=True)
+        self.attack_time = discord.ui.TextInput(label="เวลาโจมตี (HH:MM หรือ HHMM)", placeholder="20:30 หรือ 2030", max_length=5, required=True)
+        self.checkin_open = discord.ui.TextInput(label="เปิดเช็คชื่อ (HH:MM หรือ HHMM)", placeholder="20:15 หรือ 2015", max_length=5, required=True)
+        self.checkin_close = discord.ui.TextInput(label="ปิดเช็คชื่อ (HH:MM หรือ HHMM)", placeholder="20:45 หรือ 2045", max_length=5, required=True)
+        for item in (self.boss_name, self.activity_date, self.attack_time, self.checkin_open, self.checkin_close):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
+            await interaction.response.send_message("❌ เฉพาะ Admin หรือ Server Owner เท่านั้นที่สร้างกิจกรรมได้", ephemeral=True)
+            return
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        date_text = str(self.activity_date.value).strip()
+        attack_input = str(self.attack_time.value).strip()
+        open_input = str(self.checkin_open.value).strip()
+        close_input = str(self.checkin_close.value).strip()
+        attack_text = _attendance_normalize_time_text(attack_input)
+        open_text = _attendance_normalize_time_text(open_input)
+        close_text = _attendance_normalize_time_text(close_input)
+        attack_dt = _attendance_parse_local(date_text, attack_input)
+        open_dt = _attendance_parse_local(date_text, open_input)
+        close_dt = _attendance_parse_local(date_text, close_input)
+        if not attack_dt or not open_dt or not close_dt or not attack_text or not open_text or not close_text or not (open_dt <= attack_dt <= close_dt):
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ วันที่/เวลาไม่ถูกต้อง หรือช่วงเปิด-ปิดไม่ครอบคลุมเวลาโจมตี", ephemeral=True)
+            return
+        cfg = _attendance_config_snapshot(interaction.guild.id)
+        summary_id = cfg.get("summary_channel_id")
+        summary_channel = interaction.guild.get_channel(int(summary_id)) if summary_id else None
+        if not isinstance(summary_channel, discord.TextChannel):
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ ยังไม่ได้ตั้งห้องสรุป Attendance ใช้ `/set-notification` → `ตั้งห้องสรุป Attendance` ก่อน", ephemeral=True)
+            return
+        activity_id = f"{attack_dt.strftime('%Y%m%d')}_{re.sub(r'[^A-Za-z0-9]+', '_', str(self.boss_name.value).strip())[:32]}_{attack_dt.strftime('%H%M')}_{uuid.uuid4().hex[:6]}"
+        activity = {
+            "activity_id": activity_id,
+            "guild_id": interaction.guild.id,
+            "boss_name": str(self.boss_name.value).strip(),
+            "activity_date": date_text,
+            "attack_time": attack_text,
+            "checkin_open": open_text,
+            "checkin_close": close_text,
+            "open_at": open_dt.isoformat(),
+            "close_at": close_dt.isoformat(),
+            "attack_at": attack_dt.isoformat(),
+            "status": "scheduled" if datetime.now(TZ_THAI) < open_dt else "open",
+            "created_by": str(interaction.user.id),
+            "created_by_name": _attendance_member_display(interaction.user),
+            "created_at": _attendance_now_iso(),
+            "panel_channel_id": interaction.channel_id,
+            "panel_message_id": None,
+            "summary_channel_id": int(summary_channel.id),
+            "participants": {},
+        }
+        try:
+            await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, activity_id)).set, activity), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ บันทึกกิจกรรมลง Firebase ไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        _ensure_attendance_exact_close_task(interaction.guild.id, activity_id, activity.get("close_at"))
+        view = RaidAttendanceView(activity_id)
+        message = await guarded_interaction_followup_send(interaction, "interaction-followup", embed=build_raid_activity_embed(activity, [], closed=False), view=view, ephemeral=False)
+        if message is not None:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, activity_id)).update, {"panel_message_id": int(message.id)}), timeout=8)
+                activity["panel_message_id"] = int(message.id)
+                bot.add_view(view, message_id=int(message.id))
+            except Exception as e:
+                print(f"⚠️ บันทึก panel message ID ไม่สำเร็จ: {e}", flush=True)
+        else:
+            print(f"⚠️ สร้าง Attendance panel message ไม่สำเร็จ: {activity_id}", flush=True)
+        await send_audit_log(interaction.guild, interaction.user, "สร้าง Boss Raid Attendance", f"Boss: `{activity['boss_name']}` | วันที่: `{date_text}` | เปิด: `{open_text}` | ปิด: `{close_text}` | Activity: `{activity_id}`", discord.Color.blurple())
+        print(f"⚔️ Attendance activity created | guild={interaction.guild.name} | activity={activity_id}", flush=True)
+
+
+class RaidAttendanceView(discord.ui.View):
+    def __init__(self, activity_id: str, disabled: bool = False):
+        super().__init__(timeout=None)
+        self.activity_id = str(activity_id)
+        self.add_item(self._button("check", "✅ เช็กชื่อ", discord.ButtonStyle.success, disabled))
+        self.add_item(self._button("cancel", "❌ ยกเลิกเช็กชื่อ", discord.ButtonStyle.danger, disabled))
+        self.add_item(self._button("list", "📋 รายชื่อ", discord.ButtonStyle.secondary, False))
+
+    def _button(self, action: str, label: str, style, disabled: bool):
+        button = discord.ui.Button(label=label, style=style, custom_id=f"raid_attendance:{action}:{self.activity_id}", disabled=disabled)
+        if action == "check":
+            button.callback = self._check
+        elif action == "cancel":
+            button.callback = self._cancel
+        else:
+            button.callback = self._list
+        return button
+
+    async def _load(self, interaction: discord.Interaction):
+        activity, participants = await _attendance_fetch_participants(interaction.guild.id, self.activity_id)
+        return activity, participants
+
+    async def _check(self, interaction: discord.Interaction):
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return
+        activity, participants = await self._load(interaction)
+        if not activity:
+            await guarded_interaction_followup_send(interaction, "attendance-check", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
+            return
+        now = datetime.now(TZ_THAI)
+        open_dt = parse_to_thai_datetime(activity.get("open_at"))
+        close_dt = parse_to_thai_datetime(activity.get("close_at"))
+        if str(activity.get("status")) == "closed" or not open_dt or not close_dt or not (open_dt <= now <= close_dt):
+            await guarded_interaction_followup_send(interaction, "attendance-check", "🔒 กิจกรรมนี้ยังไม่เปิดเช็คชื่อหรือปิดเช็คชื่อแล้ว", ephemeral=True)
+            return
+        ref_path = f"{_attendance_activity_path(interaction.guild.id, self.activity_id)}/participants/{interaction.user.id}"
+        attendance_roles = _attendance_relevant_roles_from_member(interaction.user)
+        record = {
+            "user_id": str(interaction.user.id),
+            "username": str(interaction.user.name),
+            "display_name": _attendance_member_display(interaction.user),
+            "checked_in_at": _attendance_now_iso(),
+            "status": "checked_in",
+            "roles": attendance_roles,
+            "role": ", ".join(attendance_roles),
+        }
+        transaction_result = None
+        try:
+            def _tx(current_value):
+                if isinstance(current_value, dict) and current_value.get("status") == "checked_in":
+                    return current_value
+                return record
+            transaction_result = await asyncio.wait_for(
+                asyncio.to_thread(db.reference(ref_path).transaction, _tx), timeout=8
+            )
+            if isinstance(transaction_result, dict) and transaction_result.get("status") == "checked_in" and str(transaction_result.get("checked_in_at")) != str(record.get("checked_in_at")):
+                await guarded_interaction_followup_send(interaction, "attendance-check", "⚠️ คุณเช็คชื่อกิจกรรมนี้แล้ว", ephemeral=True)
+                return
+            await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, self.activity_id)).update, {"updated_at": _attendance_now_iso()}), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "attendance-check", f"❌ บันทึกเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        await guarded_interaction_followup_send(interaction, "attendance-check", "✅ เช็คชื่อเข้าร่วมกิจกรรมสำเร็จ", ephemeral=True)
+        activity, participants = await self._load(interaction)
+        await _attendance_refresh_panel(interaction.guild, activity, participants, closed=False)
+
+    async def _cancel(self, interaction: discord.Interaction):
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return
+        activity, participants = await self._load(interaction)
+        if not activity:
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
+            return
+        now = datetime.now(TZ_THAI)
+        open_dt = parse_to_thai_datetime(activity.get("open_at"))
+        close_dt = parse_to_thai_datetime(activity.get("close_at"))
+        if str(activity.get("status")) == "closed" or not open_dt or not close_dt or not (open_dt <= now <= close_dt):
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", "🔒 กิจกรรมนี้ปิดเช็คชื่อแล้ว", ephemeral=True)
+            return
+        ref_path = f"{_attendance_activity_path(interaction.guild.id, self.activity_id)}/participants/{interaction.user.id}"
+        try:
+            current = await asyncio.wait_for(asyncio.to_thread(db.reference(ref_path).get), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", f"❌ อ่านข้อมูลเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        if not isinstance(current, dict) or current.get("status") != "checked_in":
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", "ℹ️ คุณยังไม่ได้เช็คชื่อกิจกรรมนี้", ephemeral=True)
+            return
+        current.update({"status": "cancelled", "cancelled_at": _attendance_now_iso()})
+        try:
+            await asyncio.wait_for(asyncio.to_thread(db.reference(ref_path).update, current), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", f"❌ ยกเลิกเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        await guarded_interaction_followup_send(interaction, "attendance-cancel", "❌ ยกเลิกเช็คชื่อเรียบร้อยแล้ว", ephemeral=True)
+        activity, participants = await self._load(interaction)
+        await _attendance_refresh_panel(interaction.guild, activity, participants, closed=False)
+
+    async def _list(self, interaction: discord.Interaction):
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        if not interaction.guild:
+            return
+        activity, participants = await self._load(interaction)
+        if not activity:
+            await guarded_interaction_followup_send(interaction, "attendance-list", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
+            return
+        checked = [p for p in participants if p.get("status") == "checked_in"]
+        names = [f"{idx}. {p.get('display_name') or p.get('username') or p.get('user_id')}" for idx, p in enumerate(checked, 1)]
+        if len(names) > 50:
+            names = names[:50] + [f"… และอีก {len(checked)-50} คน"]
+        await guarded_interaction_followup_send(interaction, "attendance-list", embed=discord.Embed(title="📋 รายชื่อผู้เข้าร่วม", description="\n".join(names) if names else "-", color=discord.Color.blurple()), ephemeral=True)
+
+
+async def restore_raid_attendance_views():
+    total = 0
+    for guild in list(bot.guilds):
+        try:
+            data = await asyncio.wait_for(asyncio.to_thread(db.reference(f"raid_attendance/{guild.id}").get), timeout=8)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for activity_id, activity in data.items():
+            if not isinstance(activity, dict):
+                continue
+            if str(activity.get("status")) == "closed":
+                continue
+            try:
+                msg_id = int(activity.get("panel_message_id") or 0)
+            except (TypeError, ValueError):
+                msg_id = 0
+            # V169: restore the exact close timer for active activities after restart.
+            _ensure_attendance_exact_close_task(guild.id, str(activity_id), activity.get("close_at"))
+            view = RaidAttendanceView(str(activity_id))
+            try:
+                if msg_id:
+                    bot.add_view(view, message_id=msg_id)
+                else:
+                    bot.add_view(view)
+                total += 1
+            except Exception as e:
+                print(f"⚠️ restore Attendance View failed: {guild.id}/{activity_id}: {e}", flush=True)
+    print(f"✅ restore_raid_attendance_views สำเร็จ ({total} active view(s))", flush=True)
+
+
+def _autoattendance_panel_already_completed(guild_id: int, activity_id: str) -> bool:
+    key = (int(guild_id), str(activity_id))
+    with pending_auto_attendance_panel_lock:
+        return key in auto_attendance_panel_completed_keys
+
+
+def _queue_autoattendance_panel(guild: discord.Guild, activity: dict, summary_channel, embed, view, *, content=None) -> bool:
+    try:
+        activity_id = str(activity.get("activity_id") or "").strip()
+        channel_id = int(summary_channel.id)
+    except Exception:
+        return False
+    if not activity_id or not channel_id:
+        return False
+    key = (int(guild.id), activity_id)
+    with pending_auto_attendance_panel_lock:
+        if key in auto_attendance_panel_completed_keys:
+            print(
+                f"⏭️ Auto Attendance duplicate panel suppressed | guild={guild.name} | activity={activity_id} | reason=already-sent-current-runtime",
+                flush=True,
+            )
+            return False
+    if content is None:
+        try:
+            content = get_notification_mentions(guild)
+        except Exception:
+            content = None
+    with pending_auto_attendance_panel_lock:
+        if key in pending_auto_attendance_panel_keys:
+            return True
+        if len(pending_auto_attendance_panels) >= PENDING_AUTO_ATTENDANCE_PANEL_MAX:
+            print(
+                f"⚠️ Auto Attendance panel queue full; drop newest | guild={guild.name} | activity={activity_id}",
+                flush=True,
+            )
+            return False
+        pending_auto_attendance_panel_keys.add(key)
+        pending_auto_attendance_panels.append({
+            "key": key,
+            "guild_id": int(guild.id),
+            "activity_id": activity_id,
+            "channel_id": channel_id,
+            "embed": embed,
+            "view": view,
+            "content": content,
+            "close_at": str(activity.get("close_at") or ""),
+            "queued_at": _attendance_now_iso(),
+        })
+    try:
+        mention_count = str(content or "").count("<@&")
+    except Exception:
+        mention_count = 0
+    print(
+        f"⏸️ Auto Attendance panel queued | guild={guild.name} | activity={activity_id} | "
+        f"role_mentions={mention_count} | priority=time-critical",
+        flush=True,
+    )
+    return True
+
+
+def _autoattendance_background_rest_ready_now() -> bool:
+    """Return True only when a background REST attempt could be made without waiting.
+
+    This is a local gate only; it never sends a Discord request. It prevents repeated
+    Firebase activity reads while Discord is already known to be blocking background REST.
+    """
+    if SKYNET_RUNTIME_ROLE == "web":
+        return False
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        temp_restriction = bool(discord_block_temp_restriction)
+        next_probe_mono = float(discord_block_next_probe_mono)
+    if temp_restriction and next_probe_mono > now_mono:
+        return False
+    if discord_background_rest_startup_hold:
+        return False
+    if discord_background_rest_quarantined and _background_rest_remaining() > 0:
+        return False
+    if _background_rest_remaining() > 0:
+        return False
+    if _discord_rest_rate_limit_remaining() > 0:
+        return False
+    return True
+
+
+async def _persist_autoattendance_panel_state(guild_id: int, activity_id: str, values: dict) -> None:
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                db.reference(_attendance_activity_path(int(guild_id), str(activity_id))).update,
+                values,
+            ),
+            timeout=8,
+        )
+    except Exception as exc:
+        print(
+            f"⚠️ Auto Attendance panel state persist failed | activity={activity_id} | {exc}",
+            flush=True,
+        )
+
+
+async def _expire_stale_autoattendance_panels(guild_id: int, activities: dict, now: datetime) -> int:
+    """Terminalize old auto-generated panel deliveries without deleting attendance history.
+
+    V166: Dashboard boss deletion affects boss_schedule only. Auto Attendance history lives
+    under raid_attendance, so old pending panel records can survive a dashboard clear.
+    Records that are already closed beyond the short Discord delivery window are no longer
+    deliverable and must be marked terminal (expired) so startup restoration does not keep
+    inspecting the same stale activity forever. Participant/history data is preserved.
+    """
+    if not isinstance(activities, dict):
+        return 0
+    updates = {}
+    expired_count = 0
+    for activity_id, activity in activities.items():
+        if not isinstance(activity, dict):
+            continue
+        if not bool(activity.get("auto_generated")) and str(activity.get("source") or "").strip().lower() != "autoattendance":
+            continue
+        if activity.get("panel_message_id"):
+            continue
+        delivery_status = str(activity.get("panel_delivery_status") or "pending").strip().lower()
+        if delivery_status in {"blocked_429", "missed_window", "expired", "sent"}:
+            continue
+        close_dt = parse_to_thai_datetime(activity.get("close_at"))
+        if not close_dt:
+            continue
+        age_after_close = (now - close_dt).total_seconds()
+        if age_after_close <= AUTO_ATTENDANCE_PANEL_LATE_DELIVERY_SECONDS:
+            continue
+        aid = str(activity_id)
+        prefix = f"{int(guild_id)}/{aid}"
+        updates[f"{prefix}/panel_delivery_status"] = "expired"
+        updates[f"{prefix}/panel_delivery_retry_suppressed"] = True
+        updates[f"{prefix}/panel_delivery_expired_at"] = _attendance_now_iso()
+        updates[f"{prefix}/panel_delivery_expired_reason"] = "stale_after_close"
+        # Keep the attendance record as history, but ensure a past auto activity cannot
+        # be restored as an active/open panel after restart.
+        if str(activity.get("status") or "").strip().lower() != "closed":
+            updates[f"{prefix}/status"] = "closed"
+            updates[f"{prefix}/closed_at"] = str(activity.get("closed_at") or close_dt.isoformat())
+            updates[f"{prefix}/closed_reason"] = "autoattendance-stale-cleanup"
+        expired_count += 1
+
+    if not updates:
+        return 0
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("raid_attendance").update, updates),
+            timeout=10,
+        )
+    except Exception as exc:
+        print(
+            f"⚠️ Auto Attendance stale cleanup persist failed | guild={guild_id} | "
+            f"count={expired_count} | {exc}",
+            flush=True,
+        )
+        return 0
+    return expired_count
+
+
+async def _restore_pending_autoattendance_panel_delivery() -> int:
+    """Rehydrate missing Auto Attendance Discord panels from persisted Firebase activities."""
+    try:
+        root = await asyncio.wait_for(
+            asyncio.to_thread(db.reference("raid_attendance").get),
+            timeout=8,
+        )
+    except Exception as exc:
+        print(f"⚠️ Auto Attendance pending-panel restore Firebase read failed: {exc}", flush=True)
+        return 0
+    if not isinstance(root, dict):
+        return 0
+
+    now = datetime.now(TZ_THAI)
+    queued = 0
+    scanned = 0
+    for guild_id_raw, activities in root.items():
+        try:
+            guild = bot.get_guild(int(guild_id_raw))
+        except (TypeError, ValueError):
+            guild = None
+        if guild is None or not isinstance(activities, dict):
+            continue
+        if not _autoattendance_enabled_for_guild(guild.id):
+            continue
+        stale_cleaned = await _expire_stale_autoattendance_panels(guild.id, activities, now)
+        if stale_cleaned:
+            print(
+                f"🧹 Auto Attendance stale panel records terminalized | guild={guild.name} | "
+                f"count={stale_cleaned} | delivery_window={AUTO_ATTENDANCE_PANEL_LATE_DELIVERY_SECONDS:.0f}s | "
+                "attendance history preserved",
+                flush=True,
+            )
+            # Use the just-cleaned values for the eligibility checks below without re-reading Firebase.
+            for cleaned_id, cleaned_activity in activities.items():
+                if isinstance(cleaned_activity, dict):
+                    close_dt_clean = parse_to_thai_datetime(cleaned_activity.get("close_at"))
+                    if close_dt_clean and (now - close_dt_clean).total_seconds() > AUTO_ATTENDANCE_PANEL_LATE_DELIVERY_SECONDS:
+                        if str(cleaned_activity.get("panel_delivery_status") or "pending").strip().lower() not in {"blocked_429", "missed_window", "expired", "sent"}:
+                            cleaned_activity["panel_delivery_status"] = "expired"
+                            cleaned_activity["panel_delivery_retry_suppressed"] = True
+        cfg = _attendance_config_snapshot(guild.id)
+        summary_id = cfg.get("summary_channel_id")
+        try:
+            summary_channel = guild.get_channel(int(summary_id)) if summary_id else None
+        except (TypeError, ValueError):
+            summary_channel = None
+        if not isinstance(summary_channel, discord.TextChannel):
+            continue
+
+        for activity_id, activity in activities.items():
+            if not isinstance(activity, dict):
+                continue
+            if not bool(activity.get("auto_generated")) and str(activity.get("source") or "").strip().lower() != "autoattendance":
+                continue
+            if activity.get("panel_message_id"):
+                continue
+            delivery_status = str(activity.get("panel_delivery_status") or "pending").strip().lower()
+            # V145: a Discord 429 for one Auto Attendance event is terminal for that
+            # event. Never resurrect it after a restart; the next Boss event will
+            # create its own fresh panel request instead.
+            if delivery_status in {"blocked_429", "missed_window", "expired", "sent"}:
+                continue
+            close_dt = parse_to_thai_datetime(activity.get("close_at"))
+            if close_dt:
+                age_after_close = (now - close_dt).total_seconds()
+                # Allow only a very short recovery grace after spawn. Anything older
+                # than this is stale and must not be sent after a long API restriction.
+                if age_after_close > AUTO_ATTENDANCE_PANEL_LATE_DELIVERY_SECONDS:
+                    # V166: stale records are terminalized by _expire_stale_autoattendance_panels()
+                    # above. This guard remains for race-safe in-memory snapshots; it is intentionally
+                    # silent so the same old activity does not print a warning on every restart.
+                    continue
+            else:
+                created_dt = parse_to_thai_datetime(activity.get("created_at"))
+                if created_dt and (now - created_dt).total_seconds() > AUTO_ATTENDANCE_PANEL_RESTORE_WINDOW_SECONDS:
+                    print(
+                        f"⏭️ Auto Attendance stale panel not restored | activity={activity_id} | "
+                        f"restore_age={(now - created_dt).total_seconds():.0f}s | "
+                        f"restore_window={AUTO_ATTENDANCE_PANEL_RESTORE_WINDOW_SECONDS:.0f}s",
+                        flush=True,
+                    )
+                    continue
+            scanned += 1
+            embed_closed = bool(close_dt and now >= close_dt) or str(activity.get("status") or "").lower() == "closed"
+            participants = []
+            if isinstance(activity.get("participants"), dict):
+                for uid, participant in activity.get("participants", {}).items():
+                    if not isinstance(participant, dict):
+                        continue
+                    row = dict(participant)
+                    row.setdefault("user_id", str(uid))
+                    participants.append(row)
+            embed = build_raid_activity_embed(activity, participants, closed=embed_closed)
+            view = RaidAttendanceView(str(activity_id), disabled=embed_closed)
+            if _queue_autoattendance_panel(
+                guild,
+                dict(activity, activity_id=str(activity_id)),
+                summary_channel,
+                embed,
+                view,
+                content=get_notification_mentions(guild) or None,
+            ):
+                queued += 1
+                await _persist_autoattendance_panel_state(
+                    guild.id,
+                    str(activity_id),
+                    {
+                        "panel_delivery_status": "queued",
+                        "panel_delivery_restored_at": _attendance_now_iso(),
+                    },
+                )
+
+    if scanned or queued:
+        print(
+            f"🔁 Auto Attendance pending-panel restore | scanned={scanned} | queued={queued}",
+            flush=True,
+        )
+    return queued
+
+
+async def _flush_one_autoattendance_panel() -> bool:
+    with pending_auto_attendance_panel_lock:
+        if not pending_auto_attendance_panels:
+            return False
+        # V145: process the most time-critical panel first. This avoids a restored
+        # backlog delaying a current T-30 activity behind older queued entries.
+        def _panel_sort_key(row):
+            close_value = parse_to_thai_datetime(row.get("close_at"))
+            if close_value is None:
+                return (1, float("inf"))
+            return (0, close_value.timestamp())
+        ordered = sorted(list(pending_auto_attendance_panels), key=_panel_sort_key)
+        pending_auto_attendance_panels.clear()
+        pending_auto_attendance_panels.extend(ordered)
+        item = pending_auto_attendance_panels[0]
+        item_key = item.get("key")
+        if item_key in pending_auto_attendance_panel_inflight_keys:
+            return False
+        pending_auto_attendance_panel_inflight_keys.add(item_key)
+
+    try:
+        close_dt = parse_to_thai_datetime(item.get("close_at"))
+        now = datetime.now(TZ_THAI)
+        if close_dt and now >= close_dt + timedelta(seconds=AUTO_ATTENDANCE_PANEL_LATE_DELIVERY_SECONDS):
+            # V145: after the short late-delivery grace, never create a Discord message
+            # from this old activity. The Firebase attendance activity/history remains intact.
+            with pending_auto_attendance_panel_lock:
+                if pending_auto_attendance_panels and pending_auto_attendance_panels[0] is item:
+                    pending_auto_attendance_panels.popleft()
+                    pending_auto_attendance_panel_keys.discard(item_key)
+            await _persist_autoattendance_panel_state(
+                int(item["guild_id"]),
+                str(item["activity_id"]),
+                {
+                    "panel_delivery_status": "expired",
+                    "panel_delivery_retry_suppressed": True,
+                    "panel_delivery_expired_at": _attendance_now_iso(),
+                    "panel_delivery_expired_reason": "stale_after_close",
+                },
+            )
+            print(
+                f"⏭️ Auto Attendance panel expired past delivery window | activity={item['activity_id']} | "
+                f"status=expired | close={close_dt.strftime('%Y-%m-%d %H:%M:%S')}",
+                flush=True,
+            )
+            return False
+
+        # If the bot reaches the close moment while REST is still restricted, keep the
+        # item for the remaining short grace period. The next worker pass will either
+        # send it after recovery or mark it missed; it will never probe Discord itself.
+        if close_dt and now >= close_dt and not _autoattendance_background_rest_ready_now():
+            return False
+
+        guild = bot.get_guild(int(item["guild_id"]))
+        channel = guild.get_channel(int(item["channel_id"])) if guild else None
+        if not guild or not isinstance(channel, discord.TextChannel):
+            return False
+
+        embed = item.get("embed")
+        view = item.get("view")
+        content = item.get("content")
+        try:
+            content = get_notification_mentions(guild) or content
+        except Exception:
+            pass
+
+        # Once Discord is available after the close time, rebuild from the persisted activity
+        # so a late delivery is visibly closed and the buttons are disabled. This does not alter
+        # the attendance record; it only makes the eventual Discord panel truthful.
+        if close_dt and now >= close_dt:
+            try:
+                live_activity = await _attendance_fetch_activity(guild.id, str(item["activity_id"]))
+                if isinstance(live_activity, dict):
+                    participants = []
+                    raw_participants = live_activity.get("participants") if isinstance(live_activity.get("participants"), dict) else {}
+                    for uid, participant in raw_participants.items():
+                        if not isinstance(participant, dict):
+                            continue
+                        row = dict(participant)
+                        row.setdefault("user_id", str(uid))
+                        participants.append(row)
+                    embed = build_raid_activity_embed(live_activity, participants, closed=True)
+                    view = RaidAttendanceView(str(item["activity_id"]), disabled=True)
+                    content = get_notification_mentions(guild) or content
+            except Exception as exc:
+                print(
+                    f"⚠️ Auto Attendance late-panel rebuild skipped safely | activity={item['activity_id']} | {exc!r}",
+                    flush=True,
+                )
+
+        try:
+            message = await guarded_channel_send(
+                channel,
+                context=f"attendance:auto-create:{item['activity_id']}",
+                content=content or None,
+                embed=embed,
+                view=view,
+                background=True,
+            )
+        except discord.HTTPException as exc:
+            status = getattr(exc, "status", None)
+            if status == 429:
+                # V145: terminalize the current Auto Attendance event after a Discord
+                # temporary restriction. Do NOT automatically replay the same message
+                # after the long server timer expires; that retry is both stale and a
+                # potential source of another restriction. Future Auto Attendance events
+                # remain eligible because they have different activity IDs.
+                with pending_auto_attendance_panel_lock:
+                    if pending_auto_attendance_panels and pending_auto_attendance_panels[0] is item:
+                        pending_auto_attendance_panels.popleft()
+                    pending_auto_attendance_panel_keys.discard(item_key)
+                retry_after = 0.0
+                try:
+                    retry_after = float(getattr(exc, "retry_after", 0.0) or 0.0)
+                except Exception:
+                    retry_after = 0.0
+                await _persist_autoattendance_panel_state(
+                    guild.id,
+                    str(item["activity_id"]),
+                    {
+                        "panel_delivery_status": "blocked_429",
+                        "panel_delivery_retry_suppressed": True,
+                        "panel_delivery_last_status": 429,
+                        "panel_delivery_last_attempt_at": _attendance_now_iso(),
+                        "panel_delivery_last_error": str(exc)[:500],
+                        "panel_delivery_block_retry_after": retry_after,
+                    },
+                )
+                print(
+                    f"⛔ Auto Attendance panel retry suppressed after Discord 429 | "
+                    f"activity={item['activity_id']} | retry_after={retry_after:.1f}s | "
+                    "no automatic replay for this event",
+                    flush=True,
+                )
+                return False
+
+            await _persist_autoattendance_panel_state(
+                guild.id,
+                str(item["activity_id"]),
+                {
+                    "panel_delivery_status": "http_error",
+                    "panel_delivery_last_status": status,
+                    "panel_delivery_last_attempt_at": _attendance_now_iso(),
+                    "panel_delivery_last_error": str(exc)[:500],
+                },
+            )
+            print(
+                f"⏸️ Auto Attendance panel held after Discord HTTP error | activity={item['activity_id']} | status={status}",
+                flush=True,
+            )
+            return False
+        except Exception as exc:
+            await _persist_autoattendance_panel_state(
+                guild.id,
+                str(item["activity_id"]),
+                {
+                    "panel_delivery_status": "error",
+                    "panel_delivery_last_attempt_at": _attendance_now_iso(),
+                    "panel_delivery_last_error": repr(exc)[:500],
+                },
+            )
+            print(f"⚠️ Auto Attendance panel send failed safely | activity={item['activity_id']} | {exc!r}", flush=True)
+            return False
+
+        if message is None:
+            return False
+
+        activity_id = str(item["activity_id"])
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    db.reference(_attendance_activity_path(guild.id, activity_id)).update,
+                    {
+                        "panel_message_id": int(message.id),
+                        "panel_channel_id": int(channel.id),
+                        "panel_delivery_status": "sent",
+                        "panel_delivery_sent_at": _attendance_now_iso(),
+                        "panel_delivery_last_status": 200,
+                    },
+                ),
+                timeout=8,
+            )
+        except Exception as exc:
+            print(f"⚠️ Auto Attendance panel metadata save failed | activity={activity_id} | {exc}", flush=True)
+            return False
+
+        with pending_auto_attendance_panel_lock:
+            # V172: mark the activity as completed in-memory before releasing the
+            # queue key. The lifecycle loop may still be holding a stale Firebase
+            # snapshot with panel_message_id=None; this prevents it from creating a
+            # second Discord message for the same deterministic activity ID.
+            auto_attendance_panel_completed_keys.add(item_key)
+            auto_attendance_panel_completed_order.append(item_key)
+            while len(auto_attendance_panel_completed_keys) > AUTO_ATTENDANCE_PANEL_COMPLETED_MAX:
+                try:
+                    oldest_key = auto_attendance_panel_completed_order.popleft()
+                except IndexError:
+                    break
+                auto_attendance_panel_completed_keys.discard(oldest_key)
+            if pending_auto_attendance_panels and pending_auto_attendance_panels[0] is item:
+                pending_auto_attendance_panels.popleft()
+                pending_auto_attendance_panel_keys.discard(item_key)
+        try:
+            bot.add_view(view, message_id=int(message.id))
+        except Exception as exc:
+            print(f"⚠️ Auto Attendance add_view failed | {activity_id}: {exc}", flush=True)
+        try:
+            mention_count = str(content or "").count("<@&")
+        except Exception:
+            mention_count = 0
+        try:
+            queue_age = max(0.0, time.time() - datetime.fromisoformat(str(item.get("queued_at"))).timestamp())
+        except Exception:
+            queue_age = 0.0
+        print(
+            f"✅ Auto Attendance panel sent | guild={guild.name} | activity={activity_id} | "
+            f"message={message.id} | role_mentions={mention_count} | queue_age={queue_age:.1f}s",
+            flush=True,
+        )
+        return True
+    finally:
+        with pending_auto_attendance_panel_lock:
+            pending_auto_attendance_panel_inflight_keys.discard(item_key)
+
+
+async def flush_pending_autoattendance_panels_once():
+    await _flush_one_autoattendance_panel()
+
+
+async def _autoattendance_find_or_create_for_schedule(
+    guild: discord.Guild,
+    boss_name: str,
+    schedule: dict,
+    activities: dict,
+    now: datetime,
+) -> bool:
+    """Create one Auto Attendance activity for a boss spawn in the 30-minute window.
+
+    Uses a deterministic Firebase activity ID based on the source schedule key and
+    exact spawn timestamp, so repeated lifecycle ticks/restarts remain idempotent.
+    """
+    if not _autoattendance_enabled_for_guild(guild.id):
+        return False
+
+    # User-configured exclusion list: do not create or retry Auto Attendance for these bosses.
+    if is_auto_attendance_excluded_boss(boss_name):
+        return False
+
+    spawn_dt = parse_to_thai_datetime(schedule.get("spawn_time") or schedule.get("spawnTimeMs"))
+    if not spawn_dt:
+        return False
+
+    open_dt = spawn_dt - timedelta(minutes=30)
+    if not (open_dt <= now < spawn_dt):
+        return False
+
+    cfg = _attendance_config_snapshot(guild.id)
+    summary_id = cfg.get("summary_channel_id")
+    try:
+        summary_channel = guild.get_channel(int(summary_id)) if summary_id else None
+    except (TypeError, ValueError):
+        summary_channel = None
+
+    if not isinstance(summary_channel, discord.TextChannel):
+        # Do not manufacture a second channel setting. The existing Attendance system
+        # already requires an Attendance summary channel to be configured.
+        return False
+
+    spawn_ms = int(spawn_dt.timestamp() * 1000)
+    safe_boss = _safe_firebase_key(boss_name, 40)
+    activity_id = f"auto_{spawn_dt.strftime('%Y%m%d_%H%M')}_{safe_boss}_{str(spawn_ms)[-6:]}"
+    activity = activities.get(activity_id) if isinstance(activities, dict) else None
+
+    if not isinstance(activity, dict):
+        date_text = spawn_dt.strftime("%d/%m/%Y")
+        attack_text = spawn_dt.strftime("%H:%M")
+        activity = {
+            "activity_id": activity_id,
+            "guild_id": guild.id,
+            "boss_name": str(boss_name),
+            "activity_date": date_text,
+            "attack_time": attack_text,
+            "checkin_open": open_dt.strftime("%H:%M"),
+            "checkin_close": spawn_dt.strftime("%H:%M"),
+            "open_at": open_dt.isoformat(),
+            "close_at": spawn_dt.isoformat(),
+            "attack_at": spawn_dt.isoformat(),
+            "status": "open" if now >= open_dt else "scheduled",
+            "created_by": str(bot.user.id if bot.user else "SKYNET"),
+            "created_by_name": "SKYNET Auto Attendance",
+            "created_at": _attendance_now_iso(),
+            "panel_channel_id": int(summary_channel.id),
+            "panel_message_id": None,
+            "panel_delivery_status": "pending",
+            "panel_delivery_last_status": None,
+            "panel_delivery_last_attempt_at": None,
+            "summary_channel_id": int(summary_channel.id),
+            "participants": {},
+            "source": "autoattendance",
+            "source_schedule_key": str(boss_name),
+            "source_spawn_ms": spawn_ms,
+            "auto_generated": True,
+        }
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    db.reference(_attendance_activity_path(guild.id, activity_id)).set,
+                    activity,
+                ),
+                timeout=8,
+            )
+        except Exception as e:
+            print(
+                f"⚠️ Auto Attendance Firebase create failed | guild={guild.name} | "
+                f"boss={boss_name} | activity={activity_id} | {e}",
+                flush=True,
+            )
+            return False
+
+        if isinstance(activities, dict):
+            activities[activity_id] = activity
+        print(
+            f"⚔️ AUTO ATTENDANCE CREATED | guild={guild.name} | boss={boss_name} | "
+            f"open={open_dt.strftime('%H:%M')} | close={spawn_dt.strftime('%H:%M')} | activity={activity_id}",
+            flush=True,
+        )
+
+    # V169: every auto-generated activity gets a local exact-close deadline independent
+    # of the Discord REST queue or the generic Attendance lifecycle scan.
+    _ensure_attendance_exact_close_task(guild.id, activity_id, activity.get("close_at"))
+
+    # V145: a 429 on this exact activity is terminal for the Discord panel.
+    # Do not let the 30-second lifecycle loop re-queue the same activity while
+    # Discord's temporary restriction is active or after it has cleared.
+    delivery_status = str(activity.get("panel_delivery_status") or "pending").strip().lower()
+    if bool(activity.get("panel_delivery_retry_suppressed")) or delivery_status in {"blocked_429", "missed_window", "expired", "sent"}:
+        return True
+
+    # V172: the lifecycle loop may still hold a stale Firebase snapshot immediately after
+    # a panel was sent. Never recreate that Discord panel in the same runtime.
+    if _autoattendance_panel_already_completed(guild.id, activity_id):
+        return True
+
+    # V135: queue the panel instead of attempting the Discord REST call inline.
+    # This preserves the T-30/open -> spawn/close lifecycle while REST is available.
+    if not activity.get("panel_message_id"):
+        embed = build_raid_activity_embed(activity, [], closed=False)
+        view = RaidAttendanceView(activity_id)
+        if not _queue_autoattendance_panel(
+            guild,
+            activity,
+            summary_channel,
+            embed,
+            view,
+            content=get_notification_mentions(guild) or None,
+        ):
+            return False
+        await _persist_autoattendance_panel_state(
+            guild.id,
+            activity_id,
+            {
+                "panel_delivery_status": "queued",
+                "panel_delivery_queued_at": _attendance_now_iso(),
+            },
+        )
+
+    return True
+
+
+async def _weekly_guild_event_attendance_tick(now: datetime, root: dict) -> None:
+    """Create one Weekly Guild Events attendance panel on Wednesday/Sunday from 12:00-13:00."""
+    if now.weekday() not in {2, 6}:
+        return
+    open_dt = now.replace(
+        hour=WEEKLY_GUILD_EVENT_ATTENDANCE_OPEN_HOUR,
+        minute=WEEKLY_GUILD_EVENT_ATTENDANCE_OPEN_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    close_dt = now.replace(
+        hour=WEEKLY_GUILD_EVENT_ATTENDANCE_CLOSE_HOUR,
+        minute=WEEKLY_GUILD_EVENT_ATTENDANCE_CLOSE_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if not (open_dt <= now < close_dt):
+        return
+
+    activities = {}
+    # Normalize the per-guild snapshot from the same Firebase root already fetched by the lifecycle loop.
+    for guild in list(bot.guilds):
+        guild_root = root.get(str(guild.id), {}) if isinstance(root, dict) else {}
+        if not isinstance(guild_root, dict):
+            guild_root = {}
+        activity_id = f"weekly_guild_event_{now.strftime('%Y%m%d')}"
+        activity = guild_root.get(activity_id)
+        cfg = _attendance_config_snapshot(guild.id)
+        summary_id = cfg.get("summary_channel_id")
+        try:
+            summary_channel = guild.get_channel(int(summary_id)) if summary_id else None
+        except (TypeError, ValueError):
+            summary_channel = None
+        if not isinstance(summary_channel, discord.TextChannel):
+            continue
+
+        if not isinstance(activity, dict):
+            attack_dt = now.replace(hour=12, minute=30, second=0, microsecond=0)
+            activity = {
+                "activity_id": activity_id,
+                "guild_id": guild.id,
+                "boss_name": "Guild Siege",
+                "event_name": "Weekly Guild Events",
+                "event_type": "guild_siege",
+                "activity_date": now.strftime("%d/%m/%Y"),
+                "attack_time": "12:30",
+                "checkin_open": "12:00",
+                "checkin_close": "13:00",
+                "open_at": open_dt.isoformat(),
+                "close_at": close_dt.isoformat(),
+                "attack_at": attack_dt.isoformat(),
+                "status": "open",
+                "created_by": str(bot.user.id if bot.user else "SKYNET"),
+                "created_by_name": "SKYNET Weekly Guild Events",
+                "created_at": _attendance_now_iso(),
+                "panel_channel_id": int(summary_channel.id),
+                "panel_message_id": None,
+                "panel_delivery_status": "pending",
+                "panel_delivery_last_status": None,
+                "panel_delivery_last_attempt_at": None,
+                "summary_channel_id": int(summary_channel.id),
+                "participants": {},
+                "source": "weekly_guild_event",
+                "source_schedule_key": f"guild-siege:{now.weekday()}:12:30",
+                "source_event_date": now.strftime("%Y-%m-%d"),
+                "auto_generated": False,
+                "weekly_guild_event": True,
+            }
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        db.reference(_attendance_activity_path(guild.id, activity_id)).set,
+                        activity,
+                    ),
+                    timeout=8,
+                )
+            except Exception as exc:
+                print(
+                    f"⚠️ Weekly Guild Events Attendance Firebase create failed | guild={guild.name} | "
+                    f"activity={activity_id} | {exc!r}",
+                    flush=True,
+                )
+                continue
+            if isinstance(guild_root, dict):
+                guild_root[activity_id] = activity
+            print(
+                f"⚔️ WEEKLY GUILD EVENTS AUTO ATTENDANCE CREATED | guild={guild.name} | "
+                f"open=12:00 | event=12:30 | close=13:00 | activity={activity_id}",
+                flush=True,
+            )
+
+        _ensure_attendance_exact_close_task(guild.id, activity_id, activity.get("close_at"))
+        delivery_status = str(activity.get("panel_delivery_status") or "pending").strip().lower()
+        if bool(activity.get("panel_delivery_retry_suppressed")) or delivery_status in {"blocked_429", "missed_window", "expired", "sent"}:
+            continue
+        if _autoattendance_panel_already_completed(guild.id, activity_id):
+            continue
+        if not activity.get("panel_message_id"):
+            embed = build_raid_activity_embed(activity, [], closed=False)
+            view = RaidAttendanceView(activity_id)
+            if _queue_autoattendance_panel(
+                guild,
+                activity,
+                summary_channel,
+                embed,
+                view,
+                content=get_notification_mentions(guild) or None,
+            ):
+                await _persist_autoattendance_panel_state(
+                    guild.id,
+                    activity_id,
+                    {
+                        "panel_delivery_status": "queued",
+                        "panel_delivery_queued_at": _attendance_now_iso(),
+                    },
+                )
+
+
+async def _autoattendance_tick(now: datetime, root: dict) -> None:
+    """Evaluate boss_schedule as the single source of truth for Auto Attendance."""
+    with schedule_lock:
+        schedule_copy = {str(k): dict(v) for k, v in boss_schedule.items()}
+
+    if not schedule_copy:
+        return
+
+    for guild in list(bot.guilds):
+        if not _autoattendance_enabled_for_guild(guild.id):
+            continue
+
+        activities = root.get(str(guild.id), {}) if isinstance(root, dict) else {}
+        if not isinstance(activities, dict):
+            activities = {}
+
+        for boss_name, schedule in schedule_copy.items():
+            if not isinstance(schedule, dict):
+                continue
+            try:
+                await _autoattendance_find_or_create_for_schedule(
+                    guild, boss_name, schedule, activities, now
+                )
+            except Exception as e:
+                print(
+                    f"⚠️ Auto Attendance evaluation failed | guild={guild.name} | "
+                    f"boss={boss_name} | {e}",
+                    flush=True,
+                )
+
+
+@tasks.loop(seconds=30)
+async def library_boss_daily_rotation_loop():
+    """Rotate fixed 09:00/21:00 Library Boss rows independently of Attendance."""
+    try:
+        await ensure_library_boss_schedule_records()
+    except Exception as exc:
+        print(f"⚠️ Library Boss daily rotation loop failed safely: {exc!r}", flush=True)
+
+
+@tasks.loop(seconds=2)
+async def attendance_lifecycle_loop():
+    try:
+        root = await asyncio.wait_for(asyncio.to_thread(db.reference("raid_attendance").get), timeout=8)
+    except Exception as e:
+        print(f"⚠️ Attendance lifecycle Firebase read failed: {e}", flush=True)
+        return
+    if not isinstance(root, dict):
+        root = {}
+    now = datetime.now(TZ_THAI)
+
+    # Library Boss recurring rotation runs in its own 30-second loop so a delay in
+    # Auto Attendance cannot prevent the fixed 09:00/21:00 schedule from advancing.
+
+    # Auto Attendance must use the same in-memory boss_schedule loaded from Firebase.
+    try:
+        await _autoattendance_tick(now, root)
+    except Exception as e:
+        print(f"⚠️ Auto Attendance tick failed: {e}", flush=True)
+
+    # V185: Weekly Guild Events attendance is an isolated attendance activity and does
+    # not depend on the Boss Auto Attendance toggle or boss_schedule rows.
+    try:
+        await _weekly_guild_event_attendance_tick(now, root)
+    except Exception as e:
+        print(f"⚠️ Weekly Guild Events Attendance tick failed safely: {e!r}", flush=True)
+
+    for guild_id, activities in root.items():
+        try:
+            guild = bot.get_guild(int(guild_id))
+        except (TypeError, ValueError):
+            guild = None
+        if guild is None or not isinstance(activities, dict):
+            continue
+        for activity_id, activity in activities.items():
+            if not isinstance(activity, dict):
+                continue
+            status = str(activity.get("status") or "scheduled")
+            if status == "closed":
+                continue
+            open_dt = parse_to_thai_datetime(activity.get("open_at"))
+            close_dt = parse_to_thai_datetime(activity.get("close_at"))
+            if not open_dt or not close_dt:
+                continue
+            # V169: schedule the close locally at close_at. If already due, the task fires
+            # immediately; if not due, it sleeps until the exact deadline without polling Firebase.
+            _ensure_attendance_exact_close_task(guild.id, str(activity_id), close_dt)
+            if now >= open_dt and now < close_dt and status != "open":
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(guild.id, str(activity_id))).update, {"status": "open", "opened_at": _attendance_now_iso()}), timeout=8)
+                except Exception as e:
+                    print(f"⚠️ Attendance open state update failed: {guild.id}/{activity_id}: {e}", flush=True)
+
+
+@tasks.loop(minutes=5)
+async def attendance_monthly_report_loop():
+    now = datetime.now(TZ_THAI)
+    if now.day != 1 or now.hour == 0 and now.minute < 5:
+        return
+    first_this = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_last = first_this - timedelta(seconds=1)
+    month_key = prev_last.strftime("%Y-%m")
+    month_label = prev_last.strftime("%B %Y")
+    for guild in list(bot.guilds):
+        cfg = _attendance_config_snapshot(guild.id)
+        summary_id = cfg.get("summary_channel_id")
+        channel = guild.get_channel(int(summary_id)) if summary_id else None
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        sent_path = f"monthly_reports/{guild.id}/{month_key}"
+        try:
+            state = await asyncio.wait_for(asyncio.to_thread(db.reference(sent_path).get), timeout=8)
+        except Exception:
+            state = None
+        if isinstance(state, dict) and state.get("sent_at"):
+            continue
+        try:
+            activities = await asyncio.wait_for(asyncio.to_thread(db.reference(f"raid_attendance/{guild.id}").get), timeout=8)
+        except Exception as e:
+            print(f"⚠️ Monthly attendance read failed: {guild.name}: {e}", flush=True)
+            continue
+        events = []
+        unique = set()
+        total_checkins = 0
+        if isinstance(activities, dict):
+            for activity_id, activity in activities.items():
+                if not isinstance(activity, dict):
+                    continue
+                created = str(activity.get("created_at") or "")
+                attack_at = str(activity.get("attack_at") or created)
+                if not attack_at.startswith(month_key):
+                    continue
+                participants = activity.get("participants") if isinstance(activity.get("participants"), dict) else {}
+                checked = [p for p in participants.values() if isinstance(p, dict) and p.get("status") == "checked_in"]
+                total_checkins += len(checked)
+                for p in checked:
+                    unique.add(str(p.get("user_id") or ""))
+                events.append({"id": activity_id, "activity": activity, "checked": checked})
+        ranking = {}
+        for event in events:
+            for p in event["checked"]:
+                uid = str(p.get("user_id") or "")
+                if not uid:
+                    continue
+                row = ranking.setdefault(uid, {"name": p.get("display_name") or p.get("username") or uid, "count": 0})
+                row["count"] += 1
+        top = sorted(ranking.values(), key=lambda x: (-x["count"], str(x["name"]).lower()))[:15]
+        enabled = get_enabled_discord_notification_languages() or ["th"]
+        primary = enabled[0]
+        report_text = {
+            "th": f"📅 {month_label}\n⚔️ กิจกรรมทั้งหมด: **{len(events)}**\n👥 สมาชิกที่เข้าร่วม: **{len(unique)} คน**\n✅ เช็กชื่อรวม: **{total_checkins} ครั้ง**\n📈 ค่าเฉลี่ยต่อกิจกรรม: **{(total_checkins/len(events) if events else 0):.1f} คน**",
+            "en": f"📅 {month_label}\n⚔️ Total raids: **{len(events)}**\n👥 Unique members: **{len(unique)}**\n✅ Total check-ins: **{total_checkins}**\n📈 Average per raid: **{(total_checkins/len(events) if events else 0):.1f}**",
+            "ko": f"📅 {month_label}\n⚔️ 전체 레이드: **{len(events)}**\n👥 참여 회원: **{len(unique)}명**\n✅ 총 출석: **{total_checkins}회**\n📈 레이드당 평균: **{(total_checkins/len(events) if events else 0):.1f}명**",
+        }
+        titles = {"th": "📊 Boss Raid Attendance — รายงานประจำเดือน", "en": "📊 Boss Raid Attendance — Monthly Report", "ko": "📊 보스 레이드 출석 — 월간 보고서"}
+        embed = discord.Embed(title=titles[primary], color=discord.Color.gold(), timestamp=now)
+        for lang in enabled:
+            embed.add_field(name={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang], value=report_text[lang], inline=False)
+        rank_lines = [f"{idx}. {r['name']} — **{r['count']}**" for idx, r in enumerate(top, 1)] or ["-"]
+        embed.add_field(name={"th":"🏆 อันดับการเข้าร่วม","en":"🏆 Attendance Ranking","ko":"🏆 출석 순위"}[primary], value="\n".join(rank_lines), inline=False)
+        try:
+            result = await guarded_channel_send(channel, context=f"attendance:monthly:{month_key}", embed=embed, background=True)
+            if result is not None:
+                await asyncio.wait_for(asyncio.to_thread(db.reference(sent_path).set, {
+                    "guild_id": guild.id, "month": month_key, "month_label": month_label,
+                    "activity_count": len(events), "unique_members": len(unique),
+                    "total_checkins": total_checkins, "ranking": top, "sent_at": _attendance_now_iso()
+                }), timeout=8)
+                print(f"📊 Monthly Attendance report sent | guild={guild.name} | month={month_key}", flush=True)
+        except Exception as e:
+            print(f"⚠️ Monthly Attendance report send failed | guild={guild.name}: {e}", flush=True)
+
+
+@bot.tree.command(name="code", description="ประกาศ Code และ Drop Item ของบอส")
+@app_commands.describe(
+    boss_name="ชื่อบอส",
+    code="โค้ดสำหรับเช็คชื่อ (Code)",
+    drop_item="ไอเทมที่ดรอป (Drop Item)"
+)
+@has_allowed_role()
+async def code_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
+    """Original /attendance announcement flow, moved to /code so /attendance is attendance-only."""
+    await _safe_interaction_ack(interaction, ephemeral=False)
+
+    await refresh_discord_notification_languages()
+    enabled = get_enabled_discord_notification_languages() or ["th"]
+    primary = enabled[0]
+    title_map = {
+        "th": "📢 ประกาศ Code / Item ของบอส",
+        "en": "📢 Boss Code / Item Announcement",
+        "ko": "📢 보스 코드 / 아이템 공지",
+    }
+    embed = discord.Embed(title=title_map[primary], color=discord.Color.green(), timestamp=datetime.now(TZ_THAI))
+    labels = {
+        "th": ("👾 ชื่อบอส", "🔑 โค้ด (Code)", "🎁 ไอเทมดรอป"),
+        "en": ("👾 Boss", "🔑 Code", "🎁 Drop Item"),
+        "ko": ("👾 보스", "🔑 코드", "🎁 드롭 아이템"),
+    }
+    for lang in enabled:
+        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+        lb, lc, ld = labels[lang]
+        embed.add_field(name=f"{prefix} • {lb}", value=f"`{boss_name}`", inline=True)
+        embed.add_field(name=lc, value=f"**{code}**", inline=True)
+        embed.add_field(name=ld, value=f"`{drop_item}`", inline=False)
+    embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
+
+    await guarded_interaction_followup_send(
+        interaction, "interaction-followup", content="✅ ส่งประกาศ Code / Item สำเร็จ!", embed=embed
+    )
+
+    canonical_name = get_boss_canonical_name(boss_name)
+    spoken_name = get_boss_pronunciation(canonical_name)
+    spoken_th = f"ประกาศข้อมูลบอส {spoken_name} โค้ดคือ {code} ไอเทมที่ดรอปคือ {drop_item} ค่ะ"
+    spoken_en = f"Boss {boss_name}. The code is {code}. Drop item is {drop_item}."
+    spoken_ko = f"보스 {boss_name} 정보입니다. 코드는 {code} 이며, 드롭 아이템은 {drop_item} 입니다."
+    asyncio.create_task(speak_in_guild(interaction.guild, text_th=spoken_th, text_en=spoken_en, text_ko=spoken_ko))
+
+    if interaction.guild:
+        attendance_channel = discord.utils.get(interaction.guild.text_channels, name="boss-attendance")
+        if attendance_channel:
+            await refresh_discord_notification_languages()
+            enabled = get_enabled_discord_notification_languages() or ["th"]
+            primary = enabled[0]
+            log_embed = discord.Embed(
+                title=f"📝 Audit Log: {_translate_audit_action('ประกาศ Code / Item ของบอส', primary)}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(TZ_THAI),
+            )
+            labels = {
+                "th": ("ผู้ประกาศ", "ชื่อบอส", "โค้ด (Code)", "ไอเทมดรอป"),
+                "en": ("Announcer", "Boss", "Code", "Drop Item"),
+                "ko": ("공지자", "보스", "코드", "드롭 아이템"),
+            }
+            for lang in enabled:
+                prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+                la, lb, lc, ld = labels[lang]
+                log_embed.add_field(name=f"{prefix} • 👤 {la}", value=f"{interaction.user.mention} (`{interaction.user.name}`)", inline=False)
+                log_embed.add_field(name=f"👾 {lb}", value=f"`{boss_name}`", inline=True)
+                log_embed.add_field(name=f"🔑 {lc}", value=f"**{code}**", inline=True)
+                log_embed.add_field(name=f"🎁 {ld}", value=f"`{drop_item}`", inline=False)
+            log_embed.set_footer(text=f"User ID: {interaction.user.id}")
+            try:
+                await guarded_channel_send(attendance_channel, context="audit:boss-code", embed=log_embed)
+            except Exception as e:
+                print(f"❌ ส่ง Audit Log ใน boss-attendance ไม่สำเร็จ: {e}")
+
+
+@bot.tree.command(name="autoattendance", description="เปิดหรือปิดระบบ Auto Attendance ก่อนบอสเกิด 30 นาที")
+@app_commands.describe(enabled="True = เปิด Auto Attendance, False = ปิด Auto Attendance")
+async def autoattendance_command(interaction: discord.Interaction, enabled: bool):
+    """Admin/Server Owner control for automatic Boss Raid Attendance."""
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await _safe_interaction_send_message(
+            interaction,
+            "❌ คำสั่งนี้ใช้ได้เฉพาะภายใน Server เท่านั้น",
+            ephemeral=True,
+        )
+        return
+    if not is_guild_admin_or_owner(interaction.user):
+        await _safe_interaction_send_message(
+            interaction,
+            "❌ การเปิด/ปิด Auto Attendance อนุญาตเฉพาะ Admin หรือ Server Owner",
+            ephemeral=True,
+        )
+        return
+
+    guild = interaction.guild
+    guild_key = str(guild.id)
+    with schedule_lock:
+        current = dict(attendance_config.get(guild_key, {}) or {})
+
+    if not current.get("summary_channel_id"):
+        await _safe_interaction_send_message(
+            interaction,
+            "❌ ยังไม่ได้ตั้งห้องสรุป Attendance กรุณาใช้ `/set-notification` → `ตั้งห้องสรุป Attendance` ก่อน",
+            ephemeral=True,
+        )
+        return
+
+    current.update({
+        "guild_id": guild.id,
+        "autoattendance_enabled": bool(enabled),
+        "autoattendance_updated_by": str(interaction.user.id),
+        "autoattendance_updated_at": _attendance_now_iso(),
+    })
+    with schedule_lock:
+        attendance_config[guild_key] = current
+
+    await save_attendance_config()
+
+    state_text = "เปิดใช้งาน" if enabled else "ปิดใช้งาน"
+    await _safe_interaction_send_message(
+        interaction,
+        (
+            f"✅ Auto Attendance **{state_text}** แล้ว\n"
+            f"📚 ระบบจะอ้างอิงเวลาเกิดจาก Boss Schedule เดียวกับ Dashboard\n"
+            f"⏰ เปิดเช็คชื่อก่อนบอสเกิด **30 นาที** และปิดเมื่อถึงเวลาเกิด"
+        ),
+        ephemeral=True,
+    )
+    print(
+        f"⚙️ Auto Attendance {'ENABLED' if enabled else 'DISABLED'} | "
+        f"guild={guild.name} | by={interaction.user} | "
+        f"summary_channel={current.get('summary_channel_id')}",
+        flush=True,
+    )
+
+
+@bot.tree.command(name="attendance", description="สร้างและจัดการกิจกรรมเช็คชื่อการโจมตีบอส")
+@app_commands.describe(boss_name="ชื่อบอสสำหรับสร้างกิจกรรม Attendance")
+async def attendance_command(interaction: discord.Interaction, boss_name: str):
+    """Create a Boss Raid Attendance activity; creation is Admin/Server Owner only."""
+    if not interaction.guild or not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
+        await interaction.response.send_message(
+            "❌ การสร้างกิจกรรม Attendance อนุญาตเฉพาะ Admin หรือ Server Owner", ephemeral=True
+        )
+        return
+    try:
+        await interaction.response.send_modal(RaidAttendanceCreateModal(boss_name))
+    except Exception as e:
+        print(f"❌ เปิด Activity creation modal ไม่สำเร็จ: {e}", flush=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ ไม่สามารถเปิดแบบฟอร์มสร้างกิจกรรมได้ กรุณาลองใหม่", ephemeral=True)
+
+# ==========================================
+# 🚀 11. Run Bot Entry Point
+# ==========================================
+GATEWAY_PREFLIGHT_ENABLED = os.environ.get("ENABLE_GATEWAY_PREFLIGHT", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _probe_gateway_session_start_limit(token: str):
+    """Query Discord Gateway session-start metadata and preserve 429 details.
+
+    Discord recommends honoring Retry-After and rate-limit headers rather than hard-coding
+    retry timings. This preflight never performs IDENTIFY when the endpoint itself is limited.
+    """
+    url = "https://discord.com/api/v10/gateway/bot"
+    headers = {"Authorization": f"Bot {token}", "User-Agent": "SKYNET/1.0"}
+    timeout = aiohttp.ClientTimeout(total=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                data = await resp.json(content_type=None)
+                response_headers = {str(k): str(v) for k, v in resp.headers.items()}
+                if resp.status == 429:
+                    retry_after = 0.0
+                    raw_retry = response_headers.get("Retry-After") or response_headers.get("retry-after")
+                    if raw_retry is None and isinstance(data, dict):
+                        raw_retry = data.get("retry_after")
+                    try:
+                        retry_after = max(0.0, float(raw_retry or 0))
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                    scope = response_headers.get("X-RateLimit-Scope", "")
+                    is_global = str(response_headers.get("X-RateLimit-Global", "")).lower() == "true"
+                    print(
+                        f"⚠️ Gateway preflight HTTP 429 | retry_after={retry_after:.1f}s "
+                        f"| global={is_global} | scope={scope or '-'} | data={data}",
+                        flush=True,
+                    )
+                    if retry_after > 0:
+                        # Share the same cooldown state with REST notifications so the
+                        # rest of the process also stops making non-essential API calls.
+                        global discord_rest_rate_limited_until
+                        discord_rest_rate_limited_until = max(
+                            discord_rest_rate_limited_until, time.monotonic() + retry_after
+                        )
+                    return {
+                        "status": 429,
+                        "retry_after": retry_after,
+                        "global": is_global,
+                        "scope": scope,
+                    }
+                if resp.status != 200:
+                    print(f"⚠️ Gateway preflight HTTP {resp.status}: {data}", flush=True)
+                    return {"status": resp.status, "retry_after": 0.0, "global": False, "scope": ""}
+
+                limit = data.get("session_start_limit") or {}
+                remaining = int(limit.get("remaining", -1))
+                total = int(limit.get("total", -1))
+                reset_after_ms = int(limit.get("reset_after", 0) or 0)
+                max_concurrency = int(limit.get("max_concurrency", 0) or 0)
+                print(
+                    f"🔎 Gateway session limit | remaining={remaining}/{total} "
+                    f"reset_after={reset_after_ms}ms max_concurrency={max_concurrency}",
+                    flush=True,
+                )
+                return {
+                    "status": 200,
+                    "remaining": remaining,
+                    "total": total,
+                    "reset_after_ms": reset_after_ms,
+                    "max_concurrency": max_concurrency,
+                }
+    except Exception as e:
+        print(f"⚠️ Gateway preflight failed: {e}", flush=True)
+        return {"status": None, "error": str(e), "retry_after": 0.0}
+
+
+async def _gateway_rate_limit_sleep(reason: str, seconds: float, attempt: int):
+    """Wait without making Discord requests, while exposing a local retry countdown.
+
+    Important: this is the bot's next-retry timer, not a guaranteed Discord unblock timer.
+    An exact remote unblock ETA exists only when Discord provides Retry-After/retry_after.
+    """
+    delay = min(max(float(seconds or 0), 15.0), 3600.0)
+    deadline = time.monotonic() + delay
+    print(
+        f"⏸️ Gateway rate-limit cooldown | {reason} | next_retry_in={delay:.0f}s "
+        f"({delay/60:.1f}m) | attempt={attempt}",
+        flush=True,
+    )
+    last_reported = None
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            print("✅ Gateway retry timer reached; attempting Discord connection again", flush=True)
+            return
+        bucket = int(remaining // 60) if remaining >= 60 else int(remaining)
+        if bucket != last_reported:
+            if remaining >= 60:
+                print(f"⏳ Gateway retry countdown: ~{remaining/60:.1f}m remaining", flush=True)
+            else:
+                print(f"⏳ Gateway retry countdown: ~{remaining:.0f}s remaining", flush=True)
+            last_reported = bucket
+        await asyncio.sleep(min(60.0, remaining))
+
+
+def _gateway_429_diagnostics(exc: Exception) -> dict:
+    """Extract safe diagnostics from discord.py HTTPException without making a new request."""
+    info = {
+        "retry_after": 0.0,
+        "header_retry_after": 0.0,
+        "body_retry_after": 0.0,
+        "scope": "",
+        "global": False,
+        "reset_after": 0.0,
+        "reset": "",
+        "via": "",
+        "content_type": "",
+        "server": "",
+        "cf_ray": "",
+        "date": "",
+        "body_preview": "",
+    }
+
+    try:
+        value = float(getattr(exc, "retry_after", 0) or 0)
+        if value > 0:
+            info["retry_after"] = value
+    except (TypeError, ValueError):
+        pass
+
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        def _header(*names):
+            for name in names:
+                try:
+                    value = headers.get(name)
+                except Exception:
+                    value = None
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+            return ""
+
+        raw = _header("Retry-After", "retry-after")
+        try:
+            info["header_retry_after"] = max(0.0, float(raw)) if raw else 0.0
+        except (TypeError, ValueError):
+            pass
+        if info["retry_after"] <= 0 and info["header_retry_after"] > 0:
+            info["retry_after"] = info["header_retry_after"]
+
+        raw = _header("X-RateLimit-Reset-After", "X-Ratelimit-Reset-After")
+        try:
+            info["reset_after"] = max(0.0, float(raw)) if raw else 0.0
+        except (TypeError, ValueError):
+            pass
+        info["reset"] = _header("X-RateLimit-Reset", "X-Ratelimit-Reset")
+        info["scope"] = _header("X-RateLimit-Scope", "X-Ratelimit-Scope")
+        info["global"] = _header("X-RateLimit-Global", "X-Ratelimit-Global").lower() == "true"
+        info["via"] = _header("Via")
+        info["content_type"] = _header("Content-Type", "content-type")
+        info["server"] = _header("Server", "server")
+        info["cf_ray"] = _header("CF-RAY", "cf-ray")
+        info["date"] = _header("Date", "date")
+
+    data = getattr(exc, "text", None)
+    if data is None:
+        # discord.py's HTTPException exposes response/data, but attribute names vary by version.
+        data = getattr(exc, "data", None)
+    if isinstance(data, dict):
+        raw = data.get("retry_after")
+        try:
+            info["body_retry_after"] = max(0.0, float(raw)) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            pass
+        if info["retry_after"] <= 0 and info["body_retry_after"] > 0:
+            info["retry_after"] = info["body_retry_after"]
+        preview = data.get("message") or data
+    else:
+        preview = data
+    if preview is not None:
+        try:
+            info["body_preview"] = str(preview).replace("\n", " ")[:180]
+        except Exception:
+            info["body_preview"] = ""
+    return info
+
+
+async def _prepare_gateway_http_transport():
+    """Ensure discord.py HTTP transport can create a fresh ClientSession.
+
+    discord.py 2.6.x creates an aiohttp.ClientSession in HTTPClient.static_login().
+    When that session is closed, its owned TCP connector can also be closed. Reusing
+    the closed connector on the next static_login() can surface ``RuntimeError:
+    Session is closed`` even though the Bot itself reports is_closed() == False.
+    This helper only resets local HTTP transport state; it does not issue any Discord
+    request and therefore does not affect Discord rate limits.
+    """
+    http_client = getattr(bot, "http", None)
+    if http_client is None:
+        return
+
+    # Clear a previously closed aiohttp session first.
+    try:
+        clear_http = getattr(http_client, "clear", None)
+        if clear_http is not None:
+            clear_http()
+    except Exception as clear_exc:
+        print(f"⚠️ Failed to clear Discord HTTP session before startup: {clear_exc!r}", flush=True)
+
+    # If the connector was owned by discord.py and has already been closed,
+    # discard it so HTTPClient.static_login() creates a brand-new connector.
+    connector = getattr(http_client, "connector", None)
+    if connector is not None and getattr(connector, "closed", False):
+        try:
+            http_client.connector = discord.utils.MISSING
+            print("🧹 Reset closed Discord HTTP connector before Gateway startup", flush=True)
+        except Exception as connector_exc:
+            print(f"⚠️ Failed to reset Discord HTTP connector: {connector_exc!r}", flush=True)
+
+
+async def _cleanup_failed_gateway_transport(reason: str):
+    """Release a failed Gateway HTTP session and its owned connector safely.
+
+    This is local transport cleanup only. It does not perform any retry request and
+    does not bypass Discord rate limits. The connector is reset to discord.py's
+    MISSING sentinel so the next login gets a fresh TCP connector as well as a fresh
+    ClientSession.
+    """
+    http_client = getattr(bot, "http", None)
+    if http_client is None:
+        return
+
+    try:
+        close_http = getattr(http_client, "close", None)
+        if close_http is not None:
+            await close_http()
+    except Exception as close_exc:
+        print(f"⚠️ Failed to close Discord HTTP transport after {reason}: {close_exc!r}", flush=True)
+
+    # The discord.py HTTPClient connector is created lazily by static_login().
+    # After HTTPClient.close(), that connector may itself be closed because it is
+    # owned by the ClientSession. Reset it so the next static_login() does not reuse
+    # a closed connector and immediately raise ``Session is closed``.
+    try:
+        http_client.connector = discord.utils.MISSING
+    except Exception as connector_exc:
+        print(f"⚠️ Failed to reset Discord HTTP connector after {reason}: {connector_exc!r}", flush=True)
+
+    try:
+        clear_http = getattr(http_client, "clear", None)
+        if clear_http is not None:
+            clear_http()
+    except Exception as clear_exc:
+        print(f"⚠️ Failed to clear Discord HTTP session after {reason}: {clear_exc!r}", flush=True)
+
+    print(
+        f"🧹 Cleaned Discord HTTP session + connector after {reason}; client lifecycle reusable",
+        flush=True,
+    )
+
+
+def validate_runtime_integrity():
+    """Fail fast before Gateway startup if critical functions/commands were accidentally dropped."""
+    required_funcs = [
+        "boss_autocomplete", "get_notification_mentions", "save_boss_notification_flags",
+        "check_bf_notifications", "check_library_boss_notifications", "check_boss_notifications",
+        "update_live_embed", "check_auto_disconnect", "check_weekly_event_notifications", "boss_time_slash", "generate_boss_time_summary",
+        "inotiawar_command", "_weekly_guild_event_attendance_tick",
+        "_queue_weekly_event_public_notifications", "queue_discord_user_weekly_event_notifications",
+        "flush_pending_weekly_event_rest_notifications_once", "flush_pending_weekly_event_dms_once",
+    ]
+    missing = [name for name in required_funcs if not callable(globals().get(name))]
+    if missing:
+        raise RuntimeError("V46 integrity check failed; missing functions: " + ", ".join(missing))
+    direct = [cmd.name for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Command)]
+    if len(direct) != 20:
+        raise RuntimeError(f"V185 integrity check failed; expected 20 direct slash commands, found {len(direct)}")
+    group = next((cmd for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Group) and cmd.name == "add"), None)
+    if group is None or not any(sub.name == "boss" for sub in group.commands):
+        raise RuntimeError("V79 integrity check failed; /add boss subcommand missing")
+    print("✅ V185 integrity check passed | 20 direct + /add boss = 21 command paths | Weekly Guild Events enabled", flush=True)
+
+
+async def run_bot_with_backoff(token: str):
+    """Single Gateway controller with safe HTTP/session lifecycle recovery and 429 diagnostics."""
+    global is_bot_ready
+    if getattr(run_bot_with_backoff, "_active", False):
+        print("⚠️ Discord runner already active — skip duplicate session start", flush=True)
+        return
+
+    run_bot_with_backoff._active = True
+    gateway_failure_attempt = 0
+    try:
+        while True:
+            # Never start a new Discord Gateway HTTP session while a persisted
+            # temporary API restriction is still active. This is especially
+            # important during Render zero-downtime deploys, where a new process
+            # can start while the previous process has already triggered a Discord
+            # temporary restriction. Waiting here performs no Discord request.
+            await wait_for_discord_rest_startup_gate(context="startup:gateway")
+            await _prepare_gateway_http_transport()
+
+            if GATEWAY_PREFLIGHT_ENABLED:
+                limit_info = await _probe_gateway_session_start_limit(token)
+                if limit_info.get("status") == 429:
+                    gateway_failure_attempt += 1
+                    retry_after = float(limit_info.get("retry_after") or 0)
+                    fallback = min(900.0 * (2 ** max(0, gateway_failure_attempt - 1)), 3600.0)
+                    delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
+                    await _gateway_rate_limit_sleep("preflight HTTP 429", delay, gateway_failure_attempt)
+                    continue
+                if limit_info.get("status") != 200:
+                    gateway_failure_attempt += 1
+                    delay = min(30.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                    await _gateway_rate_limit_sleep("preflight unavailable", delay, gateway_failure_attempt)
+                    continue
+                remaining = int(limit_info.get("remaining", -1))
+                if remaining == 0:
+                    gateway_failure_attempt += 1
+                    reset_after = max(0.0, float(limit_info.get("reset_after_ms", 0)) / 1000.0)
+                    delay = max(60.0, reset_after + 2.0)
+                    await _gateway_rate_limit_sleep("IDENTIFY quota exhausted", delay, gateway_failure_attempt)
+                    continue
+            else:
+                print("ℹ️ Gateway preflight disabled (default) — starting discord.py Gateway directly", flush=True)
+
+            print("🔌 กำลังเชื่อมต่อ Discord Gateway...", flush=True)
+            is_bot_ready = False
+            try:
+                mark_gateway_recovery_attempt()
+            except Exception as exc:
+                print(f"⚠️ Gateway recovery-attempt marker failed safely: {exc!r}", flush=True)
+
+            try:
+                await bot.start(token, reconnect=True)
+
+            except discord.HTTPException as e:
+                is_bot_ready = False
+                status = getattr(e, "status", None)
+                if status == 429:
+                    gateway_failure_attempt += 1
+                    diag = _gateway_429_diagnostics(e)
+                    retry_after = float(diag.get("retry_after") or 0)
+
+                    # If Discord exposes a concrete Retry-After, honor it. If it exposes
+                    # only Cloudflare-style 429 text/headers, no public endpoint exists
+                    # that can reveal the exact remaining ban duration without another
+                    # request, and making probe requests would worsen the restriction.
+                    if retry_after > 0:
+                        delay = retry_after + 2.0
+                        timing_source = "Discord Retry-After"
+                    elif diag.get("reset_after", 0) > 0:
+                        delay = float(diag["reset_after"]) + 2.0
+                        timing_source = "X-RateLimit-Reset-After"
+                    else:
+                        delay = min(900.0 * (2 ** max(0, gateway_failure_attempt - 1)), 3600.0)
+                        timing_source = "local fallback (Discord gave no usable timer)"
+
+                    print(
+                        "🛑 Discord Gateway startup HTTP 429 | "
+                        f"retry_after={retry_after:.3f}s | "
+                        f"scope={diag.get('scope') or '-'} | "
+                        f"global={bool(diag.get('global'))} | "
+                        f"reset_after={float(diag.get('reset_after') or 0):.3f}s | "
+                        f"timing_source={timing_source}",
+                        flush=True,
+                    )
+                    header_bits = []
+                    for key in ("via", "server", "cf_ray", "date", "content_type"):
+                        value = diag.get(key)
+                        if value:
+                            header_bits.append(f"{key}={value}")
+                    if header_bits:
+                        print("🔎 Discord 429 headers | " + " | ".join(header_bits), flush=True)
+                    if diag.get("body_preview"):
+                        print(f"🔎 Discord 429 body | {diag['body_preview']}", flush=True)
+
+                    guard_delay = 0.0
+                    try:
+                        guard_delay = float(
+                            _apply_discord_rest_429(
+                                e,
+                                context="gateway:startup-429",
+                                source="GATEWAY",
+                            )
+                            or 0.0
+                        )
+                    except Exception as breaker_exc:
+                        print(f"⚠️ Failed to persist Gateway 429 into central REST breaker: {breaker_exc!r}", flush=True)
+
+                    # The central Discord guard may deliberately impose a longer
+                    # local no-HTTP recovery hold for repeated temporary 429s.
+                    # Use that same delay for the Gateway controller so the
+                    # countdown does not advertise an earlier retry that the
+                    # startup gate will reject anyway.
+                    delay = max(delay, guard_delay)
+                    clear_gateway_recovery_attempt()
+                    await _cleanup_failed_gateway_transport("startup 429")
+                    await _gateway_rate_limit_sleep(
+                        f"Gateway startup 429 ({timing_source}; guarded backoff)",
+                        delay,
+                        gateway_failure_attempt,
+                    )
+                    continue
+
+                print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
+                clear_gateway_recovery_attempt()
+                gateway_failure_attempt += 1
+                await _cleanup_failed_gateway_transport("startup HTTP error")
+                delay = min(30.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                await _gateway_rate_limit_sleep("Gateway HTTP error", delay, gateway_failure_attempt)
+                continue
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                is_bot_ready = False
+                gateway_failure_attempt += 1
+                print(f"⚠️ Discord connection error: {e}", flush=True)
+                clear_gateway_recovery_attempt()
+                await _cleanup_failed_gateway_transport("connection error")
+                delay = min(30.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                await _gateway_rate_limit_sleep("Gateway connection error", delay, gateway_failure_attempt)
+                continue
+
+            except RuntimeError as e:
+                is_bot_ready = False
+                text = str(e)
+                if "Session is closed" in text or "Client is closed" in text:
+                    gateway_failure_attempt += 1
+                    print(f"⚠️ Discord local session state invalid: {e}", flush=True)
+                    clear_gateway_recovery_attempt()
+                    await _cleanup_failed_gateway_transport("closed-session error")
+                    delay = min(60.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                    await _gateway_rate_limit_sleep("local Gateway session recovered", delay, gateway_failure_attempt)
+                    continue
+                await _cleanup_failed_gateway_transport("unhandled runtime error")
+                raise
+
+            # If start() returns after a real connected session ended, allow discord.py
+            # to settle before reconnecting. A successful session clears the startup
+            # failure counter so a later independent outage starts at the base backoff.
+            is_bot_ready = False
+            gateway_failure_attempt = 0
+            print("⚠️ Discord Gateway session ended — re-checking Gateway after 15s", flush=True)
+            await asyncio.sleep(15)
+
+    finally:
+        run_bot_with_backoff._active = False
+
+
+# -----------------------------------------------------------------------------
+# V38 PATCH INTEGRITY CHECK
+# Keep this check deliberately narrow: it only verifies that the handlers and
+# notification tasks required by the existing bot architecture still exist.
+# It does not modify runtime behavior or feature logic.
+# -----------------------------------------------------------------------------
+REQUIRED_PATCH_FUNCTIONS = (
+    "boss_autocomplete",
+    "get_notification_mentions",
+    "save_boss_notification_flags",
+    "check_bf_notifications",
+    "check_library_boss_notifications",
+    "check_boss_notifications",
+    "update_live_embed",
+    "check_auto_disconnect",
+    "check_weekly_event_notifications",
+    "inotiawar_command",
+)
+
+EXPECTED_SLASH_COMMANDS = {
+    "add boss",
+    "attendance",
+    "autoattendance",
+    "code",
+    "delboss",
+    "disconnect",
+    "join",
+    "kill",
+    "leave",
+    "notice",
+    "notify",
+    "panel",
+    "ppl",
+    "setlive",
+    "set-notification",
+    "setvoice",
+    "status",
+    "time",
+    "tts",
+    "vip",
+    "inotiawar",
+}
+
+
+def _collect_registered_command_paths():
+    paths = set()
+    try:
+        for command in bot.tree.get_commands():
+            if isinstance(command, app_commands.Group):
+                children = getattr(command, "commands", []) or []
+                if children:
+                    for child in children:
+                        paths.add(f"{command.name} {child.name}")
+                else:
+                    paths.add(command.name)
+            else:
+                paths.add(command.name)
+    except Exception as exc:
+        print(f"⚠️ V38 command integrity check skipped: {exc!r}")
+    return paths
+
+
+def _run_v38_integrity_check():
+    missing = [name for name in REQUIRED_PATCH_FUNCTIONS if name not in globals()]
+    if missing:
+        raise RuntimeError(
+            "V38 integrity failure: required functions missing: " + ", ".join(missing)
+        )
+
+    command_paths = _collect_registered_command_paths()
+    if command_paths:
+        missing_commands = sorted(EXPECTED_SLASH_COMMANDS - command_paths)
+        unexpected_commands = sorted(command_paths - EXPECTED_SLASH_COMMANDS)
+        if missing_commands or unexpected_commands:
+            raise RuntimeError(
+                "V38 integrity failure: command set mismatch | "
+                f"missing={missing_commands} unexpected={unexpected_commands} "
+                f"actual={sorted(command_paths)}"
+            )
+        print(
+            f"✅ V38 integrity check passed | functions={len(REQUIRED_PATCH_FUNCTIONS)} "
+            f"slash_commands={len(command_paths)}"
+        , flush=True)
+    else:
+        raise RuntimeError("V38 integrity failure: no slash commands registered")
+
+
+_run_v38_integrity_check()
+
+
+
+def _run_v47_command_integrity_check():
+    required = [
+        "boss_autocomplete",
+        "generate_boss_time_summary",
+        "get_notification_mentions",
+        "save_boss_notification_flags",
+        "check_bf_notifications",
+        "check_library_boss_notifications",
+        "check_boss_notifications",
+        "update_live_embed",
+        "check_auto_disconnect",
+        "check_weekly_event_notifications",
+        "inotiawar_command",
+        "boss_time_slash",
+        "add_boss",
+    ]
+    missing = [name for name in required if name not in globals()]
+    direct_names = []
+    try:
+        direct_names = sorted(
+            cmd.name for cmd in bot.tree.get_commands()
+            if isinstance(cmd, app_commands.Command)
+        )
+    except Exception:
+        direct_names = []
+    if missing:
+        print(f"❌ V50 integrity failure | missing symbols: {missing}", flush=True)
+        raise RuntimeError(f"V50 integrity failure: {missing}")
+    if len(direct_names) != 20:
+        print(f"⚠️ V183 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
+    else:
+        print(
+            f"✅ V183 command integrity check passed | 20 direct + /add boss = 21 command paths | "
+            f"direct={', '.join(direct_names)}",
+            flush=True,
+        )
+
+
+_run_v47_command_integrity_check()
+
+if __name__ == "__main__":
+    if SKYNET_RUNTIME_ROLE == "web":
+        keep_alive()
+        print("🌐 SKYNET web runtime active | Discord Gateway/REST disabled", flush=True)
+        try:
+            asyncio.run(asyncio.Event().wait())
+        except KeyboardInterrupt:
+            print("🛑 SKYNET web runtime stopped", flush=True)
+    else:
+        TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
+        if not TOKEN:
+            raise RuntimeError("SKYNET_RUNTIME_ROLE=bot requires DISCORD_TOKEN")
+        try:
+            asyncio.run(run_bot_with_backoff(TOKEN))
+        except KeyboardInterrupt:
+            print("🛑 หยุดบอทแล้ว", flush=True)
