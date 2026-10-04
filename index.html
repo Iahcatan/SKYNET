@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V185_WEEKLY_EVENTS_DM_ROLE_ATTENDANCE_COUNTDOWN_FIX_2026-10-04 | BASE=V184_INOTIAWAR_1105_1110_MESSAGE_FIX_2026-10-04 -->
+    <!-- V186_WEEKLY_EVENTS_TIMEZONE_ATTENDANCE_OPEN_1230_FIX_2026-10-04 | BASE=V185_WEEKLY_EVENTS_DM_ROLE_ATTENDANCE_COUNTDOWN_FIX_2026-10-04 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -3538,6 +3538,22 @@
             }
         }
 
+        // V186: Convert the fixed Thailand weekly event time to the dashboard timezone.
+        // The time cell contains only the converted clock time; no timezone suffix is appended.
+        function formatWeeklyTime(date) {
+            let tz = currentTz || DASHBOARD_DEFAULT_TZ;
+            if (tz === 'auto') {
+                try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || DASHBOARD_DEFAULT_TZ; } catch (_) { tz = DASHBOARD_DEFAULT_TZ; }
+            }
+            try {
+                return new Intl.DateTimeFormat(currentLang === 'th' ? 'th-TH' : currentLang === 'ko' ? 'ko-KR' : 'en-US', {
+                    timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false
+                }).format(date);
+            } catch (_) {
+                return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+            }
+        }
+
         function formatWeeklyCountdown(diffMs) {
             if (diffMs <= 0) return TRANSLATIONS[currentLang].weeklyNow;
             let sec = Math.floor(diffMs / 1000);
@@ -3573,7 +3589,7 @@
                     tr.innerHTML = `
                         <td class="fw-bold text-primary">${escapeHtml(t.guildSiegeName)}</td>
                         <td>${escapeHtml(t[row.dayKey])}</td>
-                        <td class="text-info">12:30 (TH)</td>
+                        <td class="text-info"><span class="weekly-time-value" data-weekly-time-index="${index}"></span></td>
                         <td><span class="weekly-next-value" data-weekly-next-index="${index}"></span></td>
                         <td class="fw-bold"><span class="weekly-countdown-value" data-weekly-countdown-index="${index}"></span></td>
                     `;
@@ -3584,8 +3600,10 @@
 
             WEEKLY_GUILD_SIEGE_ROWS.forEach((row, index) => {
                 const next = getNextWeeklyOccurrence(row.weekday, row.hour, row.minute, now);
+                const timeEl = body.querySelector(`[data-weekly-time-index="${index}"]`);
                 const nextEl = body.querySelector(`[data-weekly-next-index="${index}"]`);
                 const countdownEl = body.querySelector(`[data-weekly-countdown-index="${index}"]`);
+                if (timeEl) timeEl.textContent = formatWeeklyTime(next);
                 if (nextEl) nextEl.textContent = formatWeeklyDateTime(next);
                 if (countdownEl) countdownEl.textContent = formatWeeklyCountdown(next.getTime() - now.getTime());
             });
