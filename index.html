@@ -9,7 +9,7 @@
     <meta name="apple-mobile-web-app-title" content="SKYNET 2.0">
     <link rel="manifest" href="/SKYNET/manifest.json">
     <title>Boss Timer Dashboard</title>
-    <!-- V202_WEBPUSH_WORKER_ORIGIN_AND_ROOT_HEALTH_FIX_2026-10-09 | BASE=V201_DASHBOARD_ORIGIN_MIGRATION_FIX_2026-10-09 -->
+    <!-- V203_WAITRESS_QUEUE_AND_SAFE_MIGRATION_FIX_2026-10-09 | BASE=V202_WEBPUSH_WORKER_ORIGIN_AND_ROOT_HEALTH_FIX_2026-10-09 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
     
@@ -2777,7 +2777,7 @@
 
         async function registerDashboardServiceWorker() {
             if (!('serviceWorker' in navigator)) throw new Error('Browser นี้ไม่รองรับ Service Worker');
-            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js?v=v202', window.location.origin).toString();
+            const swUrl = new URL('/SKYNET/firebase-messaging-sw.js?v=v203', window.location.origin).toString();
             webPushRegistration = await navigator.serviceWorker.register(swUrl, { scope: '/SKYNET/', updateViaCache: 'none' });
             await navigator.serviceWorker.ready;
             return webPushRegistration;
