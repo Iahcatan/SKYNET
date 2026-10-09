@@ -1,10 +1,11 @@
-// SKYNET 2.0 FCM + iPhone Web Push Service Worker — V110
+// SKYNET 2.0 FCM + iPhone Web Push Service Worker — V202
 // Firebase Messaging must be initialized in the service worker for background/closed-page handling.
 
 importScripts('https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.8.0/firebase-messaging-compat.js');
 
-const FIREBASE_CONFIG_URL = 'https://bosstimer-ry18.onrender.com/api/firebase-config.json';
+// Use the active Ohio Render backend, not the retired bosstimer-ry18 service.
+const FIREBASE_CONFIG_URL = 'https://bosstimer-2.onrender.com/api/firebase-config.json';
 const DEFAULT_URL = 'https://iahcatan.github.io/SKYNET/';
 
 function handleBackgroundPayload(payload) {
@@ -38,8 +39,8 @@ const firebaseMessagingReady = fetch(FIREBASE_CONFIG_URL, { cache: 'no-store' })
     firebase.initializeApp(config);
     const messaging = firebase.messaging();
     messaging.onBackgroundMessage((payload) => {
-      // V113: Firebase automatically displays notification payloads in background.
-      // Do not call showNotification again or Android/Chrome can receive duplicates.
+      // Standard FCM notification payloads are displayed automatically by Firebase.
+      // Do not call showNotification again for those payloads or Android/Chrome may duplicate them.
       if (isStandardSkyNetWebPushPayload(payload)) return;
       if (payload && payload.notification) return;
       return handleBackgroundPayload(payload);
@@ -51,7 +52,7 @@ const firebaseMessagingReady = fetch(FIREBASE_CONFIG_URL, { cache: 'no-store' })
     return false;
   });
 
-// Fallback for a raw push event if it arrives before the Firebase Messaging handler is ready.
+// Fallback for a raw push event if it arrives before Firebase Messaging initializes.
 self.addEventListener('push', (event) => {
   if (!event.data) return;
   event.waitUntil((async () => {
