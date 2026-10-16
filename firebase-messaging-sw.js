@@ -1,3 +1,4 @@
+// V210_DISCORD_429_DIAGNOSTIC_HARDENING_2026-10-16 | BASE=V209_EDGE_TTS_403_CIRCUIT_BREAKER_BF_PREWARM_DEDUP_FIX_2026-10-13
 // SKYNET 2.0 FCM + iPhone Web Push Service Worker — V207
 // Firebase Messaging must be initialized in the service worker for background/closed-page handling.
 
